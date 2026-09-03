@@ -1,0 +1,22 @@
+# Checklist de Produção
+
+- [ ] Domínio e DNS
+- [ ] TLS válido
+- [ ] Firewall/portas mínimas
+- [ ] `.env.production` fora do Git
+- [ ] DB secret fora do Git
+- [ ] Redis password configurada
+- [ ] Mercado Pago produção configurado no servidor
+- [ ] Webhook HTTPS configurado
+- [ ] SMTP configurado
+- [ ] Backup diário configurado
+- [ ] Restauração testada
+- [ ] Logs centralizados
+- [ ] Alertas de erro/indisponibilidade
+- [ ] Health checks funcionando
+- [ ] Alembic `head` validado
+- [ ] Smoke test aprovado
+- [ ] Android release assinado
+- [ ] AAB testado
+- [ ] Política de privacidade/termos publicados
+- [ ] Revisão jurídica/regulatória aprovada

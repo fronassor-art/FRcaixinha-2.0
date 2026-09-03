@@ -1,0 +1,7 @@
+[Unit]
+Description=Daily FRcaixinha PostgreSQL backup
+[Timer]
+OnCalendar=*-*-* 02:30:00
+Persistent=true
+[Install]
+WantedBy=timers.target

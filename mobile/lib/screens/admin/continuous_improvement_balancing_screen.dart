@@ -1,0 +1,10 @@
+import 'package:flutter/material.dart';
+import '../../services/api_client.dart';
+import '../../services/session.dart';
+
+class ContinuousImprovementBalancingScreen extends StatefulWidget { const ContinuousImprovementBalancingScreen({super.key}); @override State<ContinuousImprovementBalancingScreen> createState()=>_State(); }
+class _State extends State<ContinuousImprovementBalancingScreen>{ final api=ApiClient(); Map<String,dynamic>? data; String? error;
+ Future<void> load() async { api.token=await Session.getToken(); try{data=await api.get('/admin/continuous-improvement-balancing');error=null;}catch(e){error=e.toString();} if(mounted)setState((){}); }
+ @override void initState(){super.initState();load();}
+ @override Widget build(BuildContext context){final cap=(data?['capacity'] as Map?)?.cast<String,dynamic>();final assignments=(data?['assignments'] as List?)??[];final unassigned=(data?['unassigned'] as List?)??[];return Scaffold(appBar:AppBar(title:const Text('Balanceamento da Fila')),body:RefreshIndicator(onRefresh:load,child:ListView(padding:const EdgeInsets.all(12),children:[if(error!=null)Text(error!),if(data!=null)...[Card(child:ListTile(title:Text('Status: ${data!['status']}'),subtitle:Text('Administradores: ${cap?['administrators']??0} | Carga: ${cap?['active_load']??0}/${cap?['total_capacity']??0}'))),Card(child:ListTile(title:Text('Recomendações distribuídas: ${assignments.length}'),subtitle:Text('Sem capacidade/conflito: ${unassigned.length}'))),...assignments.take(20).map((x){final m=(x as Map).cast<String,dynamic>();return Card(child:ListTile(title:Text('${m['priority']} — #${m['recommendation_id']}'),subtitle:Text('${m['decision']} | responsável: ${m['assigned_to']??'-'} | ${m['rationale']}'));}),if(unassigned.isNotEmpty)const Padding(padding:EdgeInsets.only(top:12),child:Text('Itens sem distribuição',style:TextStyle(fontWeight:FontWeight.bold))),...unassigned.take(20).map((x)=>ListTile(dense:true,title:Text('Recomendação #${x['recommendation_id']}'),subtitle:Text('${x['priority']} — ${x['reason']}')))],if(data==null&&error==null)const Center(child:CircularProgressIndicator())])));}
+}

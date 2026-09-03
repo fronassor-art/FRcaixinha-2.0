@@ -1,0 +1,14 @@
+import 'dart:convert';
+import 'package:flutter/material.dart';
+import '../services/api_client.dart';
+import '../services/session.dart';
+
+class PrivacyCenterScreen extends StatefulWidget { const PrivacyCenterScreen({super.key}); @override State<PrivacyCenterScreen> createState()=>_PrivacyCenterScreenState(); }
+class _PrivacyCenterScreenState extends State<PrivacyCenterScreen>{
+  final api=ApiClient(); bool loading=true; List<dynamic> requests=[]; Map<String,dynamic>? exportData; String? error;
+  Future<void> load() async { api.token=await Session.getToken(); try { final r=await api.get('/privacy/requests'); if(mounted)setState(()=>requests=r['items']??[]); } catch(e){if(mounted)setState(()=>error=e.toString());} finally{if(mounted)setState(()=>loading=false);} }
+  Future<void> exportDataNow() async { try { final d=await api.get('/privacy/export'); if(mounted)setState(()=>exportData=d); } catch(e){if(mounted)ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text(e.toString())));} }
+  Future<void> request(String type) async { try { await api.post('/privacy/requests', {'request_type':type,'reason':'Solicitação feita pelo aplicativo'}); await load(); if(mounted)ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('Solicitação registrada.'))); } catch(e){if(mounted)ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text(e.toString())));} }
+  @override void initState(){super.initState();load();}
+  @override Widget build(BuildContext context)=>Scaffold(appBar:AppBar(title:const Text('Privacidade e LGPD'),actions:[IconButton(onPressed:load,icon:const Icon(Icons.refresh))]),body:loading?const Center(child:CircularProgressIndicator()):ListView(padding:const EdgeInsets.all(16),children:[if(error!=null)Text(error!),Card(child:ListTile(leading:const Icon(Icons.download_outlined),title:const Text('Meus dados'),subtitle:const Text('Consultar os dados pessoais e financeiros associados à sua conta.'),trailing:const Icon(Icons.chevron_right),onTap:exportDataNow)),if(exportData!=null)Card(child:Padding(padding:const EdgeInsets.all(12),child:Text(const JsonEncoder.withIndent('  ').convert(exportData)))),Card(child:ListTile(leading:const Icon(Icons.verified_user_outlined),title:const Text('Solicitar atendimento de privacidade'),subtitle:const Text('Registre uma solicitação para análise administrativa.'),onTap:()=>request('ACCESS'))),Card(child:ListTile(leading:const Icon(Icons.person_off_outlined),title:const Text('Solicitar anonimização'),subtitle:const Text('A solicitação será analisada antes de qualquer alteração.'),onTap:()=>request('ANONYMIZE'))),const SizedBox(height:8),Text('Minhas solicitações',style:Theme.of(context).textTheme.titleLarge),...requests.map((r)=>ListTile(title:Text('${r['type']} — ${r['status']}'),subtitle:Text(r['requested_at']??''))) ]);
+}

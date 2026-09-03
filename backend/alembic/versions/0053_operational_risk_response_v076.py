@@ -1,0 +1,9 @@
+from alembic import op
+import sqlalchemy as sa
+revision='0053_operational_risk_response_v076'; down_revision='0052_operational_risk_alerts_v075'; branch_labels=None; depends_on=None
+def upgrade():
+ op.create_table('operational_risk_response_plans',sa.Column('id',sa.Integer(),primary_key=True),sa.Column('alert_id',sa.Integer(),sa.ForeignKey('operational_risk_alerts.id'),nullable=False),sa.Column('status',sa.String(30),nullable=False),sa.Column('priority',sa.String(20),nullable=False),sa.Column('assigned_to',sa.Integer(),sa.ForeignKey('users.id'),nullable=True),sa.Column('workflow_task_id',sa.Integer(),sa.ForeignKey('operational_workflow_tasks.id'),nullable=True),sa.Column('due_at',sa.DateTime(timezone=True),nullable=True),sa.Column('plan',sa.Text(),nullable=False),sa.Column('evidence_note',sa.Text(),nullable=True),sa.Column('verified_by',sa.Integer(),sa.ForeignKey('users.id'),nullable=True),sa.Column('verified_at',sa.DateTime(timezone=True),nullable=True),sa.Column('resolution',sa.Text(),nullable=True),sa.Column('integrity_hash',sa.String(64),nullable=False),sa.Column('created_at',sa.DateTime(timezone=True),nullable=False),sa.Column('updated_at',sa.DateTime(timezone=True),nullable=False),sa.UniqueConstraint('alert_id',name='uq_risk_response_alert'))
+ for n,c in [('ix_risk_response_status','status'),('ix_risk_response_priority','priority'),('ix_risk_response_assigned','assigned_to'),('ix_risk_response_task','workflow_task_id'),('ix_risk_response_created','created_at'),('ix_risk_response_updated','updated_at')]: op.create_index(n,'operational_risk_response_plans',[c])
+def downgrade():
+ for n in ['ix_risk_response_updated','ix_risk_response_created','ix_risk_response_task','ix_risk_response_assigned','ix_risk_response_priority','ix_risk_response_status']: op.drop_index(n,table_name='operational_risk_response_plans')
+ op.drop_table('operational_risk_response_plans')

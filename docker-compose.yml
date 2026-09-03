@@ -1,0 +1,65 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: frcaixinha
+      POSTGRES_USER: frcaixinha
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-CHANGE_ME_DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U frcaixinha -d frcaixinha"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build: ./backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://frcaixinha:${POSTGRES_PASSWORD:-CHANGE_ME_DB_PASSWORD}@db:5432/frcaixinha
+      REDIS_URL: redis://redis:6379/0
+      WORKFLOW_EVIDENCE_STORAGE_ROOT: /code/data/workflow-evidence
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    volumes:
+      - workflow_evidence:/code/data/workflow-evidence
+
+  worker:
+    build: ./backend
+    restart: unless-stopped
+    command: ["python", "-m", "app.worker.main"]
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://frcaixinha:${POSTGRES_PASSWORD:-CHANGE_ME_DB_PASSWORD}@db:5432/frcaixinha
+      REDIS_URL: redis://redis:6379/0
+      WORKFLOW_EVIDENCE_STORAGE_ROOT: /code/data/workflow-evidence
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - workflow_evidence:/code/data/workflow-evidence
+
+volumes:
+  postgres_data:
+  workflow_evidence:
