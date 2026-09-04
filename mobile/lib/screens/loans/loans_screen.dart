@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:provider/provider.dart';
 import '../../app.dart';
 
 class LoansScreen extends StatefulWidget { const LoansScreen({super.key}); @override State<LoansScreen> createState()=>_LoansScreenState(); }
