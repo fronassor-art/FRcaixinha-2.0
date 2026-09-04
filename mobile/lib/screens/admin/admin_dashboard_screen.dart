@@ -26,7 +26,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     if (mounted) setState(() {});
   }
 
-  String m(dynamic v) => 'R$ ${v ?? '0.00'}';
+  String m(dynamic v) => "R\$ ${v ?? '0.00'}";
   @override Widget build(BuildContext context) {
     final d = data;
     return Scaffold(
