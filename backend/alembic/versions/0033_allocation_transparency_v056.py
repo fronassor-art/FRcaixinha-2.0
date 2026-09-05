@@ -19,7 +19,7 @@ def upgrade():
         sa.Column('generated_by', sa.Integer(), sa.ForeignKey('users.id'), nullable=True),
         sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
     )
-    op.create_index('ix_allocation_transparency_snapshots_resource_allocation_snapshot_id', 'allocation_transparency_snapshots', ['resource_allocation_snapshot_id'], unique=True)
+    op.create_index('ix_alloc_transparency_resource_snapshot', 'allocation_transparency_snapshots', ['resource_allocation_snapshot_id'], unique=True)
     op.create_index('ix_allocation_transparency_snapshots_group_id', 'allocation_transparency_snapshots', ['group_id'])
     op.create_index('ix_allocation_transparency_snapshots_explanation_hash', 'allocation_transparency_snapshots', ['explanation_hash'], unique=True)
     op.create_index('ix_allocation_transparency_snapshots_created_at', 'allocation_transparency_snapshots', ['created_at'])
@@ -28,5 +28,5 @@ def downgrade():
     op.drop_index('ix_allocation_transparency_snapshots_created_at', table_name='allocation_transparency_snapshots')
     op.drop_index('ix_allocation_transparency_snapshots_explanation_hash', table_name='allocation_transparency_snapshots')
     op.drop_index('ix_allocation_transparency_snapshots_group_id', table_name='allocation_transparency_snapshots')
-    op.drop_index('ix_allocation_transparency_snapshots_resource_allocation_snapshot_id', table_name='allocation_transparency_snapshots')
+    op.drop_index('ix_alloc_transparency_resource_snapshot', table_name='allocation_transparency_snapshots')
     op.drop_table('allocation_transparency_snapshots')

@@ -35,12 +35,12 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
         if (error != null) Text(error!),
         if (d == null && error == null) const Center(child: Padding(padding: EdgeInsets.all(40), child: CircularProgressIndicator())),
         if (d != null) ...[
-          _card('Caixa lógico', 'Saldo ${m(d['ledger']['balance'])}', Icons.account_balance_wallet_outlined),
-          _card('Participantes', '${d['members']['active']} ativos de ${d['members']['total']}', Icons.people_outline),
-          _card('Contribuições', 'Pagas ${m(d['contributions']['paid_total'])} • Pendentes ${m(d['contributions']['pending_total'])}', Icons.payments_outlined),
-          _card('Empréstimos', 'Solicitados ${d['loans']['requested']} • Aprovados ${d['loans']['approved']}', Icons.request_quote_outlined),
-          _card('Inadimplência', '${d['overdue_installments']} parcelas vencidas • saldo ${m(d['outstanding_loan_balance'])}', Icons.warning_amber_outlined),
-          _card('Juros', 'Recebidos ${m(d['interest_received'])} • previstos ${m(d['interest_expected'])}', Icons.trending_up),
+          _card('Caixa lógico', 'Saldo ${m(d['ledger']['balance'])}', Icons.account_balance_wallet_outlined, () => context.push('/admin/governance')),
+          _card('Participantes', '${d['members']['active']} ativos de ${d['members']['total']}', Icons.people_outline, () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AdminMembersScreen()))),
+          _card('Contribuições', 'Pagas ${m(d['contributions']['paid_total'])} • Pendentes ${m(d['contributions']['pending_total'])}', Icons.payments_outlined, () => context.push('/admin/contributions')),
+          _card('Empréstimos', 'Solicitados ${d['loans']['requested']} • Aprovados ${d['loans']['approved']}', Icons.request_quote_outlined, () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AdminLoansScreen()))),
+          _card('Inadimplência', '${d['overdue_installments']} parcelas vencidas • saldo ${m(d['outstanding_loan_balance'])}', Icons.warning_amber_outlined, () => context.push('/admin/collections')),
+          _card('Juros', 'Recebidos ${m(d['interest_received'])} • previstos ${m(d['interest_expected'])}', Icons.trending_up, () => context.push('/admin/reports')),
           const SizedBox(height: 8),
           ListTile(leading: const Icon(Icons.shield_outlined), title: const Text('Painel Executivo de Risco'), subtitle: const Text('Risco, alertas, respostas, CAPAs e SLAs'), trailing: const Icon(Icons.chevron_right), onTap: () => context.push('/admin/executive-risk-response')),
           ListTile(leading: const Icon(Icons.gavel_outlined), title: const Text('Centro de Decisão de Risco'), subtitle: const Text('Recomendações, justificativas e decisões auditáveis'), trailing: const Icon(Icons.chevron_right), onTap: () => context.push('/admin/executive-risk-decisions')),
@@ -60,5 +60,5 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
       ])),
     );
   }
-  Widget _card(String title, String value, IconData icon) => Card(child: ListTile(leading: Icon(icon), title: Text(title), subtitle: Text(value)));
+  Widget _card(String title, String value, IconData icon, VoidCallback onTap) => Card(child: ListTile(leading: Icon(icon), title: Text(title), subtitle: Text(value), trailing: const Icon(Icons.chevron_right), onTap: onTap));
 }

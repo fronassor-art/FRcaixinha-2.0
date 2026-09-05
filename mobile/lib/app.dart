@@ -16,6 +16,7 @@ import 'screens/loans/loans_screen.dart';
 import 'screens/loans/loan_request_screen.dart';
 import 'screens/loans/loan_detail_screen.dart';
 import 'screens/admin/admin_dashboard_screen.dart';
+import 'screens/admin/admin_contributions_screen.dart';
 import 'screens/admin/operations_dashboard_screen.dart';
 import 'screens/admin/collections_dashboard_screen.dart';
 import 'screens/admin/governance_dashboard_screen.dart';
@@ -101,6 +102,7 @@ GoRouter createRouter(AppState state) => GoRouter(
     GoRoute(path: '/loans/request', builder: (_, __) => const LoanRequestScreen()),
     GoRoute(path: '/loans/:id', builder: (_, state) => LoanDetailScreen(loanId: int.parse(state.pathParameters['id']!))),
     GoRoute(path: '/admin', builder: (_, __) => const AdminDashboardScreen()),
+    GoRoute(path: '/admin/contributions', builder: (_, __) => const AdminContributionsScreen()),
     GoRoute(path: '/admin/operations', builder: (_, __) => const OperationsDashboardScreen()),
     GoRoute(path: '/admin/collections', builder: (_, __) => const CollectionsDashboardScreen()),
     GoRoute(path: '/admin/governance', builder: (_, __) => const GovernanceDashboardScreen()),

@@ -1,5 +1,5 @@
 import hashlib, json
-from datetime import date
+from datetime import date, datetime, timezone, timedelta
 from decimal import Decimal
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -29,7 +29,7 @@ def build_executive_governance(db: Session, today: date | None = None):
     open_installments = db.query(LoanInstallment).filter(LoanInstallment.status!='PAID').count()
     pending_agreements = db.query(CollectionAgreement).filter(CollectionAgreement.status=='REQUESTED').count()
     webhook_pending = db.query(WebhookEvent).filter(WebhookEvent.processed==False).count()  # noqa
-    audit_24h = db.query(AuditLog).filter(AuditLog.created_at >= func.datetime('now','-1 day')).count()
+    audit_24h = db.query(AuditLog).filter(AuditLog.created_at >= datetime.now(timezone.utc) - timedelta(days=1)).count()
     credits = Decimal(db.query(func.coalesce(func.sum(LedgerEntry.amount),0)).filter(LedgerEntry.direction=='CREDIT').scalar() or 0)
     debits = Decimal(db.query(func.coalesce(func.sum(LedgerEntry.amount),0)).filter(LedgerEntry.direction=='DEBIT').scalar() or 0)
     balance = credits-debits

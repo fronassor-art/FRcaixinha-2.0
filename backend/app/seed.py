@@ -7,10 +7,10 @@ def seed():
     try:
         if not db.query(Group).filter(Group.name == "FRcaixinha 2026").first():
             db.add(Group(name="FRcaixinha 2026"))
-        if not db.query(User).filter(User.email == "admin@frcaixinha.local").first():
+        if not db.query(User).filter(User.email == "admin@frcaixinha.com").first():
             db.add(User(
                 name="Administrador FRcaixinha",
-                email="admin@frcaixinha.local",
+                email="admin@frcaixinha.com",
                 cpf="00000000000",
                 password_hash=hash_password("TroqueEstaSenha123!"),
                 role="ADMIN"
