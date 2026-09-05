@@ -14,7 +14,7 @@ class _MemberPortalScreenState extends State<MemberPortalScreen> {
     catch(e){if(mounted)setState(()=>error=e.toString());}
   }
   @override void initState(){super.initState();load();}
-  String money(dynamic v)=>'R$ ${v ?? '0.00'}';
+  String money(dynamic v)=>'R\$ ${v ?? '0.00'}';
   @override Widget build(BuildContext context){
     final s=(data?['summary'] as Map<String,dynamic>?) ?? {};
     final inst=(data?['installments'] as List<dynamic>?) ?? [];
