@@ -14,3 +14,6 @@ mobile/.flutter-plugins-dependencies
 mobile/.packages
 mobile/pubspec.lock
 .DS_Store
+
+# Chave de assinatura Android
+frcaixinha-release.keystore
