@@ -30,6 +30,7 @@ jobs:
       - run: flutter pub get
 
       - run: cd android && ./gradlew assembleRelease --stacktrace
+      - run: find android -type f -name "*.apk" -print
 
       - uses: actions/upload-artifact@v4
         with:
