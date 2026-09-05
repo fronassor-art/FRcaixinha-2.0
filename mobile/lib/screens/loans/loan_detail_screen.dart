@@ -24,9 +24,9 @@ class _LoanDetailScreenState extends State<LoanDetailScreen> {
     if(data==null)return const Scaffold(body:Center(child:CircularProgressIndicator()));
     final l=data!; final items=l['installments'] as List<dynamic>? ?? [];
     return Scaffold(appBar:AppBar(title:Text('Empréstimo #${l['id']}')),body:ListView(padding:const EdgeInsets.all(16),children:[
-      Card(child:Padding(padding:const EdgeInsets.all(16),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text('Status: ${l['status']}'),Text('Principal: R$ ${l['principal']}'),Text('Taxa mensal: ${l['monthly_rate']}'),Text('Parcelas: ${l['installments']}')]))),
+      Card(child:Padding(padding:const EdgeInsets.all(16),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text('Status: ${l['status']}'),Text('Principal: R\$ ${l['principal']}'),Text('Taxa mensal: ${l['monthly_rate']}'),Text('Parcelas: ${l['installments']}')]))),
       const SizedBox(height:12),const Text('Parcelas',style:TextStyle(fontSize:20,fontWeight:FontWeight.bold)),
-      ...items.map((x){final i=x as Map<String,dynamic>; final paid=i['status']=='PAID'; return Card(child:ListTile(title:Text('Parcela ${i['number']} • R$ ${i['amount']}'),subtitle:Text('Vencimento: ${i['due_date']} • ${i['status']}\nPago R$ ${i['paid_amount']}'),isThreeLine:true,trailing:paid?const Icon(Icons.check_circle):ElevatedButton(onPressed:()=>pay(i),child:const Text('Pagar Pix')));})
+      ...items.map((x){final i=x as Map<String,dynamic>; final paid=i['status']=='PAID'; return Card(child:ListTile(title:Text('Parcela ${i['number']} • R\$ ${i['amount']}'),subtitle:Text('Vencimento: ${i['due_date']} • ${i['status']}\nPago R\$ ${i['paid_amount']}'),isThreeLine:true,trailing:paid?const Icon(Icons.check_circle):ElevatedButton(onPressed:()=>pay(i),child:const Text('Pagar Pix'))));})
     ]));
   }
 }
