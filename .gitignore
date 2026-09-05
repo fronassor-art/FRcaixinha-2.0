@@ -17,3 +17,6 @@ mobile/pubspec.lock
 
 # Chave de assinatura Android
 frcaixinha-release.keystore
+
+# Backup codificado da chave de assinatura
+frcaixinha-keystore.b64
