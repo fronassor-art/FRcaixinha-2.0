@@ -20,3 +20,4 @@ frcaixinha-release.keystore
 
 # Backup codificado da chave de assinatura
 frcaixinha-keystore.b64
+keystore.base64
