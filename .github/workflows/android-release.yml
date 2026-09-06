@@ -46,6 +46,7 @@ jobs:
         run: |
           keytool -list \
             -keystore frcaixinha-release.keystore \
+            -storetype PKCS12 \
             -storepass "$KEYSTORE_PASSWORD" \
             -alias "$KEY_ALIAS"
 
