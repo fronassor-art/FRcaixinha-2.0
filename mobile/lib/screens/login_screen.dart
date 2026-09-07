@@ -25,17 +25,12 @@ class _LoginScreenState extends State<LoginScreen> {
     try {
       final api = ApiClient();
 
-      final r = await api.post(
-        '/auth/login',
-        {
-          'email': email.text.trim(),
-          'password': password.text,
-        },
-      );
+      final r = await api.post('/auth/login', {
+        'email': email.text.trim(),
+        'password': password.text,
+      });
 
-      await context.read<AppState>().login(
-        r['access_token'] as String,
-      );
+      await context.read<AppState>().login(r['access_token'] as String);
 
       if (mounted) {
         context.go('/');
@@ -61,17 +56,11 @@ class _LoginScreenState extends State<LoginScreen> {
             constraints: const BoxConstraints(maxWidth: 420),
             child: Column(
               children: [
-                const Icon(
-                  Icons.account_balance_wallet_outlined,
-                  size: 64,
-                ),
+                const Icon(Icons.account_balance_wallet_outlined, size: 64),
                 const SizedBox(height: 16),
                 const Text(
                   'FRcaixinha',
-                  style: TextStyle(
-                    fontSize: 28,
-                    fontWeight: FontWeight.bold,
-                  ),
+                  style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold),
                 ),
                 const SizedBox(height: 28),
                 TextField(
@@ -106,10 +95,13 @@ class _LoginScreenState extends State<LoginScreen> {
                   width: double.infinity,
                   child: FilledButton(
                     onPressed: loading ? null : submit,
-                    child: Text(
-                      loading ? 'Entrando...' : 'Entrar',
-                    ),
+                    child: Text(loading ? 'Entrando...' : 'Entrar'),
                   ),
+                ),
+                const SizedBox(height: 8),
+                TextButton(
+                  onPressed: loading ? null : () => context.go('/register'),
+                  child: const Text('Criar conta'),
                 ),
               ],
             ),
