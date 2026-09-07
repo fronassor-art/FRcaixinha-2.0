@@ -1,3 +1,4 @@
+import uuid
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
@@ -21,11 +22,15 @@ def _owned_installment(user, installment_id, db):
 
 def _response(payment, result=None):
     result = result or {}
-    tx = (result.get('point_of_interaction') or {}).get('transaction_data') or {}
-    return {'payment_id': payment.id, 'provider_payment_id': payment.provider_payment_id,
-            'status': payment.status, 'amount': str(payment.amount),
-            'qr_code': tx.get('qr_code'), 'qr_code_base64': tx.get('qr_code_base64'),
-            'ticket_url': tx.get('ticket_url')}
+    return {
+        "payment_id": payment.id,
+        "provider_payment_id": payment.provider_payment_id,
+        "status": payment.status,
+        "amount": str(payment.amount),
+        "qr_code": result.get("qr_code"),
+        "qr_code_base64": result.get("qr_code_base64"),
+        "ticket_url": result.get("ticket_url"),
+    }
 
 @router.post('/{installment_id}/pix')
 async def create_installment_pix(installment_id: int, user: User=Depends(current_user), db: Session=Depends(get_db)):
@@ -38,12 +43,12 @@ async def create_installment_pix(installment_id: int, user: User=Depends(current
                                        Payment.status.in_(['pending','in_process','PENDING'])).order_by(Payment.id.desc()).first()
     if pending:
         return _response(pending)
-    idem = f'frc-loan-installment-{inst.id}'
+    idem = f'frc-loan-installment-{inst.id}-{uuid.uuid4().hex}'
     client = MercadoPagoClient()
     try:
         result = await client.create_pix_payment(amount=due, email=user.email, cpf=user.cpf,
             description=f'FRcaixinha parcela {inst.number} empréstimo {loan.id}',
-            idempotency_key=idem, external_reference=f'loan_installment:{inst.id}')
+            idempotency_key=idem, external_reference=f'loan-installment-{inst.id}')
     except Exception as exc:
         raise HTTPException(502, f'Não foi possível criar o Pix: {exc}')
     payment = Payment(provider='mercado_pago', provider_payment_id=str(result['id']), idempotency_key=idem,

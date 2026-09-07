@@ -23,15 +23,14 @@ def _member_contribution(user, contribution_id, db):
 
 def _pix_response(payment, result=None):
     result = result or {}
-    pix = (result.get("point_of_interaction") or {}).get("transaction_data") or {}
     return {
         "payment_id": payment.id,
         "provider_payment_id": payment.provider_payment_id,
         "status": payment.status,
         "amount": str(payment.amount),
-        "qr_code": pix.get("qr_code"),
-        "qr_code_base64": pix.get("qr_code_base64"),
-        "ticket_url": pix.get("ticket_url"),
+        "qr_code": result.get("qr_code"),
+        "qr_code_base64": result.get("qr_code_base64"),
+        "ticket_url": result.get("ticket_url"),
     }
 
 @router.post("/pix/{contribution_id}")

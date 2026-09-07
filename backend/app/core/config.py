@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     mercado_pago_access_token: str | None = None
     mercado_pago_webhook_secret: str | None = None
     mercado_pago_base_url: str = "https://api.mercadopago.com"
+    mercado_pago_sandbox_email: str | None = None
     smtp_host: str | None = None
     smtp_port: int = 587
     smtp_user: str | None = None
