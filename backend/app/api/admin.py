@@ -180,6 +180,44 @@ def cash_flow(admin=Depends(require_admin), db: Session = Depends(get_db)):
                        "reference_type": r.reference_type, "reference_id": r.reference_id, "created_at": r.created_at.isoformat()} for r in rows]}
 
 
+@router.get("/pending-users")
+def pending_users(
+    admin=Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    rows = (
+        db.query(User)
+        .outerjoin(Member, Member.user_id == User.id)
+        .filter(
+            User.role == "USER",
+            Member.id.is_(None),
+        )
+        .order_by(User.created_at.desc())
+        .all()
+    )
+    return {
+        "items": [
+            {
+                "id": u.id,
+                "name": u.name,
+                "email": u.email,
+                "cpf": u.cpf,
+                "phone": u.phone,
+                "is_active": u.is_active,
+                "created_at": u.created_at.isoformat(),
+            }
+            for u in rows
+        ]
+    }
+
+
+
+@router.get("/groups")
+def admin_groups(admin=Depends(require_admin), db: Session = Depends(get_db)):
+    rows = db.query(Group).filter(Group.active.is_(True)).order_by(Group.name).all()
+    return {"items": [{"id": g.id, "name": g.name, "monthly_amount": money(g.monthly_amount), "months": g.months, "due_day": g.due_day} for g in rows]}
+
+
 @router.get("/audit-logs")
 def audit_logs(limit: int = Query(default=100, ge=1, le=500), admin=Depends(require_admin), db: Session = Depends(get_db)):
     rows = db.query(AuditLog).order_by(AuditLog.created_at.desc()).limit(limit).all()
