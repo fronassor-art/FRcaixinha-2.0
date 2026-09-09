@@ -1,0 +1,34 @@
+groups:
+  - name: frcaixinha-operational
+    rules:
+      - alert: FRcaixinhaApiDown
+        expr: up{job="frcaixinha-api"} == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: "API do FRcaixinha indisponível"
+          runbook: "Verificar container da API e /health/ready"
+      - alert: FRcaixinhaHighErrorRate
+        expr: sum(rate(frcaixinha_http_requests_total{status=~"5.."}[5m])) / clamp_min(sum(rate(frcaixinha_http_requests_total[5m])), 1) > 0.05
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Taxa de erro HTTP acima de 5%"
+      - alert: FRcaixinhaHighLatency
+        expr: histogram_quantile(0.95, sum(rate(frcaixinha_http_request_duration_seconds_bucket[5m])) by (le)) > 1.5
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "P95 da API acima de 1,5s"
+      - alert: FRcaixinhaWorkerStale
+        expr: time() - frcaixinha_worker_heartbeat_timestamp_seconds > 180
+        for: 3m
+        labels: {severity: critical}
+        annotations:
+          summary: "Worker do FRcaixinha sem heartbeat"
+      - alert: FRcaixinhaOverdueInstallments
+        expr: frcaixinha_installments_overdue > 0
+        for: 15m
+        labels: {severity: info}
+        annotations:
+          summary: "Existem parcelas vencidas"

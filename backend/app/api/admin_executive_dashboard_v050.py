@@ -1,0 +1,17 @@
+from datetime import date
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy.orm import Session
+from app.api.deps import require_admin
+from app.db.session import get_db
+from app.models import ExecutiveDashboardSnapshot
+from app.services.executive_dashboard_v050 import build_executive_dashboard, persist_executive_dashboard
+router=APIRouter(prefix='/admin/executive-dashboard',tags=['executive-dashboard-v050'])
+@router.get('')
+def dashboard(admin=Depends(require_admin),db:Session=Depends(get_db)): return build_executive_dashboard(db)
+@router.post('/snapshot')
+def snapshot(admin=Depends(require_admin),db:Session=Depends(get_db)):
+    row,data=persist_executive_dashboard(db,admin.id); db.commit(); return {'id':row.id,'snapshot_hash':row.snapshot_hash,**data}
+@router.get('/history')
+def history(limit:int=Query(30,ge=1,le=200),admin=Depends(require_admin),db:Session=Depends(get_db)):
+    rows=db.query(ExecutiveDashboardSnapshot).order_by(ExecutiveDashboardSnapshot.snapshot_date.desc()).limit(limit).all()
+    return {'items':[{'id':r.id,'snapshot_date':r.snapshot_date.isoformat(),'status':r.status,'snapshot_hash':r.snapshot_hash,'created_at':r.created_at.isoformat()} for r in rows]}

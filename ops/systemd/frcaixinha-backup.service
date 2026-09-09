@@ -1,0 +1,7 @@
+[Unit]
+Description=FRcaixinha PostgreSQL backup
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/frcaixinha
+EnvironmentFile=/opt/frcaixinha/.env
+ExecStart=/opt/frcaixinha/scripts/backup_postgres.sh

@@ -1,0 +1,11 @@
+import 'package:flutter/material.dart';
+import '../../services/api_client.dart';
+import '../../services/session.dart';
+
+class ContinuousImprovementDashboardScreen extends StatefulWidget { const ContinuousImprovementDashboardScreen({super.key}); @override State<ContinuousImprovementDashboardScreen> createState()=>_State(); }
+class _State extends State<ContinuousImprovementDashboardScreen>{ final api=ApiClient(); Map<String,dynamic>? data; String? error;
+ Future<void> load() async { api.token=await Session.getToken(); try{data=await api.get('/admin/continuous-improvement-dashboard');error=null;}catch(e){error=e.toString();} if(mounted)setState((){}); }
+ @override void initState(){super.initState();load();}
+ Widget metric(String t,dynamic v)=>Expanded(child:Card(child:Padding(padding:const EdgeInsets.all(12),child:Column(children:[Text('$v',style:Theme.of(context).textTheme.headlineSmall),Text(t,textAlign:TextAlign.center)]))));
+ @override Widget build(BuildContext context){final r=(data?['recommendations'] as Map?)?.cast<String,dynamic>();final p=(data?['plans'] as Map?)?.cast<String,dynamic>();final m=(data?['measurements'] as Map?)?.cast<String,dynamic>();final risk=(data?['risk'] as Map?)?.cast<String,dynamic>();return Scaffold(appBar:AppBar(title:const Text('Melhoria Contínua')),body:RefreshIndicator(onRefresh:load,child:ListView(padding:const EdgeInsets.all(12),children:[if(error!=null)Text(error!),if(data!=null)...[Card(child:ListTile(title:Text('Status: ${data!['status']}'),subtitle:Text('Risco operacional: ${risk?['score']??0} (${risk?['status']??'PASS'})'))),Row(children:[metric('Recomendações',r?['total']??0),metric('Aceitas',r?['accepted']??0)]),Row(children:[metric('Planos abertos',p?['open']??0),metric('Atrasados',p?['overdue']??0)]),Row(children:[metric('Medições',m?['measured']??0),metric('Efetivas',m?['effective']??0)]),Row(children:[metric('Inefetivas',m?['ineffective']??0),metric('Efetividade %',m?['effectiveness_rate']??0)]),if((data!['flags'] as List?)?.isNotEmpty==true)Card(child:Padding(padding:const EdgeInsets.all(12),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[const Text('Pontos de atenção'),...((data!['flags'] as List).map((x)=>Text('• $x')))])))],if(data==null&&error==null)const Center(child:CircularProgressIndicator())])));}
+}

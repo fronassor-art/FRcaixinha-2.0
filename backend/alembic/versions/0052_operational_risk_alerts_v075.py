@@ -1,0 +1,10 @@
+from alembic import op
+import sqlalchemy as sa
+revision='0052_operational_risk_alerts_v075'; down_revision='0051_operational_risk_v074'; branch_labels=None; depends_on=None
+def upgrade():
+    op.create_table('operational_risk_alerts',
+      sa.Column('id',sa.Integer(),primary_key=True),sa.Column('fingerprint',sa.String(128),nullable=False),sa.Column('alert_type',sa.String(40),nullable=False),sa.Column('severity',sa.String(20),nullable=False),sa.Column('status',sa.String(20),nullable=False),sa.Column('risk_score',sa.Integer(),nullable=False),sa.Column('threshold',sa.Integer(),nullable=False),sa.Column('title',sa.String(200),nullable=False),sa.Column('description',sa.Text(),nullable=False),sa.Column('recommended_action',sa.Text(),nullable=False),sa.Column('source_snapshot_id',sa.Integer(),sa.ForeignKey('operational_risk_trend_snapshots.id'),nullable=True),sa.Column('acknowledged_by',sa.Integer(),sa.ForeignKey('users.id'),nullable=True),sa.Column('acknowledged_at',sa.DateTime(timezone=True),nullable=True),sa.Column('resolved_at',sa.DateTime(timezone=True),nullable=True),sa.Column('created_at',sa.DateTime(timezone=True),nullable=False),sa.Column('updated_at',sa.DateTime(timezone=True),nullable=False),sa.UniqueConstraint('fingerprint',name='uq_operational_risk_alert_fingerprint'))
+    for n,c in [('ix_operational_risk_alert_type','alert_type'),('ix_operational_risk_alert_severity','severity'),('ix_operational_risk_alert_status','status'),('ix_operational_risk_alert_source','source_snapshot_id'),('ix_operational_risk_alert_created','created_at'),('ix_operational_risk_alert_updated','updated_at')]: op.create_index(n,'operational_risk_alerts',[c])
+def downgrade():
+    for n in ['ix_operational_risk_alert_updated','ix_operational_risk_alert_created','ix_operational_risk_alert_source','ix_operational_risk_alert_status','ix_operational_risk_alert_severity','ix_operational_risk_alert_type']: op.drop_index(n,table_name='operational_risk_alerts')
+    op.drop_table('operational_risk_alerts')
