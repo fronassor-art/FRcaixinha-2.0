@@ -1,0 +1,81 @@
+# =========================
+# FRcaixinha 1.0
+# =========================
+
+# Secrets / environment
+.env
+.env.*
+!.env.example
+*.secret
+*.secrets
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+ENV/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# FastAPI / backend
+*.sqlite
+*.sqlite3
+
+# Flutter / Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+.packages
+build/
+.flutter_tool/
+coverage/
+
+# Android / Gradle
+.gradle/
+local.properties
+captures/
+*.hprof
+
+# Signing / certificates
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pem
+*.key
+*.der
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs / temporary files
+*.log
+*.tmp
+*.temp
+
+# Generated files
+*.g.dart
+*.freezed.dart
+
+# Node / admin
+node_modules/
+dist/
+.cache/
+
+# Test artifacts
+test-results/
+screenshots/
+
+# Local tooling
+.termux/
