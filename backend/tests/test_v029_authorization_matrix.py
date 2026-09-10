@@ -13,7 +13,8 @@ def test_admin_endpoints_require_server_side_admin_dependency():
 
 def test_sensitive_payment_routes_do_not_accept_client_side_status_as_authority():
     payments = (ROOT / 'backend/app/api/payments.py').read_text()
-    assert 'status = remote.get("status")' in payments
+    assert 'remote_payment' in payments
+    assert 'remote.get("status")' in payments
     assert "status == \"approved\"" in payments or "status == 'approved'" in payments
     assert 'data.get("status")' not in payments
 

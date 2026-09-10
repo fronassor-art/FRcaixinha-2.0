@@ -1,3 +1,4 @@
+import uuid
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -21,6 +22,7 @@ def _member_contribution(user, contribution_id, db):
         raise HTTPException(404, "Contribuição não encontrada.")
     return member, contribution
 
+
 def _pix_response(payment, result=None):
     result = result or {}
     return {
@@ -28,11 +30,10 @@ def _pix_response(payment, result=None):
         "provider_payment_id": payment.provider_payment_id,
         "status": payment.status,
         "amount": str(payment.amount),
-        "qr_code": result.get("qr_code"),
-        "qr_code_base64": result.get("qr_code_base64"),
-        "ticket_url": result.get("ticket_url"),
+        "qr_code": result.get("qr_code") or payment.qr_code,
+        "qr_code_base64": result.get("qr_code_base64") or payment.qr_code_base64,
+        "ticket_url": result.get("ticket_url") or payment.ticket_url,
     }
-
 @router.post("/pix/{contribution_id}")
 async def create_pix(contribution_id: int, user: User=Depends(current_user), db: Session=Depends(get_db)):
     member, contribution = _member_contribution(user, contribution_id, db)
@@ -47,24 +48,36 @@ async def create_pix(contribution_id: int, user: User=Depends(current_user), db:
         if existing and existing.status not in {"cancelled", "rejected", "refunded", "charged_back"}:
             return _pix_response(existing, {"status": existing.status})
 
-    # Chave determinística por recurso: requisições concorrentes/repetidas
+    # Chave determinística por recurso: requisições
     # devem representar a mesma cobrança no provedor e no banco.
     # O Access Token do Mercado Pago permanece exclusivamente no backend.
-    idem = f"frc-contribution-{contribution.id}"
+    if not contribution.pix_idempotency_key:
+        contribution.pix_idempotency_key = f"frc-contribution-{contribution.id}"
+        db.flush()
+
+    idem = contribution.pix_idempotency_key
     client = MercadoPagoClient()
     try:
         result = await client.create_pix_payment(
             amount=contribution.amount, email=user.email, cpf=user.cpf,
             description=f"FRcaixinha contribuição {contribution.competence.isoformat()}",
             idempotency_key=idem,
-            external_reference=f"contribution:{contribution.id}",
+            external_reference=f"contribution-{contribution.id}",
         )
     except Exception as exc:
         raise HTTPException(502, f"Não foi possível criar o Pix no Mercado Pago: {exc}")
 
     payment = Payment(
-        provider="mercado_pago", provider_payment_id=str(result["id"]), idempotency_key=idem,
-        amount=contribution.amount, status=result.get("status", "PENDING"), raw_status=result.get("status"),
+        provider="mercado_pago",
+        provider_order_id=str(result.get("order_id")) if result.get("order_id") else None,
+        provider_payment_id=str(result["id"]),
+        idempotency_key=idem,
+        amount=contribution.amount,
+        status=result.get("status", "PENDING"),
+        raw_status=result.get("status"),
+        qr_code=result.get("qr_code"),
+        qr_code_base64=result.get("qr_code_base64"),
+        ticket_url=result.get("ticket_url"),
     )
     db.add(payment)
     try:
@@ -130,13 +143,25 @@ async def mercado_pago_webhook(request: Request, db: Session=Depends(get_db)):
     if data.get("type") == "payment" and data_id:
         payment = db.query(Payment).filter(Payment.provider == "mercado_pago", Payment.provider_payment_id == data_id).first()
         if payment:
+            if not payment.provider_order_id:
+                db.rollback()
+                raise HTTPException(
+                    502,
+                    "Pagamento sem provider_order_id para consulta no Mercado Pago."
+                )
+
             client = MercadoPagoClient()
             try:
-                remote = await client.get_payment(data_id)
+                remote = await client.get_order(payment.provider_order_id)
             except Exception:
                 db.rollback()
                 raise HTTPException(502, "Não foi possível consultar o pagamento no Mercado Pago.")
-            status = remote.get("status")
+            remote_payments = ((remote.get("transactions") or {}).get("payments") or [])
+            remote_payment = next(
+                (item for item in remote_payments if str(item.get("id")) == str(payment.provider_payment_id)),
+                None,
+            )
+            status = (remote_payment or {}).get("status") or remote.get("status")
             payment.status = status or payment.status
             payment.raw_status = status
             if status == "approved":

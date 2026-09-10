@@ -43,7 +43,7 @@ async def create_installment_pix(installment_id: int, user: User=Depends(current
                                        Payment.status.in_(['pending','in_process','PENDING'])).order_by(Payment.id.desc()).first()
     if pending:
         return _response(pending)
-    idem = f'frc-loan-installment-{inst.id}-{uuid.uuid4().hex}'
+    idem = f'frc-loan-installment-{inst.id}'
     client = MercadoPagoClient()
     try:
         result = await client.create_pix_payment(amount=due, email=user.email, cpf=user.cpf,

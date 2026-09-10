@@ -13,5 +13,5 @@ def test_critical_routes_exist():
 def test_webhook_uses_signature_validation_and_remote_status():
     source = (ROOT / 'app' / 'api' / 'payments.py').read_text()
     assert 'validate_mercado_pago_signature' in source
-    assert 'await client.get_payment(data_id)' in source
+    assert 'await client.get_order(payment.provider_order_id)' in source
     assert 'event_id' in source

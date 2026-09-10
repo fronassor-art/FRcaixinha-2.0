@@ -79,3 +79,15 @@ screenshots/
 
 # Local tooling
 .termux/
+
+# Production/staging environment templates
+!.env.production.example
+!.env.staging.example
+
+# Runtime production secrets
+secrets/
+
+# Local backup/temp artifacts
+*.bak
+*.bak2
+.envgrep

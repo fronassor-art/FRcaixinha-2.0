@@ -135,6 +135,7 @@ class Contribution(Base):
     amount: Mapped[Decimal] = mapped_column(Numeric(14,2))
     status: Mapped[str] = mapped_column(String(20), default="PENDING")
     payment_id: Mapped[int | None] = mapped_column(ForeignKey("payments.id"))
+    pix_idempotency_key: Mapped[str | None] = mapped_column(String(64), unique=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     __table_args__ = (UniqueConstraint("member_id", "competence", name="uq_contribution_member_competence"),)
 
@@ -142,11 +143,15 @@ class Payment(Base):
     __tablename__ = "payments"
     id: Mapped[int] = mapped_column(primary_key=True)
     provider: Mapped[str] = mapped_column(String(40))
+    provider_order_id: Mapped[str | None] = mapped_column(String(150), index=True)
     provider_payment_id: Mapped[str] = mapped_column(String(150))
     idempotency_key: Mapped[str] = mapped_column(String(150), unique=True, index=True)
     amount: Mapped[Decimal] = mapped_column(Numeric(14,2))
     status: Mapped[str] = mapped_column(String(30), default="PENDING")
     raw_status: Mapped[str | None] = mapped_column(String(80))
+    qr_code: Mapped[str | None] = mapped_column(Text())
+    qr_code_base64: Mapped[str | None] = mapped_column(Text())
+    ticket_url: Mapped[str | None] = mapped_column(Text())
     ledger_posted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     reference_type: Mapped[str | None] = mapped_column(String(50), index=True)
     reference_id: Mapped[str | None] = mapped_column(String(80), index=True)

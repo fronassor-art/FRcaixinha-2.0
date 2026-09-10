@@ -18,7 +18,7 @@ def _hash_payload(entry, previous_hash):
         "amount": str(Decimal(entry.amount).quantize(CENT, rounding=ROUND_HALF_UP)),
         "reference_type": entry.reference_type, "reference_id": entry.reference_id,
         "reversal_of_id": entry.reversal_of_id,
-        "created_at": entry.created_at.isoformat(),
+        "created_at": entry.created_at.astimezone(timezone.utc).isoformat(),
         "previous_hash": previous_hash,
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()

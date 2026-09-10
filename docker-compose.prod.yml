@@ -1,0 +1,24 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    env_file:
+      - .env.production
+    environment:
+      DATABASE_URL_FILE: /run/secrets/database_url
+      JWT_SECRET_FILE: /run/secrets/jwt_secret
+      MERCADO_PAGO_ACCESS_TOKEN_FILE: /run/secrets/mercado_pago_access_token
+    secrets:
+      - database_url
+      - jwt_secret
+      - mercado_pago_access_token
+    restart: unless-stopped
+
+secrets:
+  database_url:
+    file: ./secrets/database_url
+  jwt_secret:
+    file: ./secrets/jwt_secret
+  mercado_pago_access_token:
+    file: ./secrets/mercado_pago_access_token

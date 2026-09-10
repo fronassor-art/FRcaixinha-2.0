@@ -59,6 +59,7 @@ class MercadoPagoClient:
                     and settings.mercado_pago_sandbox_email
                     else email
                 ),
+                **({"first_name": "APRO"} if settings.app_env == "development" else {}),
             },
         }
 
@@ -92,17 +93,17 @@ class MercadoPagoClient:
             "raw": order,
         }
 
-    async def get_payment(self, payment_id: str):
+    async def get_order(self, order_id: str):
         if not self.token:
             raise RuntimeError("MERCADO_PAGO_ACCESS_TOKEN não configurado")
 
         async with httpx.AsyncClient(timeout=20) as client:
             response = await client.get(
-                f"{self.base_url}/v1/payments/{payment_id}",
+                f"{self.base_url}/v1/orders/{order_id}",
                 headers={
                     "Authorization": f"Bearer {self.token}",
                 },
             )
 
-            response.raise_for_status()
-            return response.json()
+        response.raise_for_status()
+        return response.json()

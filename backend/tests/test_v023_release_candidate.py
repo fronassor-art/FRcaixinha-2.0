@@ -9,18 +9,30 @@ def _revisions():
     rows = {}
     for path in VERSIONS.glob('*.py'):
         text = path.read_text()
-        rev = re.search(r'revision\s*=\s*[\'\"]([^\'\"]+)', text)
-        down = re.search(r'down_revision\s*=\s*[\'\"]([^\'\"]+)', text)
+        rev = re.search(r'(?m)^revision(?:\s*:[^=]+)?\s*=\s*[\'"]([^\'"]+)', text)
+        down = re.search(r'(?m)^down_revision(?:\s*:[^=]+)?\s*=\s*[\'"]([^\'"]+)', text)
         if rev:
             rows[rev.group(1)] = down.group(1) if down else None
     return rows
 
 
 def test_alembic_chain_has_single_head():
-    rows = _revisions()
-    referenced = {v for v in rows.values() if v}
-    assert set(rows) - referenced == {'0011_penalty_allocation_v029'}
+    import subprocess
 
+    result = subprocess.run(
+        ["alembic", "heads"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    heads = [
+        line.split()[0]
+        for line in result.stdout.splitlines()
+        if line.strip()
+    ]
+
+    assert heads == ["8c4f2a1b7d90"]
 
 def test_environment_templates_are_placeholders():
     for name in ('.env.production.example', '.env.staging.example'):

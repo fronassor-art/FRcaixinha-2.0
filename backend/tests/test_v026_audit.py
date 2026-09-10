@@ -8,20 +8,34 @@ def revisions():
     rows = {}
     for path in (ROOT / "backend" / "alembic" / "versions").glob("*.py"):
         text = path.read_text()
-        rev = re.search(r'revision\s*=\s*[\'\"]([^\'\"]+)', text)
-        down = re.search(r'down_revision\s*=\s*[\'\"]([^\'\"]+)', text)
+        rev = re.search(r'(?m)^revision(?:\s*:[^=]+)?\s*=\s*[\'"]([^\'"]+)', text)
+        down = re.search(r'(?m)^down_revision(?:\s*:[^=]+)?\s*=\s*[\'"]([^\'"]+)', text)
         if rev:
             rows[rev.group(1)] = down.group(1) if down else None
     return rows
 
 
 def test_security_chain_is_present_and_single_head():
+    import subprocess
+
+    result = subprocess.run(
+        ["alembic", "heads"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    heads = [
+        line.split()[0]
+        for line in result.stdout.splitlines()
+        if line.strip()
+    ]
+
+    assert heads == ["8c4f2a1b7d90"]
+
     rows = revisions()
-    heads = set(rows) - {v for v in rows.values() if v}
-    assert heads == {"0011_penalty_allocation_v029"}
     assert rows["0006_security_v11"] == "0005_financial_operations"
     assert rows["0007_notifications"] == "0006_security_v11"
-
 
 def test_production_hardening_contracts():
     compose = (ROOT / "docker-compose.prod.yml").read_text()
