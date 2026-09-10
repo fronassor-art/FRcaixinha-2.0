@@ -23,7 +23,7 @@ jobs:
 
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.35.0'
+          flutter-version: '3.35.1'
           channel: stable
           cache: true
 
@@ -36,11 +36,16 @@ jobs:
           echo "$KEYSTORE_BASE64" | base64 --decode > frcaixinha-release.keystore
           ls -l frcaixinha-release.keystore
 
-      - run: cd android && ./gradlew assembleRelease --stacktrace
+      - name: Gerar APK Release
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: cd android && ./gradlew assembleRelease --stacktrace
 
       - run: find android -type f -name "*.apk" -print
 
       - uses: actions/upload-artifact@v4
         with:
           name: frcaixinha-release-apk
-          path: mobile/android/app/build/outputs/flutter-apk/app-release.apk
+          path: mobile/android/app/build/outputs/apk/release/app-release.apk
