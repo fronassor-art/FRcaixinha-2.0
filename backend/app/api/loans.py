@@ -8,6 +8,7 @@ from app.schemas.finance import LoanRequestIn, LoanDecisionIn
 from app.api.deps import current_user, require_admin
 from app.services.notifications_v12 import create_notification
 from app.services.loan_engine_v17 import add_months, money
+from app.services.loan_amortization import calculate_linear_amortization
 
 router = APIRouter(prefix="/loans", tags=["loans"])
 
@@ -66,15 +67,24 @@ def decide_loan(loan_id: int, data: LoanDecisionIn, admin=Depends(require_admin)
             if isinstance(detail, dict):
                 raise HTTPException(409, detail=detail)
             raise HTTPException(400, str(detail))
-        # Parcelas mensais reais: a primeira vence um mês após a decisão.
-        principal_each=(loan.principal/loan.installments).quantize(Decimal("0.01"),rounding=ROUND_HALF_UP)
-        interest_each=(loan.principal*loan.monthly_rate).quantize(Decimal("0.01"),rounding=ROUND_HALF_UP)
-        total=Decimal("0")
-        base_date=date.today()
-        for n in range(1,loan.installments+1):
-            principal=principal_each if n<loan.installments else loan.principal-total
-            total += principal
-            db.add(LoanInstallment(loan_id=loan.id,number=n,due_date=add_months(base_date,n),principal=principal,interest=interest_each,amount=principal+interest_each))
+        # Parcelas mensais reais: juros sobre o saldo devedor,
+        # com amortização linear do principal.
+        rows, _, _ = calculate_linear_amortization(
+            loan.principal,
+            loan.monthly_rate,
+            loan.installments,
+        )
+        base_date = date.today()
+
+        for row in rows:
+            db.add(LoanInstallment(
+                loan_id=loan.id,
+                number=row["number"],
+                due_date=add_months(base_date, row["number"]),
+                principal=row["principal"],
+                interest=row["interest"],
+                amount=row["amount"],
+            ))
     db.add(AuditLog(actor_user_id=admin.id,action="LOAN_DECISION",entity_type="LOAN",entity_id=str(loan.id),details=("approved" + ("; exception=" + data.admin_note if data.force_exception and data.admin_note else "")) if data.approve else "rejected"))
     member=db.get(Member,loan.member_id)
     if member: create_notification(db,member.user_id,"LOAN_DECISION","Empréstimo aprovado" if data.approve else "Empréstimo rejeitado","Sua solicitação de empréstimo foi aprovada." if data.approve else "Sua solicitação de empréstimo foi rejeitada.","LOAN",str(loan.id))
