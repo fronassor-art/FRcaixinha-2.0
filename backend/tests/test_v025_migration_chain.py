@@ -18,7 +18,7 @@ def test_single_alembic_head_after_security_reconciliation():
         if line.strip()
     ]
 
-    assert heads == ["8c4f2a1b7d90"]
+    assert heads == ["d04267d34476"]
 
     root = Path(__file__).parents[1] / "alembic" / "versions"
     rows = {}

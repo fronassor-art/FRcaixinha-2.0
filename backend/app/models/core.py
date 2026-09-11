@@ -118,6 +118,7 @@ class Member(Base):
     declared_monthly_income: Mapped[Decimal | None] = mapped_column(Numeric(14,2), nullable=True)
     user: Mapped[User] = relationship(back_populates="member")
     quota: Mapped["Quota | None"] = relationship(back_populates="member", uselist=False)
+    financial_account: Mapped["MemberFinancialAccount | None"] = relationship(back_populates="member", uselist=False)
 
 class Quota(Base):
     __tablename__ = "quotas"
@@ -1225,3 +1226,64 @@ class ContinuousImprovementProgramReleaseSnapshot(Base):
     snapshot_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     generated_by: Mapped[int | None] = mapped_column(ForeignKey('users.id'), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+class MemberFinancialAccount(Base):
+    __tablename__ = "member_financial_accounts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    member_id: Mapped[int] = mapped_column(
+        ForeignKey("members.id"),
+        unique=True,
+        index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=now_utc,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=now_utc,
+        onupdate=now_utc,
+    )
+
+    member: Mapped["Member"] = relationship(
+        back_populates="financial_account",
+    )
+    entries: Mapped[list["MemberFinancialEntry"]] = relationship(
+        back_populates="account",
+        cascade="all, delete-orphan",
+        order_by="MemberFinancialEntry.id",
+    )
+
+
+class MemberFinancialEntry(Base):
+    __tablename__ = "member_financial_entries"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    account_id: Mapped[int] = mapped_column(
+        ForeignKey("member_financial_accounts.id"),
+        index=True,
+    )
+    entry_type: Mapped[str] = mapped_column(String(50), index=True)
+    direction: Mapped[str] = mapped_column(String(20))
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2))
+    reference_type: Mapped[str | None] = mapped_column(String(50))
+    reference_id: Mapped[str | None] = mapped_column(String(100))
+    description: Mapped[str | None] = mapped_column(Text())
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=now_utc,
+        index=True,
+    )
+
+    account: Mapped["MemberFinancialAccount"] = relationship(
+        back_populates="entries",
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_member_financial_entries_reference",
+            "reference_type",
+            "reference_id",
+        ),
+    )

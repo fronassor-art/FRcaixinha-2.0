@@ -3,8 +3,9 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from sqlalchemy.orm import Session
 
-from app.models import Loan, LoanInstallment, LedgerEntry, AuditLog, Member
+from app.models import Loan, LoanInstallment, LedgerEntry, AuditLog, Member, MemberFinancialEntry
 from app.services.ledger import post_entry
+from app.services.member_financial import add_member_financial_entry
 
 CENT = Decimal('0.01')
 
@@ -63,15 +64,39 @@ def ensure_loan_completion(db: Session, loan: Loan):
     return False
 
 def release_loan(db: Session, loan: Loan, admin_id: int):
-    if loan.status != 'APPROVED':
-        raise ValueError('Somente empréstimos aprovados podem ser liberados.')
     exists = db.query(LedgerEntry).filter(LedgerEntry.reference_type == 'LOAN_DISBURSEMENT', LedgerEntry.reference_id == str(loan.id)).first()
     if exists:
         loan.status = 'ACTIVE'
         if loan.disbursed_at is None:
             loan.disbursed_at = exists.created_at
         return False
+
+    if loan.status != 'APPROVED':
+        raise ValueError('Somente empréstimos aprovados podem ser liberados.')
     post_entry(db, 'CAIXINHA', 'DEBIT', money(loan.principal), 'LOAN_DISBURSEMENT', str(loan.id))
+
+    member = db.get(Member, loan.member_id)
+    if member is None:
+        raise ValueError('Participante do empréstimo não encontrado.')
+
+    commitment_exists = db.query(MemberFinancialEntry).filter(
+        MemberFinancialEntry.entry_type == 'LOAN_PRINCIPAL_COMMITMENT',
+        MemberFinancialEntry.reference_type == 'LOAN_PRINCIPAL_COMMITMENT',
+        MemberFinancialEntry.reference_id == str(loan.id),
+    ).first()
+
+    if commitment_exists is None:
+        add_member_financial_entry(
+            db=db,
+            member=member,
+            entry_type='LOAN_PRINCIPAL_COMMITMENT',
+            direction='CREDIT',
+            amount=money(loan.principal),
+            reference_type='LOAN_PRINCIPAL_COMMITMENT',
+            reference_id=str(loan.id),
+            description='Comprometimento do saldo próprio pelo principal do empréstimo.',
+        )
+
     loan.status = 'ACTIVE'
     loan.disbursed_at = datetime.now(timezone.utc)
     db.add(AuditLog(actor_user_id=admin_id, action='LOAN_RELEASE', entity_type='LOAN', entity_id=str(loan.id), details='funds released'))
