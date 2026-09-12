@@ -174,6 +174,10 @@ class Loan(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     member_id: Mapped[int] = mapped_column(ForeignKey("members.id"))
     principal: Mapped[Decimal] = mapped_column(Numeric(14,2))
+    principal_settled_with_own_balance: Mapped[Decimal] = mapped_column(
+        Numeric(14,2),
+        default=Decimal("0.00"),
+    )
     monthly_rate: Mapped[Decimal] = mapped_column(Numeric(8,5))
     installments: Mapped[int] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(30), default="REQUESTED")

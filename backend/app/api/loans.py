@@ -9,6 +9,9 @@ from app.api.deps import current_user, require_admin
 from app.services.notifications_v12 import create_notification
 from app.services.loan_engine_v17 import add_months, money
 from app.services.loan_amortization import calculate_linear_amortization
+from app.services.loan_eligibility import evaluate_loan_eligibility
+from app.services.member_financial import get_member_financial_position
+from app.services.risk_v036 import cash_balance
 
 router = APIRouter(prefix="/loans", tags=["loans"])
 
@@ -17,6 +20,62 @@ def _member_for(user, db):
     if not member:
         raise HTTPException(403, "Somente membro ativo pode acessar empréstimos.")
     return member
+
+def _loan_eligibility(member, loan, db):
+    from app.models import Group, Quota
+
+    group = db.get(Group, member.group_id)
+    if group is None:
+        raise HTTPException(409, "Grupo do participante não encontrado.")
+
+    quota = (
+        db.query(Quota)
+        .filter(
+            Quota.member_id == member.id,
+            Quota.status == "ACTIVE",
+        )
+        .first()
+    )
+
+    position = get_member_financial_position(db, member)
+
+    outstanding = Decimal("0.00")
+    existing_loans = (
+        db.query(Loan)
+        .filter(
+            Loan.member_id == member.id,
+            Loan.status.in_(["ACTIVE", "OVERDUE", "IN_COLLECTION"]),
+            Loan.id != loan.id,
+        )
+        .all()
+    )
+
+    for existing in existing_loans:
+        settled = Decimal(
+            existing.principal_settled_with_own_balance or 0
+        )
+        outstanding += max(
+            Decimal("0.00"),
+            Decimal(existing.principal or 0) - settled,
+        )
+
+    if quota and group.max_quota_multiple is not None:
+        normal_limit = money(
+            Decimal(quota.units) * Decimal(group.max_quota_multiple)
+        )
+    else:
+        normal_limit = Decimal("0.00")
+
+    liquidity = cash_balance(db)
+
+    return evaluate_loan_eligibility(
+        own_balance=position["own_balance"],
+        committed_balance=position["committed_balance"],
+        outstanding_principal=money(outstanding),
+        normal_credit_limit=normal_limit,
+        requested_amount=money(loan.principal),
+        liquidity_available=liquidity,
+    )
 
 def _serialize(loan, db):
     installments = db.query(LoanInstallment).filter(LoanInstallment.loan_id == loan.id).order_by(LoanInstallment.number).all()
@@ -32,9 +91,47 @@ def request_loan(data: LoanRequestIn, user: User=Depends(current_user), db: Sess
     member = _member_for(user, db)
     if data.principal <= 0 or data.installments <= 0 or data.installments > 120:
         raise HTTPException(400, "Dados do empréstimo inválidos.")
-    loan = Loan(member_id=member.id, principal=data.principal, monthly_rate=data.monthly_rate, installments=data.installments)
-    db.add(loan); db.commit(); db.refresh(loan)
-    return {"id": loan.id, "status": loan.status}
+    loan = Loan(
+        member_id=member.id,
+        principal=data.principal,
+        monthly_rate=data.monthly_rate,
+        installments=data.installments,
+    )
+
+    eligibility = _loan_eligibility(member, loan, db)
+
+    if eligibility.decision == "NEGADO":
+        raise HTTPException(
+            409,
+            detail={
+                "code": "LOAN_NOT_ELIGIBLE",
+                "decision": eligibility.decision,
+                "reason": eligibility.reason,
+                "available_balance": str(eligibility.available_balance),
+                "liquidity_available": str(eligibility.liquidity_available),
+            },
+        )
+
+    db.add(loan)
+    db.commit()
+    db.refresh(loan)
+
+    return {
+        "id": loan.id,
+        "status": loan.status,
+        "eligibility": {
+            "eligible": eligibility.eligible,
+            "decision": eligibility.decision,
+            "reason": eligibility.reason,
+            "own_balance": str(eligibility.own_balance),
+            "committed_balance": str(eligibility.committed_balance),
+            "available_balance": str(eligibility.available_balance),
+            "outstanding_principal": str(eligibility.outstanding_principal),
+            "normal_credit_limit": str(eligibility.normal_credit_limit),
+            "requested_amount": str(eligibility.requested_amount),
+            "liquidity_available": str(eligibility.liquidity_available),
+        },
+    }
 
 @router.get("")
 def list_my_loans(user: User=Depends(current_user), db: Session=Depends(get_db)):
