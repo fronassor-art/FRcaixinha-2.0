@@ -51,7 +51,7 @@ def post_entry(db, account: str, direction: str, amount: Decimal, reference_type
     db.add(entry)
     return entry
 
-def post_contribution_payment(db, payment: Payment):
+def post_contribution_payment(db, payment: Payment, *, amount: Decimal | None = None):
     if payment.ledger_posted_at is not None:
         return
     ref = str(payment.id)
@@ -59,7 +59,7 @@ def post_contribution_payment(db, payment: Payment):
     if exists:
         payment.ledger_posted_at = datetime.now(timezone.utc)
         return
-    post_entry(db, "CAIXINHA", "CREDIT", Decimal(payment.amount), "CONTRIBUTION_PAYMENT", ref)
+    post_entry(db, "CAIXINHA", "CREDIT", Decimal(payment.amount if amount is None else amount), "CONTRIBUTION_PAYMENT", ref)
     payment.ledger_posted_at = datetime.now(timezone.utc)
 
 def reverse_entry(db, original: LedgerEntry, reason: str):

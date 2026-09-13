@@ -16,11 +16,11 @@ from app.services.ledger import post_entry
 from app.services.member_financial import add_member_financial_entry
 
 
-def apply_confirmed_payment(db, payment: Payment, installment: LoanInstallment):
+def apply_confirmed_payment(db, payment: Payment, installment: LoanInstallment, *, amount: Decimal | None = None):
     if payment.ledger_posted_at is not None:
         return False
 
-    amount = Decimal(payment.amount)
+    amount = Decimal(payment.amount if amount is None else amount)
 
     # Guardamos os valores anteriores porque apply_payment()
     # atualiza paid_amount e paid_penalty_amount.
