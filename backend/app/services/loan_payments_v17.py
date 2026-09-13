@@ -12,6 +12,7 @@ from app.models import (
     MemberFinancialEntry,
 )
 from app.services.loan_engine_v17 import apply_payment, ensure_loan_completion
+from app.services.ledger import post_entry
 from app.services.member_financial import add_member_financial_entry
 
 
@@ -48,14 +49,9 @@ def apply_confirmed_payment(db, payment: Payment, installment: LoanInstallment):
         ).first()
 
         if not exists:
-            db.add(
-                LedgerEntry(
-                    account="CAIXINHA",
-                    direction="CREDIT",
-                    amount=penalty_applied,
-                    reference_type="LOAN_PENALTY_PAYMENT",
-                    reference_id=ref,
-                )
+            post_entry(
+                db, "CAIXINHA", "CREDIT", penalty_applied,
+                "LOAN_PENALTY_PAYMENT", ref,
             )
 
     # ============================================================
@@ -95,14 +91,9 @@ def apply_confirmed_payment(db, payment: Payment, installment: LoanInstallment):
         ).first()
 
         if not exists:
-            db.add(
-                LedgerEntry(
-                    account="CAIXINHA",
-                    direction="CREDIT",
-                    amount=interest_applied,
-                    reference_type="LOAN_INTEREST_PAYMENT",
-                    reference_id=ref,
-                )
+            post_entry(
+                db, "CAIXINHA", "CREDIT", interest_applied,
+                "LOAN_INTEREST_PAYMENT", ref,
             )
 
     # ============================================================

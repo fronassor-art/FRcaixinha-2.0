@@ -1,4 +1,3 @@
-import uuid
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
@@ -27,9 +26,9 @@ def _response(payment, result=None):
         "provider_payment_id": payment.provider_payment_id,
         "status": payment.status,
         "amount": str(payment.amount),
-        "qr_code": result.get("qr_code"),
-        "qr_code_base64": result.get("qr_code_base64"),
-        "ticket_url": result.get("ticket_url"),
+        "qr_code": result.get("qr_code") or payment.qr_code,
+        "qr_code_base64": result.get("qr_code_base64") or payment.qr_code_base64,
+        "ticket_url": result.get("ticket_url") or payment.ticket_url,
     }
 
 @router.post('/{installment_id}/pix')
@@ -51,9 +50,20 @@ async def create_installment_pix(installment_id: int, user: User=Depends(current
             idempotency_key=idem, external_reference=f'loan-installment-{inst.id}')
     except Exception as exc:
         raise HTTPException(502, f'Não foi possível criar o Pix: {exc}')
-    payment = Payment(provider='mercado_pago', provider_payment_id=str(result['id']), idempotency_key=idem,
-                      amount=due, status=result.get('status','PENDING'), raw_status=result.get('status'),
-                      reference_type=ref_type, reference_id=ref_id)
+    payment = Payment(
+        provider='mercado_pago',
+        provider_order_id=str(result.get('order_id')) if result.get('order_id') else None,
+        provider_payment_id=str(result['id']),
+        idempotency_key=idem,
+        amount=due,
+        status=result.get('status', 'PENDING'),
+        raw_status=result.get('status'),
+        qr_code=result.get('qr_code'),
+        qr_code_base64=result.get('qr_code_base64'),
+        ticket_url=result.get('ticket_url'),
+        reference_type=ref_type,
+        reference_id=ref_id,
+    )
     db.add(payment)
     try:
         db.commit(); db.refresh(payment)
