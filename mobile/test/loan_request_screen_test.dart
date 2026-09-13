@@ -102,6 +102,7 @@ void main() {
 
     expect(repository.simulateCalls, 1);
     expect(find.text('Simulação'), findsOneWidget);
+    await tester.scrollUntilVisible(find.text('Confirmar simulação'), 200);
     expect(find.text('Confirmar simulação'), findsOneWidget);
     expect(
       tester.widget<FilledButton>(
@@ -115,6 +116,10 @@ void main() {
 
     expect(repository.confirmCalls, 1);
     expect(find.text('Simulação confirmada'), findsOneWidget);
+    await tester.scrollUntilVisible(
+      find.widgetWithText(FilledButton, 'Solicitar empréstimo'),
+      200,
+    );
     expect(
       tester.widget<FilledButton>(
         find.widgetWithText(FilledButton, 'Solicitar empréstimo'),
@@ -122,6 +127,7 @@ void main() {
       isNotNull,
     );
 
+    await tester.scrollUntilVisible(find.byType(TextField), -200);
     await tester.enterText(find.byType(TextField), '200');
     await tester.pump();
 
