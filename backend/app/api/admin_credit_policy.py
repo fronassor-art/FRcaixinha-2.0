@@ -6,12 +6,13 @@ from app.db.session import get_db
 from app.api.deps import require_admin
 from app.models import Group, Loan, Member, AuditLog
 from app.services.credit_policy_v037 import evaluate_credit_policy
+from app.core.loan_rules import MAX_LOAN_INSTALLMENTS
 
 router = APIRouter(prefix="/admin/credit-policy", tags=["admin-credit-policy"])
 
 class CreditPolicyIn(BaseModel):
     max_simultaneous_loans: int = Field(ge=0, le=100)
-    max_installments: int = Field(ge=1, le=120)
+    max_installments: int = Field(ge=1, le=MAX_LOAN_INSTALLMENTS)
     grace_days: int = Field(ge=0, le=90)
     min_on_time_ratio: Decimal | None = Field(default=None, ge=0, le=1)
     max_overdue_installments: int = Field(ge=0, le=100)

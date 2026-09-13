@@ -1,15 +1,25 @@
 from datetime import date
 from decimal import Decimal
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+from app.core.loan_rules import MAX_LOAN_INSTALLMENTS
 
 class ContributionIn(BaseModel):
     competence: date
     amount: Decimal = Field(gt=0)
 
-class LoanRequestIn(BaseModel):
+class LoanSimulationIn(BaseModel):
     principal: Decimal = Field(gt=0)
-    monthly_rate: Decimal = Field(ge=0, le=1)
-    installments: int = Field(ge=1, le=24)
+    installments: int = Field(ge=1, le=MAX_LOAN_INSTALLMENTS)
+
+
+class LoanSimulationConfirmationIn(BaseModel):
+    simulation_token: str = Field(min_length=32, max_length=200)
+
+
+class LoanRequestIn(LoanSimulationIn):
+    """The official rate is server-owned and therefore is not request input."""
+    model_config = ConfigDict(extra="forbid")
+    simulation_token: str = Field(min_length=32, max_length=200)
 
 class LoanDecisionIn(BaseModel):
     approve: bool

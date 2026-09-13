@@ -1,19 +1,96 @@
-from datetime import date
+import hashlib
+import json
+import secrets
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.db.session import get_db
-from app.models import User, Member, Loan, LoanInstallment, AuditLog
-from app.schemas.finance import LoanRequestIn, LoanDecisionIn
+from app.models import User, Member, Loan, LoanSimulation, LoanInstallment, AuditLog
+from app.schemas.finance import LoanRequestIn, LoanDecisionIn, LoanSimulationIn, LoanSimulationConfirmationIn
 from app.api.deps import current_user, require_admin
 from app.services.notifications_v12 import create_notification
 from app.services.loan_engine_v17 import add_months, money
-from app.services.loan_amortization import calculate_linear_amortization
+from app.services.loan_amortization import build_loan_simulation, calculate_linear_amortization
 from app.services.loan_eligibility import evaluate_loan_eligibility
 from app.services.member_financial import get_member_financial_position
 from app.services.risk_v036 import cash_balance
+from app.core.loan_rules import LOAN_CALCULATION_VERSION, LOAN_SIMULATION_TTL_MINUTES, OFFICIAL_LOAN_MONTHLY_RATE, validate_loan_installments
+
+
+def _now_utc():
+    return datetime.now(timezone.utc)
+
+
+def _token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _as_utc(value):
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
+def _simulation_for_token(db, token, *, lock=False):
+    query = db.query(LoanSimulation).filter(LoanSimulation.token_hash == _token_hash(token))
+    if lock and db.bind is not None and db.bind.dialect.name == "postgresql":
+        query = query.with_for_update()
+    return query.first()
+
 
 router = APIRouter(prefix="/loans", tags=["loans"])
+@router.post("/simulations")
+def simulate_loan(data: LoanSimulationIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    member = _member_for(user, db)
+    try:
+        validate_loan_installments(data.installments)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    simulation = build_loan_simulation(data.principal, OFFICIAL_LOAN_MONTHLY_RATE, data.installments)
+    payload = {
+        "calculation_version": simulation["calculation_version"],
+        "principal": str(simulation["principal"]),
+        "monthly_rate": str(simulation["monthly_rate"]),
+        "installments": simulation["installments"],
+        "installments_schedule": [
+            {key: str(value) if key != "number" else value for key, value in row.items()}
+            for row in simulation["installments_schedule"]
+        ],
+        "totals": {key: str(value) for key, value in simulation["totals"].items()},
+    }
+    token = secrets.token_urlsafe(32)
+    now = _now_utc()
+    snapshot_json = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    row = LoanSimulation(
+        member_id=member.id, principal=simulation["principal"], monthly_rate=OFFICIAL_LOAN_MONTHLY_RATE,
+        installments=data.installments, calculation_version=LOAN_CALCULATION_VERSION,
+        schedule_json=snapshot_json, schedule_hash=hashlib.sha256(snapshot_json.encode("utf-8")).hexdigest(),
+        token_hash=_token_hash(token), status="SIMULATED",
+        expires_at=now + timedelta(minutes=LOAN_SIMULATION_TTL_MINUTES), created_at=now,
+    )
+    db.add(row)
+    db.flush()
+    db.add(AuditLog(actor_user_id=user.id, action="LOAN_SIMULATION_CREATED", entity_type="LOAN_SIMULATION", entity_id=str(row.id), details=row.schedule_hash))
+    db.commit()
+    return {"simulation_token": token, "expires_at": row.expires_at.isoformat(), **payload}
+
+
+@router.post("/simulations/confirm")
+def confirm_simulation(data: LoanSimulationConfirmationIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    member = _member_for(user, db)
+    row = _simulation_for_token(db, data.simulation_token, lock=True)
+    if row is None or row.member_id != member.id:
+        raise HTTPException(404, "Simulação não encontrada.")
+    if _as_utc(row.expires_at) <= _now_utc():
+        raise HTTPException(409, "LOAN_SIMULATION_EXPIRED")
+    if row.status == "CONSUMED":
+        raise HTTPException(409, "LOAN_SIMULATION_ALREADY_CONSUMED")
+    if row.status != "CONFIRMED":
+        row.status = "CONFIRMED"
+        row.confirmed_at = _now_utc()
+        db.add(AuditLog(actor_user_id=user.id, action="LOAN_SIMULATION_CONFIRMED", entity_type="LOAN_SIMULATION", entity_id=str(row.id), details=row.schedule_hash))
+        db.commit()
+    return {"id": row.id, "status": row.status, "confirmed_at": row.confirmed_at.isoformat() if row.confirmed_at else None}
+
 
 def _member_for(user, db):
     member = db.query(Member).filter(Member.user_id == user.id, Member.status == "ACTIVE").first()
@@ -89,12 +166,32 @@ def _serialize(loan, db):
 @router.post("")
 def request_loan(data: LoanRequestIn, user: User=Depends(current_user), db: Session=Depends(get_db)):
     member = _member_for(user, db)
-    if data.principal <= 0 or data.installments <= 0 or data.installments > 120:
+    if data.principal <= 0:
         raise HTTPException(400, "Dados do empréstimo inválidos.")
+    try:
+        validate_loan_installments(data.installments)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    simulation = _simulation_for_token(db, data.simulation_token, lock=True)
+    if simulation is None or simulation.member_id != member.id:
+        raise HTTPException(409, "LOAN_SIMULATION_NOT_FOUND")
+    if _as_utc(simulation.expires_at) <= _now_utc():
+        raise HTTPException(409, "LOAN_SIMULATION_EXPIRED")
+    if simulation.status == "CONSUMED":
+        raise HTTPException(409, "LOAN_SIMULATION_ALREADY_CONSUMED")
+    if simulation.status != "CONFIRMED" or simulation.confirmed_at is None:
+        raise HTTPException(409, "LOAN_SIMULATION_NOT_CONFIRMED")
+    if (
+        Decimal(simulation.principal) != Decimal(data.principal)
+        or simulation.installments != data.installments
+        or Decimal(simulation.monthly_rate) != OFFICIAL_LOAN_MONTHLY_RATE
+        or simulation.calculation_version != LOAN_CALCULATION_VERSION
+    ):
+        raise HTTPException(409, "LOAN_SIMULATION_TERMS_MISMATCH")
     loan = Loan(
         member_id=member.id,
         principal=data.principal,
-        monthly_rate=data.monthly_rate,
+        monthly_rate=OFFICIAL_LOAN_MONTHLY_RATE,
         installments=data.installments,
     )
 
@@ -113,6 +210,12 @@ def request_loan(data: LoanRequestIn, user: User=Depends(current_user), db: Sess
         )
 
     db.add(loan)
+    db.flush()
+    simulation.status = "CONSUMED"
+    simulation.consumed_at = _now_utc()
+    simulation.loan_id = loan.id
+    db.add(AuditLog(actor_user_id=user.id, action="LOAN_SIMULATION_CONSUMED", entity_type="LOAN_SIMULATION", entity_id=str(simulation.id), details=str(loan.id)))
+    db.add(simulation)
     db.commit()
     db.refresh(loan)
 

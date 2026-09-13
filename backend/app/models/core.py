@@ -1,9 +1,10 @@
 from datetime import datetime, date, timezone
 from decimal import Decimal
-from sqlalchemy import String, Integer, Boolean, DateTime, Date, Numeric, ForeignKey, Text, UniqueConstraint, Index
+from sqlalchemy import String, Integer, Boolean, DateTime, Date, Numeric, ForeignKey, Text, UniqueConstraint, Index, CheckConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy import event
 from app.db.base import Base
+from app.core.loan_rules import MAX_LOAN_INSTALLMENTS
 
 def now_utc():
     return datetime.now(timezone.utc)
@@ -98,7 +99,7 @@ class Group(Base):
     max_global_exposure: Mapped[Decimal | None] = mapped_column(Numeric(14,2), nullable=True)
     max_exposure_ratio: Mapped[Decimal | None] = mapped_column(Numeric(8,5), nullable=True)
     max_simultaneous_loans: Mapped[int] = mapped_column(Integer, default=1)
-    max_installments: Mapped[int] = mapped_column(Integer, default=12)
+    max_installments: Mapped[int] = mapped_column(Integer, default=MAX_LOAN_INSTALLMENTS)
     grace_days: Mapped[int] = mapped_column(Integer, default=0)
     min_on_time_ratio: Mapped[Decimal | None] = mapped_column(Numeric(6,5), nullable=True)
     max_overdue_installments: Mapped[int] = mapped_column(Integer, default=0)
@@ -107,6 +108,9 @@ class Group(Base):
     # v0.48: explicit per-loan limits used by the unified approval engine.
     max_loan_amount: Mapped[Decimal | None] = mapped_column(Numeric(14,2), nullable=True)
     max_loan_income_multiple: Mapped[Decimal | None] = mapped_column(Numeric(8,3), nullable=True)
+    __table_args__ = (
+        CheckConstraint(f"max_installments >= 1 AND max_installments <= {MAX_LOAN_INSTALLMENTS}", name="ck_groups_max_installments_1_6"),
+    )
 
 class Member(Base):
     __tablename__ = "members"
@@ -186,6 +190,30 @@ class Loan(Base):
     decided_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
     disbursed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class LoanSimulation(Base):
+    __tablename__ = "loan_simulations"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    member_id: Mapped[int] = mapped_column(ForeignKey("members.id"), index=True)
+    principal: Mapped[Decimal] = mapped_column(Numeric(14, 2))
+    monthly_rate: Mapped[Decimal] = mapped_column(Numeric(8, 5))
+    installments: Mapped[int] = mapped_column(Integer)
+    calculation_version: Mapped[str] = mapped_column(String(60))
+    schedule_json: Mapped[str] = mapped_column(Text())
+    schedule_hash: Mapped[str] = mapped_column(String(64), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(20), default="SIMULATED", index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    loan_id: Mapped[int | None] = mapped_column(ForeignKey("loans.id"), unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    __table_args__ = (
+        CheckConstraint("installments >= 1 AND installments <= 6", name="ck_loan_simulations_installments_1_6"),
+        CheckConstraint("monthly_rate = 0.20", name="ck_loan_simulations_official_rate"),
+    )
+
 
 class LoanInstallment(Base):
     __tablename__ = "loan_installments"

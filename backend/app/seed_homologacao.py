@@ -39,7 +39,7 @@ def get_or_create_group(db):
             max_global_exposure=Decimal("20000.00"),
             max_exposure_ratio=Decimal("0.70"),
             max_simultaneous_loans=1,
-            max_installments=12,
+            max_installments=6,
             grace_days=0,
             min_on_time_ratio=Decimal("0.80"),
             max_overdue_installments=2,

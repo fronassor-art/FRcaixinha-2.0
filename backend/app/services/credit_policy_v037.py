@@ -3,6 +3,7 @@ from sqlalchemy import func, or_
 from datetime import date, timedelta
 from sqlalchemy.orm import Session
 from app.models import Group, Member, Loan, LoanInstallment, Quota
+from app.core.loan_rules import MAX_LOAN_INSTALLMENTS
 
 CENT = Decimal("0.01")
 def money(v):
@@ -20,8 +21,13 @@ def evaluate_credit_policy(db: Session, loan: Loan, group: Group):
     if simultaneous >= group.max_simultaneous_loans:
         errors.append("Limite de empréstimos simultâneos excedido.")
 
-    checks.append({"rule":"MAX_INSTALLMENTS","status":"PASS" if loan.installments <= group.max_installments else "FAIL","actual":loan.installments,"limit":group.max_installments})
-    if loan.installments > group.max_installments: errors.append("Quantidade máxima de parcelas excedida.")
+    absolute_installments_ok = 1 <= loan.installments <= MAX_LOAN_INSTALLMENTS
+    checks.append({"rule":"ABSOLUTE_MAX_INSTALLMENTS","status":"PASS" if absolute_installments_ok else "FAIL","actual":loan.installments,"limit":MAX_LOAN_INSTALLMENTS})
+    if not absolute_installments_ok:
+        errors.append(f"Empréstimos devem ter entre 1 e {MAX_LOAN_INSTALLMENTS} parcelas.")
+    configured_installment_limit = min(int(group.max_installments), MAX_LOAN_INSTALLMENTS)
+    checks.append({"rule":"MAX_INSTALLMENTS","status":"PASS" if loan.installments <= configured_installment_limit else "FAIL","actual":loan.installments,"limit":configured_installment_limit})
+    if loan.installments > configured_installment_limit: errors.append("Quantidade máxima de parcelas excedida.")
 
     cutoff = date.today() - timedelta(days=int(group.grace_days or 0))
     overdue = db.query(func.count(LoanInstallment.id)).join(Loan, Loan.id==LoanInstallment.loan_id).filter(Loan.member_id==member.id, LoanInstallment.paid_at.is_(None), LoanInstallment.due_date < cutoff).scalar() or 0

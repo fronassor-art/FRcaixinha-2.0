@@ -20,7 +20,7 @@ def test_alembic_chain_has_single_head():
     import subprocess
 
     result = subprocess.run(
-        ["alembic", "heads"],
+        [str(ROOT / "backend" / ".venv-debian" / "bin" / "alembic"), "heads"],
         capture_output=True,
         text=True,
         check=True,
@@ -32,7 +32,7 @@ def test_alembic_chain_has_single_head():
         if line.strip()
     ]
 
-    assert heads == ["005668b9e159"]
+    assert heads == ["0078_loan_simulation_confirmation_v102"]
 
 def test_environment_templates_are_placeholders():
     for name in ('.env.production.example', '.env.staging.example'):

@@ -19,7 +19,7 @@ def test_security_chain_is_present_and_single_head():
     import subprocess
 
     result = subprocess.run(
-        ["alembic", "heads"],
+        [str(Path(__file__).parents[1] / ".venv-debian" / "bin" / "alembic"), "heads"],
         capture_output=True,
         text=True,
         check=True,
@@ -31,7 +31,7 @@ def test_security_chain_is_present_and_single_head():
         if line.strip()
     ]
 
-    assert heads == ["005668b9e159"]
+    assert heads == ["0078_loan_simulation_confirmation_v102"]
 
     rows = revisions()
     assert rows["0006_security_v11"] == "0005_financial_operations"

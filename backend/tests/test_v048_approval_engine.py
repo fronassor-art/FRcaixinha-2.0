@@ -32,7 +32,7 @@ def seed_special_loan():
     group = Group(
         name="G",
         max_simultaneous_loans=1,
-        max_installments=12,
+        max_installments=6,
         max_overdue_installments=2,
         max_quota_multiple=Decimal("10.00"),
         max_loan_amount=Decimal("3000.00"),

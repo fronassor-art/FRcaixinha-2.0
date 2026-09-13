@@ -28,3 +28,5 @@ def test_linear_amortization_uses_outstanding_balance():
 
     assert total_principal == Decimal("100.00")
     assert final_balance == Decimal("0.00")
+    assert [row["balance_after"] for row in rows][-1] == Decimal("0.00")
+    assert sum(row["amount"] for row in rows) == Decimal("169.99")

@@ -5,6 +5,7 @@ from app.models import Group, Loan, AuditLog, Member
 from app.services.financial_risk_v047 import assess_loan
 from app.services.credit_policy_v037 import evaluate_credit_policy
 from app.services.risk_v036 import evaluate_release
+from app.core.loan_rules import MAX_LOAN_INSTALLMENTS, validate_loan_installments
 
 
 def evaluate_loan_pipeline(db: Session, loan: Loan, *, persist_risk: bool = True, include_release: bool = False):
@@ -46,6 +47,10 @@ def evaluate_loan_pipeline(db: Session, loan: Loan, *, persist_risk: bool = True
 
 
 def assert_loan_approval_allowed(db: Session, loan: Loan, admin_id: int, force_exception: bool = False, admin_note: str | None = None):
+    try:
+        validate_loan_installments(loan.installments)
+    except ValueError as exc:
+        raise ValueError({"code": "LOAN_INSTALLMENTS_LIMIT_EXCEEDED", "limit": MAX_LOAN_INSTALLMENTS, "message": str(exc)})
     result = evaluate_loan_pipeline(db, loan, persist_risk=True, include_release=False)
     if result['decision'] == 'BLOCK' and not force_exception:
         raise ValueError({'code':'FINANCIAL_APPROVAL_BLOCKED','pipeline':result})

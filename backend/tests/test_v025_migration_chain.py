@@ -6,7 +6,7 @@ def test_single_alembic_head_after_security_reconciliation():
     import subprocess
 
     result = subprocess.run(
-        ["alembic", "heads"],
+        [str(Path(__file__).parents[1] / ".venv-debian" / "bin" / "alembic"), "heads"],
         capture_output=True,
         text=True,
         check=True,
@@ -18,7 +18,7 @@ def test_single_alembic_head_after_security_reconciliation():
         if line.strip()
     ]
 
-    assert heads == ["005668b9e159"]
+    assert heads == ["0078_loan_simulation_confirmation_v102"]
 
     root = Path(__file__).parents[1] / "alembic" / "versions"
     rows = {}
