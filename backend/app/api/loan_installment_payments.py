@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
@@ -6,6 +7,7 @@ from app.db.session import get_db
 from app.models import User, Member, Loan, LoanInstallment, Payment
 from app.services.mercado_pago import MercadoPagoClient
 from app.services.loan_engine_v17 import installment_due as remaining
+from app.services.payment_settlement import installment_financial_status
 
 router = APIRouter(prefix='/loan-installments', tags=['loan-installments'])
 
@@ -61,6 +63,7 @@ async def create_installment_pix(installment_id: int, user: User=Depends(current
         qr_code=result.get('qr_code'),
         qr_code_base64=result.get('qr_code_base64'),
         ticket_url=result.get('ticket_url'),
+        external_reference=f"loan-installment-{inst.id}",
         reference_type=ref_type,
         reference_id=ref_id,
     )
@@ -79,5 +82,5 @@ async def create_installment_pix(installment_id: int, user: User=Depends(current
 def installment_payment(installment_id: int, user: User=Depends(current_user), db: Session=Depends(get_db)):
     _, inst = _owned_installment(user, installment_id, db)
     payment = db.query(Payment).filter(Payment.reference_type == 'LOAN_INSTALLMENT', Payment.reference_id == str(inst.id)).order_by(Payment.id.desc()).first()
-    return {'payment': None if not payment else _response(payment), 'installment_status': inst.status,
+    return {'payment': None if not payment else _response(payment), 'installment_status': installment_financial_status(inst, datetime.now(timezone.utc)),
             'paid_amount': str(inst.paid_amount or 0), 'remaining_amount': str(remaining(inst))}

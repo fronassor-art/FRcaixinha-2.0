@@ -12,7 +12,7 @@ from sqlalchemy.orm import sessionmaker
 from app.main import app
 from app.db.base import Base
 from app.db.session import get_db
-from app.models import User, Group, Member, Contribution, Payment, LedgerEntry
+from app.models import User, Group, Member, Contribution, Payment, PaymentSettlement, LedgerEntry
 from app.core.security import hash_password
 
 
@@ -144,6 +144,7 @@ def test_webhook_approved_baixa_contribuicao_e_ledger():
 
         assert updated_payment.status == "approved"
         assert updated_contribution.status == "PAID"
+        assert db.query(PaymentSettlement).filter(PaymentSettlement.payment_id == payment_id).count() == 1
         assert len(ledger_entries) == 1
         assert ledger_entries[0].reference_type == "CONTRIBUTION_PAYMENT"
         assert ledger_entries[0].reference_id == str(payment_id)

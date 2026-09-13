@@ -74,6 +74,9 @@ def _persist_remote_payload(payment: Payment, remote_payload: dict[str, Any] | N
     if status_detail is not None:
         payment.provider_status_detail = str(status_detail)
     transaction_details = safe_payload.get("transaction_details")
+    point_of_interaction = safe_payload.get("point_of_interaction")
+    if not isinstance(transaction_details, dict) and isinstance(point_of_interaction, dict):
+        transaction_details = point_of_interaction.get("transaction_data")
     if isinstance(transaction_details, dict):
         txid = transaction_details.get("txid")
         end_to_end_id = transaction_details.get("end_to_end_id")
@@ -89,16 +92,18 @@ def _contribution_paid_amount(contribution: Contribution) -> Decimal:
     return _money(contribution.amount) if contribution.status == "PAID" else ZERO
 
 
-def _contribution_status(contribution: Contribution, paid_amount: Decimal, as_of: datetime) -> str:
+def contribution_financial_status(contribution: Contribution, paid_amount: Decimal, as_of: datetime) -> str:
     remaining = max(ZERO, _money(contribution.amount) - paid_amount)
     if remaining == ZERO:
         return "PAID"
     if contribution.due_date is not None and contribution.due_date < as_of.date():
         return "OVERDUE"
+    if contribution.paid_amount is None and contribution.status in {"PENDING", "PARTIAL", "OVERDUE"}:
+        return contribution.status
     return "PARTIAL" if paid_amount > ZERO else "PENDING"
 
 
-def _installment_status(installment: LoanInstallment, as_of: datetime) -> str:
+def installment_financial_status(installment: LoanInstallment, as_of: datetime) -> str:
     remaining = _money(installment.amount) - _money(installment.paid_amount)
     remaining += max(ZERO, _money(installment.penalty_amount) - _money(installment.paid_penalty_amount))
     if remaining <= ZERO:
@@ -234,13 +239,13 @@ def settle_confirmed_pix_payment(
     penalty_applied = interest_applied = principal_applied = ZERO
     if contribution is not None:
         before_paid = _contribution_paid_amount(contribution)
-        before_status = _contribution_status(contribution, before_paid, effective_at)
+        before_status = contribution_financial_status(contribution, before_paid, effective_at)
         open_amount = max(ZERO, _money(contribution.amount) - before_paid)
         applied = min(received, open_amount)
         principal_applied = applied
         after_paid = _money(before_paid + applied)
         contribution.paid_amount = after_paid
-        after_status = _contribution_status(contribution, after_paid, effective_at)
+        after_status = contribution_financial_status(contribution, after_paid, effective_at)
         contribution.status = after_status
         if after_status == "PAID" and contribution.paid_at is None:
             contribution.paid_at = effective_at
@@ -260,7 +265,7 @@ def settle_confirmed_pix_payment(
             raise ValueError("Participante do empréstimo não encontrado.")
         before_penalty = _money(installment.paid_penalty_amount)
         before_base = _money(installment.paid_amount)
-        before_status = _installment_status(installment, effective_at)
+        before_status = installment_financial_status(installment, effective_at)
         interest_open = max(ZERO, _money(installment.interest) - min(_money(installment.interest), before_base))
         apply_confirmed_payment(db, payment, installment, amount=received)
         penalty_applied = _money(installment.paid_penalty_amount) - before_penalty
@@ -268,7 +273,7 @@ def settle_confirmed_pix_payment(
         interest_applied = min(base_applied, interest_open)
         principal_applied = max(ZERO, base_applied - interest_applied)
         applied = _money(penalty_applied + base_applied)
-        after_status = _installment_status(installment, effective_at)
+        after_status = installment_financial_status(installment, effective_at)
         ensure_loan_completion(db, loan)
         obligation_type = "LOAN_INSTALLMENT"
         member_id = member.id

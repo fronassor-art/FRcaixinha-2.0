@@ -24,6 +24,7 @@ from app.models import (
     LoanInstallment,
     Member,
     Payment,
+    PaymentSettlement,
     User,
 )
 from app.services.ledger import verify_ledger_chain
@@ -211,6 +212,7 @@ def test_webhook_approved_settles_installment_idempotently_and_hashes_ledger(mon
 
     assert updated_payment.status == "approved"
     assert updated_payment.ledger_posted_at is not None
+    assert db.query(PaymentSettlement).filter(PaymentSettlement.payment_id == payment_id).count() == 1
     assert updated_installment.status == "PAID"
     assert updated_installment.paid_amount == Decimal("120.00")
     assert updated_installment.paid_penalty_amount == Decimal("10.00")

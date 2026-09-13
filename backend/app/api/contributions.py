@@ -1,4 +1,5 @@
-from datetime import date
+from datetime import date, datetime, timezone
+import calendar
 from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -6,6 +7,7 @@ from app.db.session import get_db
 from app.models import User, Member, Contribution, Payment, Quota, Group
 from app.schemas.finance import ContributionIn
 from app.api.deps import current_user
+from app.services.payment_settlement import contribution_financial_status
 
 router = APIRouter(prefix="/contributions", tags=["contributions"])
 
@@ -15,13 +17,26 @@ def _member_or_403(user: User, db: Session):
         raise HTTPException(403, "Usuário não é membro ativo.")
     return member
 
+def _paid_amount(c: Contribution):
+    return Decimal(c.paid_amount or (c.amount if c.status == "PAID" else 0)).quantize(Decimal("0.01"))
+
+def _status(c: Contribution):
+    return contribution_financial_status(c, _paid_amount(c), datetime.now(timezone.utc))
+
+def _due_date(competence: date, due_day: int | None):
+    if due_day is None:
+        return None
+    return date(competence.year, competence.month, min(max(1, int(due_day)), calendar.monthrange(competence.year, competence.month)[1]))
+
 def _serialize(c: Contribution, db: Session):
     payment = db.get(Payment, c.payment_id) if c.payment_id else None
     return {
         "id": c.id,
         "competence": c.competence.isoformat(),
         "amount": str(c.amount),
-        "status": c.status,
+        "status": _status(c),
+        "due_date": c.due_date.isoformat() if c.due_date else None,
+        "paid_amount": str(_paid_amount(c)),
         "payment": None if not payment else {
             "id": payment.id,
             "provider": payment.provider,
@@ -39,7 +54,8 @@ def create_contribution(data: ContributionIn, user: User=Depends(current_user), 
     ).first()
     if existing:
         raise HTTPException(409, "Contribuição já existe para esta competência.")
-    c = Contribution(member_id=member.id, competence=data.competence, amount=data.amount, status="PENDING")
+    group = db.get(Group, member.group_id)
+    c = Contribution(member_id=member.id, competence=data.competence, amount=data.amount, status="PENDING", due_date=_due_date(data.competence, group.due_day if group else None), paid_amount=Decimal("0.00"))
     db.add(c); db.commit(); db.refresh(c)
     return _serialize(c, db)
 
