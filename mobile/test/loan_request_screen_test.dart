@@ -98,7 +98,7 @@ void main() {
     final loanList = find.descendant(
       of: find.byType(ListView),
       matching: find.byType(Scrollable),
-    );
+    ).first;
 
     await tester.enterText(find.byType(TextField), '100');
     await tester.tap(find.text('Simular condições'));
