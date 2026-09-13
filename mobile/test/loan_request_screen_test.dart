@@ -95,6 +95,10 @@ void main() {
   ) async {
     final repository = FakeLoanRepository(sampleSimulation());
     await pumpLoanRequest(tester, repository);
+    final loanList = find.descendant(
+      of: find.byType(ListView),
+      matching: find.byType(Scrollable),
+    );
 
     await tester.enterText(find.byType(TextField), '100');
     await tester.tap(find.text('Simular condições'));
@@ -102,7 +106,11 @@ void main() {
 
     expect(repository.simulateCalls, 1);
     expect(find.text('Simulação'), findsOneWidget);
-    await tester.scrollUntilVisible(find.text('Confirmar simulação'), 200);
+    await tester.scrollUntilVisible(
+      find.text('Confirmar simulação'),
+      200,
+      scrollable: loanList,
+    );
     expect(find.text('Confirmar simulação'), findsOneWidget);
     expect(
       tester.widget<FilledButton>(
@@ -119,6 +127,7 @@ void main() {
     await tester.scrollUntilVisible(
       find.widgetWithText(FilledButton, 'Solicitar empréstimo'),
       200,
+      scrollable: loanList,
     );
     expect(
       tester.widget<FilledButton>(
@@ -127,7 +136,11 @@ void main() {
       isNotNull,
     );
 
-    await tester.scrollUntilVisible(find.byType(TextField), -200);
+    await tester.scrollUntilVisible(
+      find.byType(TextField),
+      -200,
+      scrollable: loanList,
+    );
     await tester.enterText(find.byType(TextField), '200');
     await tester.pump();
 
