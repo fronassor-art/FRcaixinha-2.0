@@ -1,4 +1,5 @@
 import '../services/api_client.dart';
+import '../models/finance_models.dart';
 
 class AppRepository {
   final ApiClient api;
@@ -13,10 +14,29 @@ class AppRepository {
   Future<Map<String, dynamic>> createInstallmentPix(int installmentId) => api.post('/loan-installments/$installmentId/pix', {});
   Future<Map<String, dynamic>> installmentPayment(int installmentId) => api.get('/loan-installments/$installmentId/payment');
   Future<Map<String, dynamic>> statement() => api.get('/members/me/statement');
-  Future<Map<String, dynamic>> requestLoan({required String principal, required String monthlyRate, required int installments}) =>
-      api.post('/loans', {
-        'principal': principal,
-        'monthly_rate': monthlyRate,
-        'installments': installments,
-      });
+
+  Future<LoanSimulation> simulateLoan({
+    required String principal,
+    required int installments,
+  }) async {
+    final response = await api.post('/loans/simulations', {
+      'principal': principal,
+      'installments': installments,
+    });
+    return LoanSimulation.fromJson(response);
+  }
+
+  Future<void> confirmLoanSimulation(String simulationToken) async {
+    await api.post('/loans/simulations/confirm', {'simulation_token': simulationToken});
+  }
+
+  Future<Map<String, dynamic>> requestLoan({
+    required String principal,
+    required int installments,
+    required String simulationToken,
+  }) => api.post('/loans', {
+    'principal': principal,
+    'installments': installments,
+    'simulation_token': simulationToken,
+  });
 }
