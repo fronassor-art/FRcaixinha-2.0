@@ -141,8 +141,15 @@ class Contribution(Base):
     status: Mapped[str] = mapped_column(String(20), default="PENDING")
     payment_id: Mapped[int | None] = mapped_column(ForeignKey("payments.id"))
     pix_idempotency_key: Mapped[str | None] = mapped_column(String(64), unique=True)
+    due_date: Mapped[date | None] = mapped_column(Date)
+    paid_amount: Mapped[Decimal | None] = mapped_column(Numeric(14,2))
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
-    __table_args__ = (UniqueConstraint("member_id", "competence", name="uq_contribution_member_competence"),)
+    __table_args__ = (
+        UniqueConstraint("member_id", "competence", name="uq_contribution_member_competence"),
+        Index("ix_contributions_status_due_date", "status", "due_date"),
+        Index("ix_contributions_member_status_due_date", "member_id", "status", "due_date"),
+    )
 
 class Payment(Base):
     __tablename__ = "payments"
@@ -157,11 +164,62 @@ class Payment(Base):
     qr_code: Mapped[str | None] = mapped_column(Text())
     qr_code_base64: Mapped[str | None] = mapped_column(Text())
     ticket_url: Mapped[str | None] = mapped_column(Text())
+    external_reference: Mapped[str | None] = mapped_column(String(150), index=True)
+    pix_txid: Mapped[str | None] = mapped_column(String(100))
+    end_to_end_id: Mapped[str | None] = mapped_column(String(100))
+    provider_status_detail: Mapped[str | None] = mapped_column(String(150))
+    provider_payload_json: Mapped[str | None] = mapped_column(Text())
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    amount_received: Mapped[Decimal | None] = mapped_column(Numeric(14,2))
     ledger_posted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     reference_type: Mapped[str | None] = mapped_column(String(50), index=True)
     reference_id: Mapped[str | None] = mapped_column(String(80), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
-    __table_args__ = (UniqueConstraint("provider", "provider_payment_id", name="uq_provider_payment"),)
+    __table_args__ = (
+        UniqueConstraint("provider", "provider_payment_id", name="uq_provider_payment"),
+        Index("uq_payments_provider_pix_txid", "provider", "pix_txid", unique=True),
+        Index("uq_payments_provider_end_to_end_id", "provider", "end_to_end_id", unique=True),
+        Index("ix_payments_status_expires_at", "status", "expires_at"),
+    )
+
+class PaymentSettlement(Base):
+    __tablename__ = "payment_settlements"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    payment_id: Mapped[int] = mapped_column(ForeignKey("payments.id"), unique=True)
+    member_id: Mapped[int] = mapped_column(ForeignKey("members.id"))
+    obligation_type: Mapped[str] = mapped_column(String(30))
+    contribution_id: Mapped[int | None] = mapped_column(ForeignKey("contributions.id"))
+    loan_installment_id: Mapped[int | None] = mapped_column(ForeignKey("loan_installments.id"))
+    amount_received: Mapped[Decimal] = mapped_column(Numeric(14,2), default=Decimal("0.00"))
+    amount_applied: Mapped[Decimal] = mapped_column(Numeric(14,2), default=Decimal("0.00"))
+    principal_applied: Mapped[Decimal] = mapped_column(Numeric(14,2), default=Decimal("0.00"))
+    interest_applied: Mapped[Decimal] = mapped_column(Numeric(14,2), default=Decimal("0.00"))
+    penalty_applied: Mapped[Decimal] = mapped_column(Numeric(14,2), default=Decimal("0.00"))
+    excess_amount: Mapped[Decimal] = mapped_column(Numeric(14,2), default=Decimal("0.00"))
+    obligation_status_before: Mapped[str] = mapped_column(String(20))
+    obligation_status_after: Mapped[str] = mapped_column(String(20))
+    confirmed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    confirmation_source: Mapped[str] = mapped_column(String(30))
+    webhook_event_id: Mapped[int | None] = mapped_column(ForeignKey("webhook_events.id"))
+    receipt_number: Mapped[str] = mapped_column(String(80), unique=True)
+    receipt_version: Mapped[str] = mapped_column(String(20))
+    receipt_snapshot_json: Mapped[str] = mapped_column(Text())
+    receipt_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    __table_args__ = (
+        CheckConstraint("amount_received >= 0 AND amount_applied >= 0 AND principal_applied >= 0 AND interest_applied >= 0 AND penalty_applied >= 0 AND excess_amount >= 0", name="ck_payment_settlements_nonnegative_amounts"),
+        CheckConstraint("amount_received = amount_applied + excess_amount", name="ck_payment_settlements_received_allocation"),
+        CheckConstraint("amount_applied = principal_applied + interest_applied + penalty_applied", name="ck_payment_settlements_applied_components"),
+        CheckConstraint("(obligation_type = 'CONTRIBUTION' AND contribution_id IS NOT NULL AND loan_installment_id IS NULL) OR (obligation_type = 'LOAN_INSTALLMENT' AND loan_installment_id IS NOT NULL AND contribution_id IS NULL)", name="ck_payment_settlements_single_obligation"),
+        CheckConstraint("obligation_status_before IN ('PENDING', 'PARTIAL', 'OVERDUE', 'PAID')", name="ck_payment_settlements_status_before"),
+        CheckConstraint("obligation_status_after IN ('PENDING', 'PARTIAL', 'OVERDUE', 'PAID')", name="ck_payment_settlements_status_after"),
+        CheckConstraint("receipt_version = 'v1'", name="ck_payment_settlements_receipt_version"),
+        Index("ix_payment_settlements_member_confirmed", "member_id", "confirmed_at"),
+        Index("ix_payment_settlements_contribution_id", "contribution_id"),
+        Index("ix_payment_settlements_loan_installment_id", "loan_installment_id"),
+        Index("ix_payment_settlements_webhook_event_id", "webhook_event_id"),
+    )
 
 class WebhookEvent(Base):
     __tablename__ = "webhook_events"
@@ -233,7 +291,10 @@ class LoanInstallment(Base):
     collection_stage: Mapped[str] = mapped_column(String(20), default="NORMAL", index=True)
     last_collection_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     collection_attempts: Mapped[int] = mapped_column(Integer, default=0)
-    __table_args__ = (UniqueConstraint("loan_id", "number", name="uq_loan_installment_number"),)
+    __table_args__ = (
+        UniqueConstraint("loan_id", "number", name="uq_loan_installment_number"),
+        Index("ix_loan_installments_status_due_date", "status", "due_date"),
+    )
 
 class LedgerEntry(Base):
     __tablename__ = "ledger_entries"
