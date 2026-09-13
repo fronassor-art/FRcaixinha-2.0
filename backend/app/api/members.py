@@ -45,3 +45,11 @@ def my_statement(user: User = Depends(current_user), db: Session = Depends(get_d
         from fastapi import HTTPException
         raise HTTPException(404, "Extrato não encontrado.")
     return result
+
+@router.get('/me/obligations')
+def my_obligations(user:User=Depends(current_user),db:Session=Depends(get_db)):
+ from fastapi import HTTPException
+ from app.services.financial_obligations import member_obligations
+ member=db.query(Member).filter(Member.user_id==user.id,Member.status=='ACTIVE').first()
+ if not member: raise HTTPException(404,'Participante não encontrado.')
+ return {'member_id':member.id,'items':member_obligations(db,member.id)}

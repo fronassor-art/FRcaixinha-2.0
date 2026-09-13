@@ -243,3 +243,20 @@ def ledger_reverse(entry_id: int, payload: LedgerReversalIn, admin=Depends(requi
     except ValueError as exc:
         db.rollback()
         raise HTTPException(409, str(exc))
+
+@router.get('/delinquency')
+def delinquency(obligation_type:str|None=None,status:str|None=None,member_id:int|None=None,overdue_only:bool=False,due_from:date|None=None,due_to:date|None=None,admin=Depends(require_admin),db:Session=Depends(get_db)):
+ from app.services.financial_obligations import all_obligations
+ items=all_obligations(db); out=[]
+ for x in items:
+  if x['outstanding_amount']=='0.00' or (obligation_type and x['obligation_type']!=obligation_type.upper()) or (status and x['financial_status']!=status.upper()) or (member_id is not None and x['member_id']!=member_id) or (overdue_only and x['financial_status']!='OVERDUE') or (due_from and (not x['due_date'] or date.fromisoformat(x['due_date']) < due_from)) or (due_to and (not x['due_date'] or date.fromisoformat(x['due_date']) > due_to)): continue
+  m=db.get(Member,x['member_id']); u=db.get(User,m.user_id) if m else None; x=x.copy(); x['member_name']=u.name if u else None; out.append(x)
+ return {'items':out}
+
+@router.get('/delinquency/summary')
+def delinquency_summary(admin=Depends(require_admin),db:Session=Depends(get_db)):
+ from app.services.financial_obligations import all_obligations
+ rows=all_obligations(db); counts={s:0 for s in ('PENDING','PARTIAL','OVERDUE','PAID')}; total=overdue=partial=Decimal('0')
+ for x in rows:
+  counts[x['financial_status']]+=1; amount=Decimal(x['outstanding_amount']); total+=amount; overdue+=amount if x['financial_status']=='OVERDUE' else 0; partial+=amount if x['financial_status']=='PARTIAL' else 0
+ return {'counts':counts,'total_outstanding':money(total),'total_overdue':money(overdue),'total_partial_outstanding':money(partial),'by_type':{'contributions':sum(1 for x in rows if x['obligation_type']=='CONTRIBUTION'),'loans':sum(1 for x in rows if x['obligation_type']=='LOAN_INSTALLMENT')}}
