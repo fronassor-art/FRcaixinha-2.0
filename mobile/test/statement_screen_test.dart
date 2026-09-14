@@ -5,12 +5,28 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:frcaixinha/models/finance_models.dart';
 import 'package:frcaixinha/repositories/app_repository.dart';
 import 'package:frcaixinha/screens/statement_screen.dart';
+import 'package:frcaixinha/screens/payments/pix_receipt_screen.dart';
 import 'package:frcaixinha/services/api_client.dart';
 
 class FakeStatementRepository extends AppRepository {
   FakeStatementRepository(this.responses) : super(ApiClient());
   final List<Object> responses;
   int calls = 0;
+  final List<int> receiptPaymentIds = [];
+
+  @override
+  Future<PixReceipt> paymentReceipt(int paymentId) async {
+    receiptPaymentIds.add(paymentId);
+    return PixReceipt.fromJson({
+      'receipt_version': 'v1',
+      'receipt_number': 'PIX-' + paymentId.toString(),
+      'payment': {'id': paymentId},
+      'obligation': {},
+      'amounts': {},
+      'confirmation': {},
+      'ledger_entries': [],
+    });
+  }
 
   @override
   Future<MemberStatement> statement() async {
@@ -38,6 +54,7 @@ Map<String, dynamic> movement({
   String? principal,
   String? interest,
   String? penalty,
+  int? paymentId,
   bool receiptAvailable = false,
 }) => {
   'id': id,
@@ -52,6 +69,7 @@ Map<String, dynamic> movement({
   'principal': principal,
   'interest': interest,
   'penalty': penalty,
+  'payment_id': paymentId,
   'receipt_available': receiptAvailable,
 };
 
@@ -130,5 +148,71 @@ void main() {
     await tester.pumpAndSettle();
     expect(repository.calls, 2);
     expect(find.text('R\$ 20.00'), findsOneWidget);
+  });
+
+  testWidgets('opens receipt with the exact movement payment id', (tester) async {
+    final repository = FakeStatementRepository([
+      statement([movement(id: 'payment:41', paymentId: 41, receiptAvailable: true)]),
+    ]);
+    await tester.pumpWidget(screen(repository));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Ver recibo'), findsOneWidget);
+    await tester.tap(find.text('Ver recibo'));
+    await tester.pumpAndSettle();
+    final receiptScreen = tester.widget<PixReceiptScreen>(find.byType(PixReceiptScreen));
+    expect(receiptScreen.paymentId, 41);
+    expect(repository.receiptPaymentIds, [41]);
+  });
+
+  testWidgets('does not show receipt action without receipt or payment id', (tester) async {
+    await tester.pumpWidget(screen(FakeStatementRepository([
+      statement([
+        movement(id: 'payment:10', paymentId: 10),
+        movement(id: 'payment:11', receiptAvailable: true),
+      ]),
+    ])));
+    await tester.pumpAndSettle();
+    expect(find.text('Ver recibo'), findsNothing);
+  });
+
+  testWidgets('partial payment movements open their own receipts', (tester) async {
+    final repository = FakeStatementRepository([
+      statement([
+        movement(id: 'payment:51', total: '40.00', paymentId: 51, receiptAvailable: true),
+        movement(id: 'payment:52', total: '60.00', paymentId: 52, receiptAvailable: true),
+      ]),
+    ]);
+    await tester.pumpWidget(screen(repository));
+    await tester.pumpAndSettle();
+
+    final firstMovement = find.ancestor(
+      of: find.text('R\$ 40.00'),
+      matching: find.byType(Card),
+    );
+    await tester.scrollUntilVisible(firstMovement, 200,
+        scrollable: find.byType(Scrollable).first);
+    await tester.tap(find.descendant(
+      of: firstMovement,
+      matching: find.text('Ver recibo'),
+    ));
+    await tester.pumpAndSettle();
+    expect(repository.receiptPaymentIds, [51]);
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    final secondMovement = find.ancestor(
+      of: find.text('R\$ 60.00'),
+      matching: find.byType(Card),
+    );
+    await tester.scrollUntilVisible(secondMovement, 200,
+        scrollable: find.byType(Scrollable).first);
+    await tester.tap(find.descendant(
+      of: secondMovement,
+      matching: find.text('Ver recibo'),
+    ));
+    await tester.pumpAndSettle();
+    final receiptScreen = tester.widget<PixReceiptScreen>(find.byType(PixReceiptScreen));
+    expect(receiptScreen.paymentId, 52);
+    expect(repository.receiptPaymentIds, [51, 52]);
   });
 }

@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import '../app.dart';
 import '../models/finance_models.dart';
 import '../repositories/app_repository.dart';
+import 'payments/pix_receipt_screen.dart';
 
 class StatementScreen extends StatefulWidget {
   final AppRepository? repository;
@@ -86,6 +87,18 @@ class _StatementScreenState extends State<StatementScreen> {
             if (movement.interest != null) Text('Juros: R\$ ${movement.interest}'),
             if (movement.penalty != null) Text('Multa: R\$ ${movement.penalty}'),
             if (movement.receiptAvailable) const Text('Recibo disponível'),
+            if (movement.receiptAvailable && movement.paymentId != null)
+              OutlinedButton(
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) => PixReceiptScreen(
+                      paymentId: movement.paymentId!,
+                      repository: _repository,
+                    ),
+                  ),
+                ),
+                child: const Text('Ver recibo'),
+              ),
           ],
         ),
       ),
