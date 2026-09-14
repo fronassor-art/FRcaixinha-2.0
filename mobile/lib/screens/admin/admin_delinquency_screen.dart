@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import '../../app.dart';
 import '../../models/finance_models.dart';
 import '../../repositories/app_repository.dart';
+import '../payments/pix_receipt_screen.dart';
 
 class AdminDelinquencyScreen extends StatefulWidget {
   final AppRepository? repository;
@@ -298,6 +299,7 @@ class _AdminDelinquencyScreenState extends State<AdminDelinquencyScreen> {
       );
 
   Widget _itemCard(AdminDelinquencyItem item) {
+    final paymentId = item.paymentId;
     final isContribution =
         item.obligationType == FinancialObligationType.contribution;
     final identification = isContribution
@@ -335,6 +337,19 @@ class _AdminDelinquencyScreenState extends State<AdminDelinquencyScreen> {
                   padding: const EdgeInsets.only(bottom: 3),
                   child: Text(line),
                 )),
+            if (item.receiptAvailable && paymentId != null)
+              TextButton(
+                onPressed: () {
+                  final repository = _repository;
+                  Navigator.of(context).push(MaterialPageRoute<void>(
+                    builder: (_) => PixReceiptScreen(
+                      paymentId: paymentId,
+                      repository: repository,
+                    ),
+                  ));
+                },
+                child: const Text('Ver recibo'),
+              ),
           ],
         ),
       ),

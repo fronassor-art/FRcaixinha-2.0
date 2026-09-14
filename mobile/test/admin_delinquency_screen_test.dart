@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:frcaixinha/models/finance_models.dart';
 import 'package:frcaixinha/repositories/app_repository.dart';
 import 'package:frcaixinha/screens/admin/admin_delinquency_screen.dart';
+import 'package:frcaixinha/screens/payments/pix_receipt_screen.dart';
 import 'package:frcaixinha/services/api_client.dart';
 
 class AdminDelinquencyCall {
@@ -40,6 +41,24 @@ class FakeAdminDelinquencyRepository extends AppRepository {
   int summaryCalls = 0;
   int itemsCalls = 0;
   final calls = <AdminDelinquencyCall>[];
+  final receiptPaymentIds = <int>[];
+  int statusCalls = 0;
+
+  @override
+  Future<PixReceipt> paymentReceipt(int paymentId) async {
+    receiptPaymentIds.add(paymentId);
+    return PixReceipt.fromJson({
+      'receipt_number': 'PIX-$paymentId',
+      'payment': {'id': paymentId},
+    });
+  }
+
+  @override
+  Future<PixPaymentStatusDetails> paymentStatus(int paymentId) async {
+    statusCalls++;
+    throw StateError('Receipt viewing must not poll payment status');
+  }
+
 
   @override
   Future<AdminDelinquencySummary> adminDelinquencySummary() {
@@ -88,6 +107,7 @@ AdminDelinquencyItem contribution({
   FinancialObligationStatus status = FinancialObligationStatus.pending,
   int daysOverdue = 0,
   bool receiptAvailable = false,
+  int? paymentId = 41,
 }) =>
     AdminDelinquencyItem(
       memberId: 1,
@@ -106,7 +126,7 @@ AdminDelinquencyItem contribution({
       principalOutstanding: '0.00',
       interestOutstanding: '0.00',
       penaltyOutstanding: '0.00',
-      paymentId: 41,
+      paymentId: paymentId,
       receiptAvailable: receiptAvailable,
     );
 
@@ -467,4 +487,148 @@ void main() {
     expect(repository.summaryCalls, 1);
     expect(repository.itemsCalls, 1);
   });
+  testWidgets('opens each exact receipt and preserves partial state and summary',
+      (tester) async {
+    final partial = contribution(
+      status: FinancialObligationStatus.partial,
+      receiptAvailable: true,
+    );
+    final repository = FakeAdminDelinquencyRepository(
+      summary: summary(),
+      items: [partial, installment()],
+    );
+    await tester.pumpWidget(screen(repository));
+    await tester.pumpAndSettle();
+    expect(repository.receiptPaymentIds, isEmpty);
+
+    for (final entry in {'Ana': 41, 'Bruno': 42}.entries) {
+      final card = find.ancestor(
+        of: find.text(entry.key),
+        matching: find.byType(Card),
+      );
+      final action = find.descendant(
+        of: card,
+        matching: find.text('Ver recibo'),
+      );
+      await tester.scrollUntilVisible(
+        action, 200, scrollable: find.byType(Scrollable),
+      );
+      expect(action, findsOneWidget);
+      await tester.tap(action);
+      await tester.pumpAndSettle();
+      final viewer = tester.widget<PixReceiptScreen>(find.byType(PixReceiptScreen));
+      expect(viewer.paymentId, entry.value);
+      expect(viewer.repository, same(repository));
+      expect(repository.receiptPaymentIds, entry.value == 41 ? [41] : [41, 42]);
+      await tester.pump(const Duration(seconds: 10));
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+      expect(repository.summaryCalls, 1);
+      expect(repository.itemsCalls, 1);
+      expect(find.descendant(
+        of: card,
+        matching: find.text(entry.value == 41 ? 'Estado: Parcial' : 'Estado: Em atraso'),
+      ), findsOneWidget);
+      if (entry.value == 41) {
+        expect(partial.status, FinancialObligationStatus.partial);
+        expect(find.descendant(of: card, matching: find.text('Estado: Quitado')), findsNothing);
+        expect(find.descendant(of: card, matching: find.text('Valor pago: R\$ 40.00')), findsOneWidget);
+        expect(find.descendant(of: card, matching: find.text('Saldo pendente: R\$ 60.00')), findsOneWidget);
+      }
+    }
+    expect(repository.statusCalls, 0);
+    expect(repository.receiptPaymentIds, [41, 42]);
+  });
+
+  for (final receiptAvailable in [false, true]) {
+    testWidgets('hides receipt action when eligibility is incomplete: $receiptAvailable',
+        (tester) async {
+      final repository = FakeAdminDelinquencyRepository(
+        summary: summary(),
+        items: [contribution(
+          receiptAvailable: receiptAvailable,
+          paymentId: receiptAvailable ? null : 41,
+        )],
+      );
+      await tester.pumpWidget(screen(repository));
+      await tester.pumpAndSettle();
+      final card = find.ancestor(of: find.text('Ana'), matching: find.byType(Card));
+      await tester.scrollUntilVisible(card, 200, scrollable: find.byType(Scrollable));
+      expect(find.descendant(of: card, matching: find.text('Ver recibo')), findsNothing);
+      expect(repository.receiptPaymentIds, isEmpty);
+    });
+  }
+
+  testWidgets('receipt round trip preserves all filters without reloading summary',
+      (tester) async {
+    final repository = FakeAdminDelinquencyRepository(
+      summary: summary(),
+      items: [contribution(
+        status: FinancialObligationStatus.partial,
+        receiptAvailable: true,
+      )],
+    );
+    await tester.pumpWidget(screen(repository));
+    await tester.pumpAndSettle();
+    await openFilters(tester);
+    await selectFilterOption(tester, const Key('delinquency-filter-type'),
+        const Key('delinquency-filter-type-contribution'));
+    await selectFilterOption(tester, const Key('delinquency-filter-status'),
+        const Key('delinquency-filter-status-partial'));
+    await tester.tap(find.byKey(const Key('delinquency-filter-overdue')));
+    await tester.pumpAndSettle();
+    await selectFilterDate(tester, const Key('delinquency-filter-due-from'), '09/10/2026');
+    await selectFilterDate(tester, const Key('delinquency-filter-due-to'), '09/20/2026');
+    await tester.tap(find.byKey(const Key('delinquency-filter-apply')));
+    await tester.pumpAndSettle();
+    expect(repository.itemsCalls, 2);
+
+    final card = find.ancestor(of: find.text('Ana'), matching: find.byType(Card));
+    final action = find.descendant(of: card, matching: find.text('Ver recibo'));
+    await tester.scrollUntilVisible(action, 200, scrollable: find.byType(Scrollable));
+    await tester.tap(action);
+    await tester.pumpAndSettle();
+    expect(find.byType(PixReceiptScreen), findsOneWidget);
+    expect(repository.receiptPaymentIds, [41]);
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    expect(repository.summaryCalls, 1);
+    expect(repository.itemsCalls, 2);
+
+    await openFilters(tester);
+    expect(tester.widget<SwitchListTile>(
+      find.byKey(const Key('delinquency-filter-overdue')),
+    ).value, isTrue);
+    expect(find.text('Data inicial de vencimento: 10/09/2026'), findsOneWidget);
+    expect(find.text('Data final de vencimento: 20/09/2026'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('delinquency-filter-apply')));
+    await tester.pumpAndSettle();
+
+    expect(repository.itemsCalls, 3);
+    expect(repository.summaryCalls, 1);
+    for (final call in repository.calls.skip(1)) {
+      expect(call.obligationType, FinancialObligationType.contribution);
+      expect(call.status, FinancialObligationStatus.partial);
+      expect(call.overdueOnly, isTrue);
+      expect(call.dueFrom, DateTime(2026, 9, 10));
+      expect(call.dueTo, DateTime(2026, 9, 20));
+    }
+
+    await openFilters(tester);
+    await tester.tap(find.byKey(const Key('delinquency-filter-clear')));
+    await tester.pumpAndSettle();
+    expect(repository.itemsCalls, 4);
+    expect(repository.summaryCalls, 1);
+    final cleared = repository.calls[3];
+    expect(cleared.obligationType, isNull);
+    expect(cleared.status, isNull);
+    expect(cleared.overdueOnly, isNull);
+    expect(cleared.dueFrom, isNull);
+    expect(cleared.dueTo, isNull);
+    await tester.scrollUntilVisible(
+      find.text('R\$ 500.00'), -200, scrollable: find.byType(Scrollable),
+    );
+    expect(find.text('R\$ 500.00'), findsOneWidget);
+  });
+
 }
