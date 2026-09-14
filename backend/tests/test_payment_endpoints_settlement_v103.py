@@ -164,6 +164,8 @@ def test_receipt_is_authorized_immutable_and_unavailable_before_settlement():
     db = SessionLocal()
     user, member = _seed(db, "receipt-owner")
     other_user, _ = _seed(db, "receipt-other")
+    admin_user, _ = _seed(db, "receipt-admin")
+    admin_user.role = "ADMIN"
     contribution = Contribution(member_id=member.id, competence=date(2026, 4, 1), amount=Decimal("50.00"), paid_amount=Decimal("0.00"), status="PENDING")
     db.add(contribution)
     db.flush()
@@ -177,6 +179,7 @@ def test_receipt_is_authorized_immutable_and_unavailable_before_settlement():
     db.commit()
     response = payments_api.payment_receipt(pending.id, user, db)
     assert response == json.loads(settled.receipt_snapshot_json)
+    assert payments_api.payment_receipt(pending.id, admin_user, db) == json.loads(settled.receipt_snapshot_json)
     with pytest.raises(HTTPException) as forbidden:
         payments_api.payment_receipt(pending.id, other_user, db)
     assert forbidden.value.status_code == 404
@@ -196,4 +199,27 @@ def test_contribution_payment_status_exposes_all_official_states():
     db.commit()
     statuses = [asyncio.run(payments_api.contribution_payment_status(row.id, user, db))["contribution_status"] for row in rows]
     assert statuses == ["PENDING", "PARTIAL", "OVERDUE", "PAID"]
+    db.close()
+
+
+def test_partial_payment_receipts_are_individually_available_by_payment_id():
+    db = SessionLocal()
+    user, member = _seed(db, "receipt-partials")
+    contribution = Contribution(member_id=member.id, competence=date(2026, 5, 1), amount=Decimal("100.00"), paid_amount=Decimal("0.00"), status="PENDING")
+    db.add(contribution)
+    db.flush()
+    first = _payment(db, "receipt-partial-one", "40.00", "CONTRIBUTION", str(contribution.id))
+    first_settlement = settle_confirmed_pix_payment(db, first, confirmation_source="TEST")
+    second = _payment(db, "receipt-partial-two", "60.00", "CONTRIBUTION", str(contribution.id))
+    second_settlement = settle_confirmed_pix_payment(db, second, confirmation_source="TEST")
+    db.commit()
+
+    first_receipt = payments_api.payment_receipt(first.id, user, db)
+    second_receipt = payments_api.payment_receipt(second.id, user, db)
+    assert first_receipt == json.loads(first_settlement.receipt_snapshot_json)
+    assert second_receipt == json.loads(second_settlement.receipt_snapshot_json)
+    assert first_receipt["payment"]["id"] == first.id
+    assert second_receipt["payment"]["id"] == second.id
+    assert first_receipt["amounts"]["received"] == "40.00"
+    assert second_receipt["amounts"]["received"] == "60.00"
     db.close()

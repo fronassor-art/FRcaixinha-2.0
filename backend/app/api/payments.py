@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.api.deps import current_user
+from app.api.deps import current_user, require_admin
 from app.core.config import settings
 from app.db.session import get_db
 from app.models import AgreementInstallment, CollectionAgreement, Contribution, Group, Loan, LoanInstallment, Member, Payment, PaymentSettlement, User, WebhookEvent
@@ -201,8 +201,12 @@ async def create_pix(contribution_id: int, user: User = Depends(current_user), d
 @router.get("/{payment_id}/receipt")
 def payment_receipt(payment_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
     payment = db.get(Payment, payment_id)
+    is_admin = False
+    if user.role == "ADMIN":
+        require_admin(user)
+        is_admin = True
     member = db.query(Member).filter(Member.user_id == user.id, Member.status == "ACTIVE").first()
-    if payment is None or member is None or _payment_owner_member_id(db, payment) != member.id:
+    if payment is None or (not is_admin and (member is None or _payment_owner_member_id(db, payment) != member.id)):
         raise HTTPException(404, "Recibo não encontrado.")
     settlement = db.query(PaymentSettlement).filter(PaymentSettlement.payment_id == payment.id).one_or_none()
     if settlement is None:
