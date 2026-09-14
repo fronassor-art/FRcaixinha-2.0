@@ -256,7 +256,9 @@ def delinquency(obligation_type:str|None=None,status:str|None=None,member_id:int
 @router.get('/delinquency/summary')
 def delinquency_summary(admin=Depends(require_admin),db:Session=Depends(get_db)):
  from app.services.financial_obligations import all_obligations
- rows=all_obligations(db); counts={s:0 for s in ('PENDING','PARTIAL','OVERDUE','PAID')}; total=overdue=partial=Decimal('0')
+ rows=all_obligations(db); counts={s:0 for s in ('PENDING','PARTIAL','OVERDUE','PAID')}; total=overdue=partial=interest=penalty=Decimal('0'); members=set()
  for x in rows:
   counts[x['financial_status']]+=1; amount=Decimal(x['outstanding_amount']); total+=amount; overdue+=amount if x['financial_status']=='OVERDUE' else 0; partial+=amount if x['financial_status']=='PARTIAL' else 0
- return {'counts':counts,'total_outstanding':money(total),'total_overdue':money(overdue),'total_partial_outstanding':money(partial),'by_type':{'contributions':sum(1 for x in rows if x['obligation_type']=='CONTRIBUTION'),'loans':sum(1 for x in rows if x['obligation_type']=='LOAN_INSTALLMENT')}}
+  if amount>0:
+   members.add(x['member_id']); interest+=Decimal(x['interest_outstanding']); penalty+=Decimal(x['penalty_outstanding'])
+ return {'counts':counts,'total_outstanding':money(total),'total_overdue':money(overdue),'total_partial_outstanding':money(partial),'delinquent_members_count':len(members),'total_interest_outstanding':money(interest),'total_penalty_outstanding':money(penalty),'by_type':{'contributions':sum(1 for x in rows if x['obligation_type']=='CONTRIBUTION'),'loans':sum(1 for x in rows if x['obligation_type']=='LOAN_INSTALLMENT')}}
