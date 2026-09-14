@@ -7,6 +7,24 @@ import 'package:frcaixinha/repositories/app_repository.dart';
 import 'package:frcaixinha/screens/admin/admin_delinquency_screen.dart';
 import 'package:frcaixinha/services/api_client.dart';
 
+class AdminDelinquencyCall {
+  const AdminDelinquencyCall({
+    this.obligationType,
+    this.status,
+    this.memberId,
+    this.overdueOnly,
+    this.dueFrom,
+    this.dueTo,
+  });
+
+  final FinancialObligationType? obligationType;
+  final FinancialObligationStatus? status;
+  final int? memberId;
+  final bool? overdueOnly;
+  final DateTime? dueFrom;
+  final DateTime? dueTo;
+}
+
 class FakeAdminDelinquencyRepository extends AppRepository {
   FakeAdminDelinquencyRepository({
     required this.summary,
@@ -21,6 +39,7 @@ class FakeAdminDelinquencyRepository extends AppRepository {
   Future<List<AdminDelinquencyItem>> Function()? itemsLoader;
   int summaryCalls = 0;
   int itemsCalls = 0;
+  final calls = <AdminDelinquencyCall>[];
 
   @override
   Future<AdminDelinquencySummary> adminDelinquencySummary() {
@@ -37,6 +56,14 @@ class FakeAdminDelinquencyRepository extends AppRepository {
     DateTime? dueFrom,
     DateTime? dueTo,
   }) {
+    calls.add(AdminDelinquencyCall(
+      obligationType: obligationType,
+      status: status,
+      memberId: memberId,
+      overdueOnly: overdueOnly,
+      dueFrom: dueFrom,
+      dueTo: dueTo,
+    ));
     itemsCalls++;
     return itemsLoader?.call() ?? Future.value(items);
   }
@@ -111,6 +138,39 @@ AdminDelinquencyItem installment({
 
 Widget screen(FakeAdminDelinquencyRepository repository) =>
     MaterialApp(home: AdminDelinquencyScreen(repository: repository));
+
+Future<void> openFilters(WidgetTester tester) async {
+  await tester.tap(find.text('Filtros'));
+  await tester.pumpAndSettle();
+}
+
+Future<void> selectFilterOption(
+  WidgetTester tester,
+  Key field,
+  Key option,
+) async {
+  await tester.tap(find.byKey(field));
+  await tester.pumpAndSettle();
+  await tester.tap(find.byKey(option));
+  await tester.pumpAndSettle();
+}
+
+Future<void> selectFilterDate(
+  WidgetTester tester,
+  Key field,
+  String date,
+) async {
+  await tester.tap(find.byKey(field));
+  await tester.pumpAndSettle();
+  final material3Edit = find.byIcon(Icons.edit_outlined);
+  await tester.tap(
+    material3Edit.evaluate().isNotEmpty ? material3Edit : find.byIcon(Icons.edit),
+  );
+  await tester.pumpAndSettle();
+  await tester.enterText(find.byType(TextFormField), date);
+  await tester.tap(find.text('OK'));
+  await tester.pumpAndSettle();
+}
 
 void main() {
   testWidgets('shows initial loading while summary and list are pending',
@@ -243,5 +303,168 @@ void main() {
 
     expect(repository.summaryCalls, 2);
     expect(repository.itemsCalls, 2);
+  });
+
+  testWidgets('applies contribution filter without reloading global summary',
+      (tester) async {
+    final repository = FakeAdminDelinquencyRepository(
+      summary: summary(),
+      items: [contribution()],
+    );
+
+    await tester.pumpWidget(screen(repository));
+    await tester.pumpAndSettle();
+    await openFilters(tester);
+    await selectFilterOption(
+      tester,
+      const Key('delinquency-filter-type'),
+      const Key('delinquency-filter-type-contribution'),
+    );
+    await tester.tap(find.byKey(const Key('delinquency-filter-apply')));
+    await tester.pumpAndSettle();
+
+    expect(repository.summaryCalls, 1);
+    expect(repository.itemsCalls, 2);
+    final call = repository.calls.last;
+    expect(call.obligationType, FinancialObligationType.contribution);
+    expect(call.status, isNull);
+    expect(call.overdueOnly, isNull);
+    expect(call.dueFrom, isNull);
+    expect(call.dueTo, isNull);
+  });
+
+  testWidgets('applies installment overdue filters with due period',
+      (tester) async {
+    final repository = FakeAdminDelinquencyRepository(
+      summary: summary(),
+      items: [installment()],
+    );
+
+    await tester.pumpWidget(screen(repository));
+    await tester.pumpAndSettle();
+    await openFilters(tester);
+    await selectFilterOption(
+      tester,
+      const Key('delinquency-filter-type'),
+      const Key('delinquency-filter-type-installment'),
+    );
+    await selectFilterOption(
+      tester,
+      const Key('delinquency-filter-status'),
+      const Key('delinquency-filter-status-overdue'),
+    );
+    await tester.tap(find.byKey(const Key('delinquency-filter-overdue')));
+    await tester.pumpAndSettle();
+    await selectFilterDate(
+      tester,
+      const Key('delinquency-filter-due-from'),
+      '09/10/2026',
+    );
+    await selectFilterDate(
+      tester,
+      const Key('delinquency-filter-due-to'),
+      '09/20/2026',
+    );
+    await tester.tap(find.byKey(const Key('delinquency-filter-apply')));
+    await tester.pumpAndSettle();
+
+    expect(repository.summaryCalls, 1);
+    expect(repository.itemsCalls, 2);
+    final call = repository.calls.last;
+    expect(call.obligationType, FinancialObligationType.loanInstallment);
+    expect(call.status, FinancialObligationStatus.overdue);
+    expect(call.overdueOnly, isTrue);
+    expect(call.dueFrom, DateTime(2026, 9, 10));
+    expect(call.dueTo, DateTime(2026, 9, 20));
+  });
+
+  testWidgets('clearing filters reloads the list without query parameters',
+      (tester) async {
+    final repository = FakeAdminDelinquencyRepository(
+      summary: summary(),
+      items: [contribution()],
+    );
+
+    await tester.pumpWidget(screen(repository));
+    await tester.pumpAndSettle();
+    await openFilters(tester);
+    await selectFilterOption(
+      tester,
+      const Key('delinquency-filter-type'),
+      const Key('delinquency-filter-type-contribution'),
+    );
+    await tester.tap(find.byKey(const Key('delinquency-filter-apply')));
+    await tester.pumpAndSettle();
+    await openFilters(tester);
+    await tester.tap(find.byKey(const Key('delinquency-filter-clear')));
+    await tester.pumpAndSettle();
+
+    expect(repository.summaryCalls, 1);
+    expect(repository.itemsCalls, 3);
+    final call = repository.calls.last;
+    expect(call.obligationType, isNull);
+    expect(call.status, isNull);
+    expect(call.memberId, isNull);
+    expect(call.overdueOnly, isNull);
+    expect(call.dueFrom, isNull);
+    expect(call.dueTo, isNull);
+  });
+
+  testWidgets('pull to refresh keeps filters and reloads global summary',
+      (tester) async {
+    final repository = FakeAdminDelinquencyRepository(
+      summary: summary(),
+      items: [contribution()],
+    );
+
+    await tester.pumpWidget(screen(repository));
+    await tester.pumpAndSettle();
+    await openFilters(tester);
+    await selectFilterOption(
+      tester,
+      const Key('delinquency-filter-type'),
+      const Key('delinquency-filter-type-contribution'),
+    );
+    await tester.tap(find.byKey(const Key('delinquency-filter-apply')));
+    await tester.pumpAndSettle();
+
+    await tester.fling(find.byType(ListView), const Offset(0, 300), 1000);
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+    await tester.pumpAndSettle();
+
+    expect(repository.summaryCalls, 2);
+    expect(repository.itemsCalls, 3);
+    expect(repository.calls.last.obligationType,
+        FinancialObligationType.contribution);
+  });
+
+  testWidgets('invalid due period shows feedback without reloading list',
+      (tester) async {
+    final repository = FakeAdminDelinquencyRepository(
+      summary: summary(),
+      items: [contribution()],
+    );
+
+    await tester.pumpWidget(screen(repository));
+    await tester.pumpAndSettle();
+    await openFilters(tester);
+    await selectFilterDate(
+      tester,
+      const Key('delinquency-filter-due-from'),
+      '09/20/2026',
+    );
+    await selectFilterDate(
+      tester,
+      const Key('delinquency-filter-due-to'),
+      '09/10/2026',
+    );
+    await tester.tap(find.byKey(const Key('delinquency-filter-apply')));
+    await tester.pump();
+
+    expect(find.text('A data inicial não pode ser posterior à data final.'),
+        findsOneWidget);
+    expect(repository.summaryCalls, 1);
+    expect(repository.itemsCalls, 1);
   });
 }

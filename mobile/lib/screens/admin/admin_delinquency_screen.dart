@@ -18,6 +18,11 @@ class _AdminDelinquencyScreenState extends State<AdminDelinquencyScreen> {
   AdminDelinquencySummary? _summary;
   List<AdminDelinquencyItem>? _items;
   Object? _error;
+  FinancialObligationType? _obligationType;
+  FinancialObligationStatus? _selectedStatus;
+  bool _overdueOnly = false;
+  DateTime? _dueFrom;
+  DateTime? _dueTo;
 
   AppRepository get _repository =>
       widget.repository ?? context.read<AppState>().repository;
@@ -28,21 +33,214 @@ class _AdminDelinquencyScreenState extends State<AdminDelinquencyScreen> {
     _load();
   }
 
-  Future<void> _load() async {
+  Future<List<AdminDelinquencyItem>> _loadItems() => _repository.adminDelinquency(
+        obligationType: _obligationType,
+        status: _selectedStatus,
+        overdueOnly: _overdueOnly ? true : null,
+        dueFrom: _dueFrom,
+        dueTo: _dueTo,
+      );
+
+  Future<void> _load({bool reloadSummary = true}) async {
     setState(() => _error = null);
     try {
-      final results = await Future.wait<Object>([
-        _repository.adminDelinquencySummary(),
-        _repository.adminDelinquency(),
-      ]);
+      if (reloadSummary) {
+        final results = await Future.wait<Object>([
+          _repository.adminDelinquencySummary(),
+          _loadItems(),
+        ]);
+        if (!mounted) return;
+        setState(() {
+          _summary = results[0] as AdminDelinquencySummary;
+          _items = results[1] as List<AdminDelinquencyItem>;
+        });
+        return;
+      }
+      final items = await _loadItems();
       if (!mounted) return;
-      setState(() {
-        _summary = results[0] as AdminDelinquencySummary;
-        _items = results[1] as List<AdminDelinquencyItem>;
-      });
+      setState(() => _items = items);
     } catch (error) {
       if (mounted) setState(() => _error = error);
     }
+  }
+
+  Future<void> _showFilters() async {
+    var obligationType = _obligationType;
+    var status = _selectedStatus;
+    var overdueOnly = _overdueOnly;
+    var dueFrom = _dueFrom;
+    var dueTo = _dueTo;
+
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (sheetContext) => StatefulBuilder(
+        builder: (context, setSheetState) {
+          Future<void> selectDate(bool isStart) async {
+            final selected = await showDatePicker(
+              context: sheetContext,
+              initialDate: isStart
+                  ? dueFrom ?? DateTime.now()
+                  : dueTo ?? dueFrom ?? DateTime.now(),
+              firstDate: DateTime(2000),
+              lastDate: DateTime(2100),
+            );
+            if (selected != null) {
+              setSheetState(() {
+                if (isStart) {
+                  dueFrom = selected;
+                } else {
+                  dueTo = selected;
+                }
+              });
+            }
+          }
+
+          Future<void> apply() async {
+            if (dueFrom != null && dueTo != null && dueFrom!.isAfter(dueTo!)) {
+              ScaffoldMessenger.of(this.context).showSnackBar(
+                const SnackBar(
+                  content: Text('A data inicial não pode ser posterior à data final.'),
+                ),
+              );
+              return;
+            }
+            Navigator.pop(sheetContext);
+            setState(() {
+              _obligationType = obligationType;
+              _selectedStatus = status;
+              _overdueOnly = overdueOnly;
+              _dueFrom = dueFrom;
+              _dueTo = dueTo;
+            });
+            await _load(reloadSummary: false);
+          }
+
+          Future<void> clear() async {
+            Navigator.pop(sheetContext);
+            setState(() {
+              _obligationType = null;
+              _selectedStatus = null;
+              _overdueOnly = false;
+              _dueFrom = null;
+              _dueTo = null;
+            });
+            await _load(reloadSummary: false);
+          }
+
+          return SafeArea(
+            child: Padding(
+              padding: EdgeInsets.fromLTRB(
+                16,
+                16,
+                16,
+                16 + MediaQuery.viewInsetsOf(context).bottom,
+              ),
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Text('Filtros', style: Theme.of(context).textTheme.titleLarge),
+                    const SizedBox(height: 16),
+                    DropdownButtonFormField<FinancialObligationType?>(
+                      key: const Key('delinquency-filter-type'),
+                      initialValue: obligationType,
+                      decoration: const InputDecoration(labelText: 'Tipo'),
+                      items: const [
+                        DropdownMenuItem(
+                          key: Key('delinquency-filter-type-all'),
+                          value: null,
+                          child: Text('Todos'),
+                        ),
+                        DropdownMenuItem(
+                          key: Key('delinquency-filter-type-contribution'),
+                          value: FinancialObligationType.contribution,
+                          child: Text('Contribuição'),
+                        ),
+                        DropdownMenuItem(
+                          key: Key('delinquency-filter-type-installment'),
+                          value: FinancialObligationType.loanInstallment,
+                          child: Text('Parcela'),
+                        ),
+                      ],
+                      onChanged: (value) => setSheetState(() => obligationType = value),
+                    ),
+                    const SizedBox(height: 12),
+                    DropdownButtonFormField<FinancialObligationStatus?>(
+                      key: const Key('delinquency-filter-status'),
+                      initialValue: status,
+                      decoration: const InputDecoration(labelText: 'Situação'),
+                      items: const [
+                        DropdownMenuItem(
+                          key: Key('delinquency-filter-status-all'),
+                          value: null,
+                          child: Text('Todos'),
+                        ),
+                        DropdownMenuItem(
+                          key: Key('delinquency-filter-status-pending'),
+                          value: FinancialObligationStatus.pending,
+                          child: Text('Pendente'),
+                        ),
+                        DropdownMenuItem(
+                          key: Key('delinquency-filter-status-partial'),
+                          value: FinancialObligationStatus.partial,
+                          child: Text('Parcial'),
+                        ),
+                        DropdownMenuItem(
+                          key: Key('delinquency-filter-status-overdue'),
+                          value: FinancialObligationStatus.overdue,
+                          child: Text('Em atraso'),
+                        ),
+                      ],
+                      onChanged: (value) => setSheetState(() => status = value),
+                    ),
+                    SwitchListTile(
+                      key: const Key('delinquency-filter-overdue'),
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('Somente vencidos'),
+                      value: overdueOnly,
+                      onChanged: (value) => setSheetState(() => overdueOnly = value),
+                    ),
+                    OutlinedButton(
+                      key: const Key('delinquency-filter-due-from'),
+                      onPressed: () => selectDate(true),
+                      child: Text('Data inicial de vencimento: ${_date(dueFrom)}'),
+                    ),
+                    const SizedBox(height: 8),
+                    OutlinedButton(
+                      key: const Key('delinquency-filter-due-to'),
+                      onPressed: () => selectDate(false),
+                      child: Text('Data final de vencimento: ${_date(dueTo)}'),
+                    ),
+                    const SizedBox(height: 16),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton(
+                            key: const Key('delinquency-filter-clear'),
+                            onPressed: clear,
+                            child: const Text('Limpar filtros'),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: FilledButton(
+                            key: const Key('delinquency-filter-apply'),
+                            onPressed: apply,
+                            child: const Text('Aplicar'),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
   }
 
   String _money(String value) => 'R\$ $value';
@@ -170,7 +368,16 @@ class _AdminDelinquencyScreenState extends State<AdminDelinquencyScreen> {
       );
     }
     return Scaffold(
-      appBar: AppBar(title: const Text('Inadimplência administrativa')),
+      appBar: AppBar(
+        title: const Text('Inadimplência administrativa'),
+        actions: [
+          TextButton.icon(
+            onPressed: _showFilters,
+            icon: const Icon(Icons.filter_list),
+            label: const Text('Filtros'),
+          ),
+        ],
+      ),
       body: summary == null || items == null
           ? const Center(child: CircularProgressIndicator())
           : RefreshIndicator(
