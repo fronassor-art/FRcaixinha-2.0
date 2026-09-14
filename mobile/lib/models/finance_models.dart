@@ -45,6 +45,130 @@ class FinancialObligation {
   }
 }
 
+
+/// Obligation with member identification, returned by the administrative
+/// delinquency endpoint.
+class AdminDelinquencyItem {
+  final int memberId;
+  final String? memberName;
+  final FinancialObligationType obligationType;
+  final int obligationId;
+  final String? competence;
+  final int? loanId;
+  final int? installmentNumber;
+  final DateTime? dueDate;
+  final String amountDue;
+  final String amountPaid;
+  final String outstandingAmount;
+  final FinancialObligationStatus status;
+  final int daysOverdue;
+  final String principalOutstanding;
+  final String interestOutstanding;
+  final String penaltyOutstanding;
+  final int? paymentId;
+  final bool receiptAvailable;
+
+  const AdminDelinquencyItem({
+    required this.memberId,
+    required this.memberName,
+    required this.obligationType,
+    required this.obligationId,
+    required this.competence,
+    required this.loanId,
+    required this.installmentNumber,
+    required this.dueDate,
+    required this.amountDue,
+    required this.amountPaid,
+    required this.outstandingAmount,
+    required this.status,
+    required this.daysOverdue,
+    required this.principalOutstanding,
+    required this.interestOutstanding,
+    required this.penaltyOutstanding,
+    required this.paymentId,
+    required this.receiptAvailable,
+  });
+
+  factory AdminDelinquencyItem.fromJson(Map<String, dynamic> json) {
+    int? integer(Object? value) => value is int ? value : int.tryParse('$value');
+    String money(Object? value) => value?.toString() ?? '0.00';
+    return AdminDelinquencyItem(
+      memberId: integer(json['member_id']) ?? 0,
+      memberName: json['member_name']?.toString(),
+      obligationType: financialObligationTypeFromJson(json['obligation_type']),
+      obligationId: integer(json['obligation_id']) ?? 0,
+      competence: json['competence']?.toString(),
+      loanId: integer(json['loan_id']),
+      installmentNumber: integer(json['installment_number']),
+      dueDate: json['due_date'] == null ? null : DateTime.tryParse('${json['due_date']}'),
+      amountDue: money(json['amount_due']),
+      amountPaid: money(json['amount_paid']),
+      outstandingAmount: money(json['outstanding_amount'] ?? json['outstanding']),
+      status: financialObligationStatusFromJson(json['financial_status'] ?? json['status']),
+      daysOverdue: integer(json['days_overdue']) ?? 0,
+      principalOutstanding: money(json['principal_outstanding']),
+      interestOutstanding: money(json['interest_outstanding']),
+      penaltyOutstanding: money(json['penalty_outstanding']),
+      paymentId: integer(json['payment_id']),
+      receiptAvailable: json['receipt_available'] == true,
+    );
+  }
+}
+
+class AdminDelinquencySummary {
+  final int pendingCount;
+  final int partialCount;
+  final int overdueCount;
+  final int paidCount;
+  final String totalOutstanding;
+  final String totalOverdue;
+  final String totalPartialOutstanding;
+  final int totalContributions;
+  final int totalInstallments;
+  final int delinquentMembersCount;
+  final String totalInterestOutstanding;
+  final String totalPenaltyOutstanding;
+
+  const AdminDelinquencySummary({
+    required this.pendingCount,
+    required this.partialCount,
+    required this.overdueCount,
+    required this.paidCount,
+    required this.totalOutstanding,
+    required this.totalOverdue,
+    required this.totalPartialOutstanding,
+    required this.totalContributions,
+    required this.totalInstallments,
+    required this.delinquentMembersCount,
+    required this.totalInterestOutstanding,
+    required this.totalPenaltyOutstanding,
+  });
+
+  factory AdminDelinquencySummary.fromJson(Map<String, dynamic> json) {
+    final counts = json['counts'] is Map
+        ? Map<String, dynamic>.from(json['counts'] as Map)
+        : const <String, dynamic>{};
+    final byType = json['by_type'] is Map
+        ? Map<String, dynamic>.from(json['by_type'] as Map)
+        : const <String, dynamic>{};
+    int integer(Object? value) => value is int ? value : int.tryParse('$value') ?? 0;
+    String money(Object? value) => value?.toString() ?? '0.00';
+    return AdminDelinquencySummary(
+      pendingCount: integer(json['pending_count'] ?? counts['PENDING']),
+      partialCount: integer(json['partial_count'] ?? counts['PARTIAL']),
+      overdueCount: integer(json['overdue_count'] ?? counts['OVERDUE']),
+      paidCount: integer(json['paid_count'] ?? counts['PAID']),
+      totalOutstanding: money(json['total_outstanding']),
+      totalOverdue: money(json['total_overdue']),
+      totalPartialOutstanding: money(json['total_partial_outstanding']),
+      totalContributions: integer(json['total_contributions'] ?? byType['contributions']),
+      totalInstallments: integer(json['total_installments'] ?? byType['loans']),
+      delinquentMembersCount: integer(json['delinquent_members_count']),
+      totalInterestOutstanding: money(json['total_interest_outstanding']),
+      totalPenaltyOutstanding: money(json['total_penalty_outstanding']),
+    );
+  }
+}
 enum PixProviderStatus { pending, inProcess, approved, cancelled, rejected, refunded, chargedBack, unknown }
 PixProviderStatus pixProviderStatusFromJson(Object? value) {
   switch (value?.toString().toLowerCase()) {

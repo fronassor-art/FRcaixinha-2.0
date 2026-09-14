@@ -21,6 +21,7 @@ import 'screens/admin/admin_dashboard_screen.dart';
 import 'screens/admin/admin_contributions_screen.dart';
 import 'screens/admin/operations_dashboard_screen.dart';
 import 'screens/admin/collections_dashboard_screen.dart';
+import 'screens/admin/admin_delinquency_screen.dart';
 import 'screens/admin/governance_dashboard_screen.dart';
 import 'screens/admin/reports_dashboard_screen.dart';
 import 'screens/admin/executive_dashboard_screen.dart';
@@ -142,6 +143,10 @@ GoRouter createRouter(AppState state) => GoRouter(
     GoRoute(
       path: '/admin/collections',
       builder: (_, __) => const CollectionsDashboardScreen(),
+    ),
+    GoRoute(
+      path: '/admin/delinquency',
+      builder: (_, __) => const AdminDelinquencyScreen(),
     ),
     GoRoute(
       path: '/admin/governance',
