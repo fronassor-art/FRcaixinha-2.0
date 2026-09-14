@@ -21,6 +21,11 @@ class AppRepository {
     return items.map((item) => FinancialObligation.fromJson(Map<String, dynamic>.from(item as Map))).toList();
   }
 
+  Future<PixPaymentStatusDetails> paymentStatus(int paymentId) async => PixPaymentStatusDetails.fromJson(await api.get('/payments/$paymentId'));
+  Future<PixReceipt> paymentReceipt(int paymentId) async => PixReceipt.fromJson(await api.get('/payments/$paymentId/receipt'));
+  Future<PixPayment> createContributionPix(int contributionId) async => PixPayment.fromJson(await api.postEmpty('/payments/pix/$contributionId'));
+  Future<PixPayment> createLoanInstallmentPix(int installmentId) async => PixPayment.fromJson(await api.post('/loan-installments/$installmentId/pix', {}));
+
   Future<LoanSimulation> simulateLoan({
     required String principal,
     required int installments,
