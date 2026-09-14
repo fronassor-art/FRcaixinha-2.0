@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 import '../app.dart';
 import '../models/finance_models.dart';
 import '../repositories/app_repository.dart';
+import 'payments/pix_receipt_screen.dart';
 
 class FinancialObligationsScreen extends StatefulWidget {
   final AppRepository? repository;
@@ -24,9 +25,24 @@ class _FinancialObligationsScreenState extends State<FinancialObligationsScreen>
   String _date(DateTime? date) => date == null ? 'Não informado' : '${date.day.toString().padLeft(2, '0')}/${date.month.toString().padLeft(2, '0')}/${date.year}';
   bool _hasAmount(String amount) => amount != '0' && amount != '0.0' && amount != '0.00';
   Widget _item(FinancialObligation item) {
+    final paymentId = item.paymentId;
     final contribution = item.type == FinancialObligationType.contribution;
     final lines = <String>[if (contribution && item.competence != null) 'Competência: ${item.competence}', if (!contribution && item.installmentNumber != null) 'Parcela: ${item.installmentNumber}${item.loanId == null ? '' : ' • Empréstimo #${item.loanId}'}', 'Vencimento: ${_date(item.dueDate)}', 'Valor original: R\$ ${item.amountDue}', 'Valor pago: R\$ ${item.amountPaid}', 'Saldo: R\$ ${item.outstandingAmount}', if (!contribution && _hasAmount(item.principalOutstanding)) 'Principal pendente: R\$ ${item.principalOutstanding}', if (!contribution && _hasAmount(item.interestOutstanding)) 'Juros pendentes: R\$ ${item.interestOutstanding}', if (!contribution && _hasAmount(item.penaltyOutstanding)) 'Multa pendente: R\$ ${item.penaltyOutstanding}', 'Estado: ${_status(item.financialStatus)}', if (item.financialStatus == FinancialObligationStatus.overdue && item.daysOverdue > 0) '${item.daysOverdue} dia${item.daysOverdue == 1 ? '' : 's'} em atraso', if (item.receiptAvailable) 'Recibo disponível'];
-    return Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(contribution ? 'Contribuição' : 'Parcela do empréstimo', style: Theme.of(context).textTheme.titleMedium), const SizedBox(height: 8), ...lines.map((line) => Padding(padding: const EdgeInsets.only(bottom: 3), child: Text(line)))])));
+    return Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(contribution ? 'Contribuição' : 'Parcela do empréstimo', style: Theme.of(context).textTheme.titleMedium), const SizedBox(height: 8), ...lines.map((line) => Padding(padding: const EdgeInsets.only(bottom: 3), child: Text(line))),
+      if (item.receiptAvailable && paymentId != null)
+        TextButton(
+          onPressed: () {
+            final repository = _repository;
+            Navigator.of(context).push(MaterialPageRoute<void>(
+              builder: (_) => PixReceiptScreen(
+                paymentId: paymentId,
+                repository: repository,
+              ),
+            ));
+          },
+          child: const Text('Ver recibo'),
+        ),
+    ])));
   }
   @override Widget build(BuildContext context) {
     final items = _items;
