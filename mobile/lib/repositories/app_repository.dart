@@ -15,6 +15,12 @@ class AppRepository {
   Future<Map<String, dynamic>> installmentPayment(int installmentId) => api.get('/loan-installments/$installmentId/payment');
   Future<Map<String, dynamic>> statement() => api.get('/members/me/statement');
 
+  Future<List<FinancialObligation>> financialObligations() async {
+    final response = await api.get('/members/me/obligations');
+    final items = response['items'] as List<dynamic>? ?? const [];
+    return items.map((item) => FinancialObligation.fromJson(Map<String, dynamic>.from(item as Map))).toList();
+  }
+
   Future<LoanSimulation> simulateLoan({
     required String principal,
     required int installments,

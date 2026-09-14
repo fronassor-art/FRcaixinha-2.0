@@ -14,6 +14,7 @@ import 'screens/member_portal_screen.dart';
 import 'screens/profile_screen.dart';
 import 'screens/statement_screen.dart';
 import 'screens/loans/loans_screen.dart';
+import 'screens/financial_obligations_screen.dart';
 import 'screens/loans/loan_request_screen.dart';
 import 'screens/loans/loan_detail_screen.dart';
 import 'screens/admin/admin_dashboard_screen.dart';
@@ -113,6 +114,7 @@ GoRouter createRouter(AppState state) => GoRouter(
     GoRoute(path: '/privacy', builder: (_, __) => const PrivacyCenterScreen()),
     GoRoute(path: '/profile', builder: (_, __) => const ProfileScreen()),
     GoRoute(path: '/statement', builder: (_, __) => const StatementScreen()),
+    GoRoute(path: '/obligations', builder: (_, __) => const FinancialObligationsScreen()),
     GoRoute(
       path: '/member-portal',
       builder: (_, __) => const MemberPortalScreen(),

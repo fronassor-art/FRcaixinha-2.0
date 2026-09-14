@@ -16,6 +16,34 @@ class PixPayment {
   );
 }
 
+enum FinancialObligationType { contribution, loanInstallment }
+enum FinancialObligationStatus { pending, partial, overdue, paid }
+FinancialObligationType financialObligationTypeFromJson(Object? value) => value?.toString().toUpperCase() == 'LOAN_INSTALLMENT' ? FinancialObligationType.loanInstallment : FinancialObligationType.contribution;
+FinancialObligationStatus financialObligationStatusFromJson(Object? value) {
+  switch (value?.toString().toUpperCase()) {
+    case 'PARTIAL': return FinancialObligationStatus.partial;
+    case 'OVERDUE': return FinancialObligationStatus.overdue;
+    case 'PAID': return FinancialObligationStatus.paid;
+    default: return FinancialObligationStatus.pending;
+  }
+}
+class FinancialObligation {
+  final int memberId, obligationId, daysOverdue;
+  final FinancialObligationType type;
+  final String? competence;
+  final int? loanId, installmentNumber, paymentId;
+  final DateTime? dueDate;
+  final String amountDue, amountPaid, outstandingAmount, principalOutstanding, interestOutstanding, penaltyOutstanding;
+  final FinancialObligationStatus financialStatus;
+  final bool receiptAvailable;
+  const FinancialObligation({required this.memberId, required this.type, required this.obligationId, required this.competence, required this.loanId, required this.installmentNumber, required this.dueDate, required this.amountDue, required this.amountPaid, required this.outstandingAmount, required this.financialStatus, required this.daysOverdue, required this.principalOutstanding, required this.interestOutstanding, required this.penaltyOutstanding, required this.paymentId, required this.receiptAvailable});
+  factory FinancialObligation.fromJson(Map<String, dynamic> json) {
+    int? integer(Object? value) => value is int ? value : int.tryParse('$value');
+    String money(Object? value) => value?.toString() ?? '0.00';
+    return FinancialObligation(memberId: integer(json['member_id']) ?? 0, type: financialObligationTypeFromJson(json['obligation_type']), obligationId: integer(json['obligation_id']) ?? 0, competence: json['competence']?.toString(), loanId: integer(json['loan_id']), installmentNumber: integer(json['installment_number']), dueDate: json['due_date'] == null ? null : DateTime.tryParse('${json['due_date']}'), amountDue: money(json['amount_due']), amountPaid: money(json['amount_paid']), outstandingAmount: money(json['outstanding_amount']), financialStatus: financialObligationStatusFromJson(json['financial_status']), daysOverdue: integer(json['days_overdue']) ?? 0, principalOutstanding: money(json['principal_outstanding']), interestOutstanding: money(json['interest_outstanding']), penaltyOutstanding: money(json['penalty_outstanding']), paymentId: integer(json['payment_id']), receiptAvailable: json['receipt_available'] == true);
+  }
+}
+
 class LoanSimulationInstallment {
   final int number;
   final String principal;

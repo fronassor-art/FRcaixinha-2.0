@@ -107,6 +107,16 @@ class _HomeScreenState extends State<HomeScreen> {
                   onTap: () => context.push('/contributions'),
                 ),
               ),
+            if (member != null)
+              Card(
+                child: ListTile(
+                  leading: const Icon(Icons.account_balance_wallet_outlined),
+                  title: const Text('Minhas obrigações'),
+                  subtitle: const Text('Acompanhe vencimentos e saldos.'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => context.push('/obligations'),
+                ),
+              ),
             Card(
               child: ListTile(
                 leading: const Icon(Icons.request_quote_outlined),
