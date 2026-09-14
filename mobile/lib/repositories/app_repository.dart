@@ -13,7 +13,8 @@ class AppRepository {
   Future<Map<String, dynamic>> loan(int id) => api.get('/loans/$id');
   Future<Map<String, dynamic>> createInstallmentPix(int installmentId) => api.post('/loan-installments/$installmentId/pix', {});
   Future<Map<String, dynamic>> installmentPayment(int installmentId) => api.get('/loan-installments/$installmentId/payment');
-  Future<Map<String, dynamic>> statement() => api.get('/members/me/statement');
+  Future<MemberStatement> statement() async =>
+      MemberStatement.fromJson(await api.get('/members/me/statement'));
 
   Future<List<FinancialObligation>> financialObligations() async {
     final response = await api.get('/members/me/obligations');

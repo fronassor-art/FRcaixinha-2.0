@@ -7,6 +7,51 @@ class ContributionItem {
     dueDate: j['due_date']==null?null:DateTime.tryParse('${j['due_date']}'), paidAmount: '${j['paid_amount']??'0.00'}',
   );
 }
+
+enum StatementMovementDirection { credit, debit, unknown }
+
+StatementMovementDirection statementMovementDirectionFromJson(Object? value) {
+  switch (value?.toString().toUpperCase()) {
+    case 'CREDIT': return StatementMovementDirection.credit;
+    case 'DEBIT': return StatementMovementDirection.debit;
+    default: return StatementMovementDirection.unknown;
+  }
+}
+
+class MemberStatementTotals {
+  final String contributionsPaid, loanPayments, loanOutstanding;
+  const MemberStatementTotals({required this.contributionsPaid, required this.loanPayments, required this.loanOutstanding});
+  factory MemberStatementTotals.fromJson(Map<String, dynamic>? json) {
+    String money(Object? value) => value?.toString() ?? '0.00';
+    return MemberStatementTotals(contributionsPaid: money(json?['contributions_paid']), loanPayments: money(json?['loan_payments']), loanOutstanding: money(json?['loan_outstanding']));
+  }
+}
+
+class MemberStatementMovement {
+  final String id, type, description, total;
+  final StatementMovementDirection direction;
+  final DateTime? occurredAt;
+  final String? competence, principal, interest, penalty;
+  final int? loanId, installmentNumber, paymentId;
+  final bool receiptAvailable;
+  const MemberStatementMovement({required this.id, required this.type, required this.direction, required this.occurredAt, required this.description, required this.total, required this.competence, required this.loanId, required this.installmentNumber, required this.principal, required this.interest, required this.penalty, required this.paymentId, required this.receiptAvailable});
+  factory MemberStatementMovement.fromJson(Map<String, dynamic> json) {
+    int? integer(Object? value) => value is int ? value : int.tryParse('$value');
+    String? money(Object? value) => value == null ? null : value.toString();
+    return MemberStatementMovement(id: json['id']?.toString() ?? '', type: json['type']?.toString() ?? '', direction: statementMovementDirectionFromJson(json['direction']), occurredAt: json['occurred_at'] == null ? null : DateTime.tryParse('${json['occurred_at']}'), description: json['description']?.toString() ?? '', total: json['total']?.toString() ?? '0.00', competence: json['competence']?.toString(), loanId: integer(json['loan_id']), installmentNumber: integer(json['installment_number']), principal: money(json['principal']), interest: money(json['interest']), penalty: money(json['penalty']), paymentId: integer(json['payment_id']), receiptAvailable: json['receipt_available'] == true);
+  }
+}
+
+class MemberStatement {
+  final MemberStatementTotals totals;
+  final List<MemberStatementMovement> movements;
+  const MemberStatement({required this.totals, required this.movements});
+  factory MemberStatement.fromJson(Map<String, dynamic> json) {
+    final rawMovements = json['movements'] as List<dynamic>? ?? const [];
+    final rawTotals = json['totals'];
+    return MemberStatement(totals: MemberStatementTotals.fromJson(rawTotals is Map<String, dynamic> ? rawTotals : rawTotals is Map ? Map<String, dynamic>.from(rawTotals) : null), movements: rawMovements.whereType<Map>().map((item) => MemberStatementMovement.fromJson(Map<String, dynamic>.from(item))).toList());
+  }
+}
 class PixPayment {
   final int paymentId; final String providerPaymentId; final String status; final String amount;
   final String? qrCode; final String? qrCodeBase64; final String? ticketUrl;
