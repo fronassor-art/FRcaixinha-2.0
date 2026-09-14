@@ -98,6 +98,8 @@ void main() {
     expect(find.text('Provedor: mercado_pago'), findsOneWidget);
     expect(find.text('Estado antes: PARTIAL'), findsOneWidget);
     expect(find.text('Estado após: PAID'), findsOneWidget);
+    await tester.scrollUntilVisible(find.text('Recebido: R\$ 120.00'), 200,
+        scrollable: find.byType(Scrollable).first);
     expect(find.text('Recebido: R\$ 120.00'), findsOneWidget);
     expect(find.text('Aplicado: R\$ 115.00'), findsOneWidget);
     expect(find.text('Principal: R\$ 80.00'), findsOneWidget);
@@ -113,7 +115,9 @@ void main() {
   testWidgets('tolerates optional receipt fields', (tester) async {
     await tester.pumpWidget(screen(FakeReceiptRepository([receipt(optionalFields: true)])));
     await tester.pumpAndSettle();
-    expect(find.text('Recibo PIX'), findsOneWidget);
+    expect(find.text('Número: PIX-V1-0001'), findsOneWidget);
+    await tester.scrollUntilVisible(find.text('Recebido: R\$ 120.00'), 200,
+        scrollable: find.byType(Scrollable).first);
     expect(find.text('Recebido: R\$ 120.00'), findsOneWidget);
     expect(find.text('Provedor:'), findsNothing);
   });
