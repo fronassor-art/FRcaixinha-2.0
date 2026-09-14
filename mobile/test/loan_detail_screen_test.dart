@@ -102,7 +102,13 @@ void main() {
     expect(find.text('Parcela 1 • R\$ 120.00'), findsOneWidget);
     expect(find.textContaining('Valor pago: R\$ 0.00'), findsOneWidget);
     expect(find.textContaining('Saldo pendente: R\$ 125.00'), findsOneWidget);
-    expect(find.textContaining('Principal: R\$ 100.00'), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.ancestor(of: find.text('Parcela 1 • R\$ 120.00'), matching: find.byType(Card)),
+        matching: find.textContaining('Principal: R\$ 100.00'),
+      ),
+      findsOneWidget,
+    );
     expect(find.textContaining('Juros: R\$ 20.00'), findsOneWidget);
     expect(find.textContaining('Multa: R\$ 5.00'), findsOneWidget);
     expect(find.textContaining('Vencimento: 2026-09-10'), findsOneWidget);
@@ -161,7 +167,13 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.textContaining('Saldo pendente: R\$ 125.00'), findsOneWidget);
-    expect(find.textContaining('Principal: R\$ 100.00'), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.ancestor(of: find.text('Parcela 1 • R\$ 120.00'), matching: find.byType(Card)),
+        matching: find.textContaining('Principal: R\$ 100.00'),
+      ),
+      findsOneWidget,
+    );
     expect(find.textContaining('Juros: R\$ 20.00'), findsOneWidget);
     expect(find.textContaining('Multa: R\$ 5.00'), findsOneWidget);
   });
