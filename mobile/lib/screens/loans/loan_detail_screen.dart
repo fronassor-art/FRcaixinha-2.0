@@ -1,18 +1,25 @@
-import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../app.dart';
+import '../../models/finance_models.dart';
+import '../../repositories/app_repository.dart';
+import '../payments/pix_payment_screen.dart';
 
 class LoanDetailScreen extends StatefulWidget {
   final int loanId;
-  const LoanDetailScreen({super.key, required this.loanId});
+  final AppRepository? repository;
+  const LoanDetailScreen({super.key, required this.loanId, this.repository});
   @override
   State<LoanDetailScreen> createState() => _LoanDetailScreenState();
 }
 
 class _LoanDetailScreenState extends State<LoanDetailScreen> {
   Map<String, dynamic>? data;
+  List<FinancialObligation> obligations = [];
+  Map<int, FinancialObligation> installmentObligations = {};
   String? error;
+
+  AppRepository get repository => widget.repository ?? context.read<AppState>().repository;
   @override
   void initState() {
     super.initState();
@@ -21,59 +28,54 @@ class _LoanDetailScreenState extends State<LoanDetailScreen> {
 
   Future<void> load() async {
     try {
-      final r = await context.read<AppState>().repository.loan(widget.loanId);
-      if (mounted) setState(() => data = r);
+      final r = await repository.loan(widget.loanId);
+      final loadedObligations = await repository.financialObligations();
+      final installments = r['installments'] as List<dynamic>? ?? const [];
+      final links = <int, FinancialObligation>{
+        for (final obligation in loadedObligations)
+          if (obligation.type == FinancialObligationType.loanInstallment &&
+              installments.any((item) => (item as Map)['id'] == obligation.obligationId))
+            obligation.obligationId: obligation,
+      };
+      if (mounted) {
+        setState(() {
+          data = r;
+          obligations = loadedObligations;
+          installmentObligations = links;
+        });
+      }
     } catch (e) {
       if (mounted) setState(() => error = e.toString());
     }
   }
 
+  String statusLabel(FinancialObligationStatus status) => switch (status) {
+    FinancialObligationStatus.pending => 'Pendente',
+    FinancialObligationStatus.partial => 'Parcial',
+    FinancialObligationStatus.overdue => 'Em atraso',
+    FinancialObligationStatus.paid => 'Quitado',
+  };
+
   Future<void> pay(Map<String, dynamic> i) async {
+    final installmentId = i['id'] as int;
+    final obligation = installmentObligations[installmentId];
     try {
-      final r = await context.read<AppState>().repository.createInstallmentPix(
-        i['id'] as int,
-      );
+      final payment = await repository.createLoanInstallmentPix(installmentId);
       if (!mounted) return;
-      final qr = (r['qr_code'] ?? '').toString();
-      final qrBase64 = (r['qr_code_base64'] ?? '').toString();
-      showDialog(
-        context: context,
-        builder:
-            (_) => AlertDialog(
-              title: Text('Pix da parcela ${i['number']}'),
-              content: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    if (qrBase64.isNotEmpty)
-                      Image.memory(
-                        base64Decode(qrBase64),
-                        width: 220,
-                        height: 220,
-                      ),
-                    if (qr.isNotEmpty) ...[
-                      const SizedBox(height: 12),
-                      const Text('Pix Copia e Cola'),
-                      const SizedBox(height: 6),
-                      SelectableText(qr),
-                    ],
-                    if (qr.isEmpty && qrBase64.isEmpty)
-                      Text(
-                        (r['ticket_url'] ??
-                                'Cobrança criada. Aguarde a confirmação.')
-                            .toString(),
-                      ),
-                  ],
-                ),
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(context),
-                  child: const Text('Fechar'),
-                ),
-              ],
-            ),
+      await Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => PixPaymentScreen(
+            repository: repository,
+            payment: payment,
+            receiptAvailable: obligation?.receiptAvailable ?? false,
+            onPaymentConfirmed: () {
+              load();
+            },
+          ),
+        ),
       );
+      if (mounted) await load();
     } catch (e) {
       if (mounted)
         ScaffoldMessenger.of(
@@ -119,16 +121,35 @@ class _LoanDetailScreenState extends State<LoanDetailScreen> {
           ),
           ...items.map((x) {
             final i = x as Map<String, dynamic>;
-            final paid = i['status'] == 'PAID';
+            final installmentId = i['id'] as int;
+            final obligation = installmentObligations[installmentId];
+            final status = obligation?.financialStatus ??
+                financialObligationStatusFromJson(i['status']);
+            final dueDate = obligation?.dueDate?.toIso8601String().substring(0, 10) ??
+                i['due_date'];
+            final originalAmount = obligation?.amountDue ?? i['amount'];
+            final paidAmount = obligation?.amountPaid ?? i['paid_amount'];
+            final outstandingAmount = obligation?.outstandingAmount ?? i['remaining'];
+            final principal = obligation?.principalOutstanding ?? i['principal'];
+            final interest = obligation?.interestOutstanding ?? i['interest'];
+            final penalty = obligation?.penaltyOutstanding ?? i['penalty_amount'];
             return Card(
               child: ListTile(
-                title: Text('Parcela ${i['number']} • R\$ ${i['amount']}'),
+                title: Text('Parcela ${i['number']} • R\$ $originalAmount'),
                 subtitle: Text(
-                  'Vencimento: ${i['due_date']} • ${i['status']}\nPago R\$ ${i['paid_amount']}',
+                  'Valor original: R\$ $originalAmount\n'
+                  'Valor pago: R\$ $paidAmount\n'
+                  'Saldo pendente: R\$ $outstandingAmount\n'
+                  'Principal: R\$ $principal\n'
+                  'Juros: R\$ $interest\n'
+                  'Multa: R\$ $penalty\n'
+                  'Vencimento: $dueDate\n'
+                  'Estado: ${statusLabel(status)}'
+                  '${obligation != null && obligation.daysOverdue > 0 ? ' • ${obligation.daysOverdue} dias em atraso' : ''}',
                 ),
                 isThreeLine: true,
                 trailing:
-                    paid
+                    status == FinancialObligationStatus.paid
                         ? const Icon(Icons.check_circle)
                         : ElevatedButton(
                           onPressed: () => pay(i),
