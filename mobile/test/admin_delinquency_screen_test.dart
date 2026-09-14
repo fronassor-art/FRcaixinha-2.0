@@ -209,6 +209,12 @@ void main() {
     expect(find.text('Competência: 2026-09'), findsNWidgets(2));
     expect(find.textContaining('Estado: Pendente'), findsOneWidget);
     expect(find.textContaining('Estado: Parcial'), findsOneWidget);
+
+    await tester.scrollUntilVisible(
+      find.text('Bruno'),
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
     expect(find.text('Bruno'), findsOneWidget);
     expect(find.text('Empréstimo #7 • Parcela 2'), findsOneWidget);
     expect(find.textContaining('Estado: Em atraso'), findsOneWidget);
