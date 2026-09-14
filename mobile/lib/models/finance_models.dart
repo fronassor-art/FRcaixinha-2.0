@@ -1,9 +1,10 @@
 class ContributionItem {
-  final int id; final String competence; final String amount; final String status; final Map<String,dynamic>? payment;
-  ContributionItem({required this.id, required this.competence, required this.amount, required this.status, this.payment});
+  final int id; final String competence; final String amount; final String status; final Map<String,dynamic>? payment; final DateTime? dueDate; final String paidAmount;
+  ContributionItem({required this.id, required this.competence, required this.amount, required this.status, this.payment, this.dueDate, this.paidAmount='0.00'});
   factory ContributionItem.fromJson(Map<String,dynamic> j) => ContributionItem(
     id: j['id'], competence: j['competence'], amount: j['amount'], status: j['status'],
     payment: j['payment'] == null ? null : Map<String,dynamic>.from(j['payment']),
+    dueDate: j['due_date']==null?null:DateTime.tryParse('${j['due_date']}'), paidAmount: '${j['paid_amount']??'0.00'}',
   );
 }
 class PixPayment {
