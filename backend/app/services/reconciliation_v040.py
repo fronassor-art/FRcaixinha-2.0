@@ -26,7 +26,7 @@ def build_advanced_reconciliation(db: Session, competence: date):
     def check(code, expected, observed, details):
         e=Decimal(expected or 0).quantize(CENT); o=Decimal(observed or 0).quantize(CENT)
         ok=e==o; findings.append({'code':code,'status':'PASS' if ok else 'FAIL','details':details,'expected':money(e),'observed':money(o)})
-    contrib=Decimal(db.query(func.coalesce(func.sum(Contribution.amount),0)).filter(Contribution.status=='PAID',Contribution.competence.between(a,b)).scalar() or 0)
+    contrib=Decimal(db.query(func.coalesce(func.sum(func.coalesce(Contribution.paid_amount,0)),0)).filter(Contribution.competence.between(a,b)).scalar() or 0)
     contrib_ledger=_sum_ledger(db,'CREDIT',['CONTRIBUTION_PAYMENT'],start,end)
     check('CONTRIBUTIONS',contrib,contrib_ledger,'Contribuições pagas devem bater com créditos no Ledger no período.')
     loan_pay=_sum_ledger(db,'CREDIT',['LOAN_INSTALLMENT_PAYMENT'],start,end)
@@ -36,8 +36,8 @@ def build_advanced_reconciliation(db: Session, competence: date):
     exp_ledger=_sum_ledger(db,'DEBIT',['EXPENSE'],start,end)
     check('EXPENSES',exp,exp_ledger,'Despesas lançadas devem bater com débitos no Ledger no período.')
     check('LOAN_PAYMENT_TOTAL',loan_pay+agr_pay,_sum_ledger(db,'CREDIT',['LOAN_INSTALLMENT_PAYMENT','AGREEMENT_INSTALLMENT_PAYMENT'],start,end),'Recebimentos de empréstimos/acordos devem estar no Ledger.')
-    approved=Decimal(db.query(func.coalesce(func.sum(Payment.amount),0)).filter(Payment.status=='approved',Payment.created_at>=start,Payment.created_at<end).scalar() or 0)
-    posted=Decimal(db.query(func.coalesce(func.sum(Payment.amount),0)).filter(Payment.status=='approved',Payment.ledger_posted_at.is_not(None),Payment.created_at>=start,Payment.created_at<end).scalar() or 0)
+    approved=Decimal(db.query(func.coalesce(func.sum(func.coalesce(Payment.amount_received, Payment.amount)),0)).filter(Payment.status=='approved',Payment.created_at>=start,Payment.created_at<end).scalar() or 0)
+    posted=Decimal(db.query(func.coalesce(func.sum(func.coalesce(Payment.amount_received, Payment.amount)),0)).filter(Payment.status=='approved',Payment.ledger_posted_at.is_not(None),Payment.created_at>=start,Payment.created_at<end).scalar() or 0)
     check('APPROVED_PAYMENTS',approved,posted,'Pagamentos aprovados devem estar contabilizados.')
     unprocessed=db.query(WebhookEvent).filter(WebhookEvent.processed==False).count()  # noqa
     findings.append({'code':'UNPROCESSED_WEBHOOKS','status':'PASS' if unprocessed==0 else 'FAIL','details':'Webhooks pendentes bloqueiam fechamento.','expected':'0','observed':str(unprocessed)})

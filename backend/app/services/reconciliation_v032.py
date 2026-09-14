@@ -14,14 +14,14 @@ def reconcile(db):
                          'expected': money(expected) if expected is not None else None,
                          'observed': money(observed) if observed is not None else None})
 
-    paid_contrib = Decimal(db.query(func.coalesce(func.sum(Contribution.amount), 0)).filter(Contribution.status=='PAID').scalar() or 0)
+    paid_contrib = Decimal(db.query(func.coalesce(func.sum(func.coalesce(Contribution.paid_amount, 0)), 0)).scalar() or 0)
     contrib_credits = Decimal(db.query(func.coalesce(func.sum(LedgerEntry.amount), 0)).filter(
         LedgerEntry.direction=='CREDIT', LedgerEntry.reference_type=='CONTRIBUTION_PAYMENT').scalar() or 0)
     add('CONTRIBUTIONS_LEDGER', paid_contrib == contrib_credits,
         'Contribuições PAID devem corresponder aos créditos de contribuição no Ledger.', paid_contrib, contrib_credits)
 
-    approved = Decimal(db.query(func.coalesce(func.sum(Payment.amount), 0)).filter(Payment.status=='approved').scalar() or 0)
-    posted = Decimal(db.query(func.coalesce(func.sum(Payment.amount), 0)).filter(Payment.status=='approved', Payment.ledger_posted_at.is_not(None)).scalar() or 0)
+    approved = Decimal(db.query(func.coalesce(func.sum(func.coalesce(Payment.amount_received, Payment.amount)), 0)).filter(Payment.status=='approved').scalar() or 0)
+    posted = Decimal(db.query(func.coalesce(func.sum(func.coalesce(Payment.amount_received, Payment.amount)), 0)).filter(Payment.status=='approved', Payment.ledger_posted_at.is_not(None)).scalar() or 0)
     add('APPROVED_PAYMENTS_POSTED', approved == posted,
         'Todo pagamento aprovado deve estar marcado como lançado no Ledger.', approved, posted)
 
