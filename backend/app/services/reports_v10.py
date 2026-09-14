@@ -3,7 +3,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from calendar import monthrange
 from sqlalchemy import func
 from sqlalchemy.orm import Session
-from app.models import User, Member, Contribution, Loan, LoanInstallment, LedgerEntry, Expense, Payment, PaymentSettlement
+from app.models import User, Member, Contribution, Loan, LoanInstallment, LedgerEntry, Expense, Payment, PaymentSettlement, MemberFinancialAccount, MemberFinancialEntry, CollectionAgreement, AgreementInstallment
 from app.services.loan_engine_v17 import installment_due
 from app.services.payment_settlement import contribution_financial_status, installment_financial_status
 ZERO=Decimal('0.00'); CENT=Decimal('0.01')
@@ -17,7 +17,7 @@ def _receipt(db,p): return bool(p and db.query(PaymentSettlement).filter(Payment
 def monthly_report(db,competence):
  a,b=month_bounds(competence);start,end=_range(a,b); contrib=_ledger(db,['CONTRIBUTION_PAYMENT'],start,end); interest=_ledger(db,['LOAN_INTEREST_PAYMENT'],start,end); penalty=_ledger(db,['LOAN_PENALTY_PAYMENT'],start,end); expenses=Decimal(db.query(func.coalesce(func.sum(Expense.amount),0)).filter(Expense.status=='POSTED',Expense.expense_date.between(a,b)).scalar() or 0); credits=Decimal(db.query(func.coalesce(func.sum(LedgerEntry.amount),0)).filter(LedgerEntry.direction=='CREDIT',LedgerEntry.created_at>=start,LedgerEntry.created_at<end).scalar() or 0); debits=Decimal(db.query(func.coalesce(func.sum(LedgerEntry.amount),0)).filter(LedgerEntry.direction=='DEBIT',LedgerEntry.created_at>=start,LedgerEntry.created_at<end).scalar() or 0)
  return {'competence':a.isoformat(),'period_end':b.isoformat(),'contributions_paid':money(contrib),'expenses':money(expenses),'interest_received':money(interest),'penalties_received':money(penalty),'operating_result':money(contrib+interest+penalty-expenses),'ledger_credits_in_period':money(credits),'ledger_debits_in_period':money(debits)}
-def member_statement(db,member_id):
+def _legacy_member_statement(db,member_id):
  m=db.get(Member,member_id)
  if not m:return None
  u=db.get(User,m.user_id); cs=db.query(Contribution).filter(Contribution.member_id==member_id).order_by(Contribution.competence.desc()).all(); loans=db.query(Loan).filter(Loan.member_id==member_id).order_by(Loan.id.desc()).all(); ids=[x.id for x in loans]; inst=db.query(LoanInstallment).filter(LoanInstallment.loan_id.in_(ids)).order_by(LoanInstallment.due_date).all() if ids else []; now=datetime.now(timezone.utc)
@@ -31,3 +31,116 @@ def loan_report(db):
 def delinquency_report(db):
  from app.services.financial_obligations import all_obligations
  rows=[x for x in all_obligations(db) if x['financial_status']=='OVERDUE']; return {'as_of':date.today().isoformat(),'count':len(rows),'total_outstanding':money(sum((Decimal(x['outstanding_amount']) for x in rows),ZERO)),'items':rows}
+
+def _int_or_none(value):
+ try:return int(value)
+ except (TypeError,ValueError):return None
+
+def _effective_at(payment, settlement, timestamps):
+ if settlement is not None:return settlement.confirmed_at
+ if payment is not None and payment.confirmed_at is not None:return payment.confirmed_at
+ return max(timestamps) if timestamps else None
+
+def _member_direction(movement_type):
+ return 'CREDIT' if movement_type=='LOAN_DISBURSEMENT' else 'DEBIT'
+
+def _reversal_direction(original_movement_type):
+ return 'DEBIT' if _member_direction(original_movement_type)=='CREDIT' else 'CREDIT'
+
+def _movement(movement_id,movement_type,direction,occurred_at,description,total,competence=None,loan_id=None,installment_number=None,principal=None,interest=None,penalty=None,payment_id=None,receipt_available=False):
+ return {'id':movement_id,'type':movement_type,'direction':direction,'occurred_at':occurred_at.astimezone(timezone.utc).isoformat() if occurred_at is not None else None,'description':description,'total':money(total),'competence':competence.isoformat() if competence is not None else None,'loan_id':loan_id,'installment_number':installment_number,'principal':money(principal) if principal is not None else None,'interest':money(interest) if interest is not None else None,'penalty':money(penalty) if penalty is not None else None,'payment_id':payment_id,'receipt_available':receipt_available}
+
+def _statement_movements(db, member_id, contributions, loans, installments):
+ """Project only posted movements; settlements are metadata and never monetary input."""
+ contribution_by_id={row.id:row for row in contributions}
+ legacy_contribution_by_payment={row.payment_id:row for row in contributions if row.payment_id is not None}
+ loan_by_id={row.id:row for row in loans}; installment_by_id={row.id:row for row in installments}
+ settlements={row.payment_id:row for row in db.query(PaymentSettlement).filter(PaymentSettlement.member_id==member_id).all()}
+ movements=[]
+ # One posted contribution ledger reference equals one confirmed payment.
+ contribution_rows={}
+ for entry in db.query(LedgerEntry).filter(LedgerEntry.reference_type=='CONTRIBUTION_PAYMENT'):
+  payment_id=_int_or_none(entry.reference_id)
+  if payment_id is None:continue
+  payment=db.get(Payment,payment_id)
+  contribution_id=_int_or_none(payment.reference_id) if payment is not None and (payment.reference_type or '').upper()=='CONTRIBUTION' else None
+  contribution=contribution_by_id.get(contribution_id) or legacy_contribution_by_payment.get(payment_id)
+  if contribution is None:continue
+  contribution_rows.setdefault(payment_id,{'payment':payment,'contribution':contribution,'entries':[]})['entries'].append(entry)
+ for payment_id,row in contribution_rows.items():
+  entries=row['entries']; settlement=settlements.get(payment_id); total=sum((Decimal(entry.amount) for entry in entries),ZERO)
+  movements.append(_movement(f'payment:{payment_id}','CONTRIBUTION_PAYMENT',_member_direction('CONTRIBUTION_PAYMENT'),_effective_at(row['payment'],settlement,[entry.created_at for entry in entries]),'Pagamento de contribuição',total,competence=row['contribution'].competence,payment_id=payment_id,receipt_available=settlement is not None))
+ # Group current interest/penalty ledger entries and principal account entries by payment id.
+ loan_rows={}
+ def loan_row(payment_id):
+  payment=db.get(Payment,payment_id)
+  if payment is None or (payment.reference_type or '').upper()!='LOAN_INSTALLMENT':return None
+  installment=installment_by_id.get(_int_or_none(payment.reference_id))
+  if installment is None:return None
+  return loan_rows.setdefault(payment_id,{'payment':payment,'installment':installment,'principal':ZERO,'interest':ZERO,'penalty':ZERO,'legacy_total':ZERO,'timestamps':[]})
+ for entry in db.query(LedgerEntry).filter(LedgerEntry.reference_type.in_(['LOAN_INTEREST_PAYMENT','LOAN_PENALTY_PAYMENT','LOAN_INSTALLMENT_PAYMENT'])):
+  payment_id=_int_or_none(entry.reference_id)
+  if payment_id is None:continue
+  row=loan_row(payment_id)
+  if row is None:continue
+  if entry.reference_type=='LOAN_INTEREST_PAYMENT':row['interest']+=Decimal(entry.amount)
+  elif entry.reference_type=='LOAN_PENALTY_PAYMENT':row['penalty']+=Decimal(entry.amount)
+  else:row['legacy_total']+=Decimal(entry.amount)
+  row['timestamps'].append(entry.created_at)
+ for entry in db.query(MemberFinancialEntry).join(MemberFinancialAccount,MemberFinancialEntry.account_id==MemberFinancialAccount.id).filter(MemberFinancialAccount.member_id==member_id,MemberFinancialEntry.reference_type=='LOAN_PRINCIPAL_PAYMENT'):
+  payment_id=_int_or_none(entry.reference_id)
+  if payment_id is None:continue
+  row=loan_row(payment_id)
+  if row is None:continue
+  row['principal']+=Decimal(entry.amount);row['timestamps'].append(entry.created_at)
+ for payment_id,row in loan_rows.items():
+  components=row['principal']+row['interest']+row['penalty']; total=components if components>ZERO else row['legacy_total']
+  if total<=ZERO:continue
+  payment=row['payment']; installment=row['installment']; loan=loan_by_id[installment.loan_id]; settlement=settlements.get(payment_id)
+  movements.append(_movement(f'payment:{payment_id}','LOAN_INSTALLMENT_PAYMENT',_member_direction('LOAN_INSTALLMENT_PAYMENT'),_effective_at(payment,settlement,row['timestamps']),f'Pagamento da parcela {installment.number} do empréstimo #{loan.id}',total,loan_id=loan.id,installment_number=installment.number,principal=row['principal'] if components>ZERO else None,interest=row['interest'] if components>ZERO else None,penalty=row['penalty'] if components>ZERO else None,payment_id=payment_id,receipt_available=settlement is not None))
+ # A loan appears as a debit only after its official disbursement ledger entry.
+ for entry in db.query(LedgerEntry).filter(LedgerEntry.reference_type=='LOAN_DISBURSEMENT'):
+  loan=loan_by_id.get(_int_or_none(entry.reference_id))
+  if loan is not None:movements.append(_movement(f'ledger:{entry.id}','LOAN_DISBURSEMENT',_member_direction('LOAN_DISBURSEMENT'),entry.created_at,f'Liberação do empréstimo #{loan.id}',entry.amount,loan_id=loan.id))
+ # Agreement installments are a legacy flow but are safely linked by payment and agreement.
+ agreement_rows={}
+ for entry in db.query(LedgerEntry).filter(LedgerEntry.reference_type=='AGREEMENT_INSTALLMENT_PAYMENT'):
+  payment_id=_int_or_none(entry.reference_id); payment=db.get(Payment,payment_id) if payment_id is not None else None
+  if payment is None or (payment.reference_type or '').upper()!='AGREEMENT_INSTALLMENT':continue
+  installment=db.get(AgreementInstallment,_int_or_none(payment.reference_id))
+  if installment is None:continue
+  agreement=db.get(CollectionAgreement,installment.agreement_id)
+  if agreement is None or agreement.member_id!=member_id:continue
+  agreement_rows.setdefault(payment_id,{'payment':payment,'installment':installment,'agreement':agreement,'entries':[]})['entries'].append(entry)
+ for payment_id,row in agreement_rows.items():
+  entries=row['entries']; installment=row['installment']; agreement=row['agreement']
+  movements.append(_movement(f'payment:{payment_id}','AGREEMENT_INSTALLMENT_PAYMENT',_member_direction('AGREEMENT_INSTALLMENT_PAYMENT'),_effective_at(row['payment'],None,[entry.created_at for entry in entries]),f'Pagamento da parcela {installment.number} do acordo #{agreement.id}',sum((Decimal(entry.amount) for entry in entries),ZERO),loan_id=agreement.loan_id,installment_number=installment.number,payment_id=payment_id))
+ # A reversal is another immutable ledger movement. Include it only when the
+ # reversed entry has one of the canonical member links already resolved above.
+ for entry in db.query(LedgerEntry).filter(LedgerEntry.reference_type=='REVERSAL'):
+  original=db.get(LedgerEntry,entry.reversal_of_id or _int_or_none(entry.reference_id))
+  if original is None:continue
+  payment_id=_int_or_none(original.reference_id)
+  payment=db.get(Payment,payment_id) if payment_id is not None else None
+  if original.reference_type=='LOAN_DISBURSEMENT' and loan_by_id.get(_int_or_none(original.reference_id)) is not None:
+   loan=loan_by_id[_int_or_none(original.reference_id)]
+   movements.append(_movement(f'ledger:{entry.id}','REVERSAL',_reversal_direction('LOAN_DISBURSEMENT'),entry.created_at,f'Reversão da liberação do empréstimo #{loan.id}',entry.amount,loan_id=loan.id))
+  elif payment is not None and (payment.reference_type or '').upper()=='CONTRIBUTION':
+   contribution=contribution_by_id.get(_int_or_none(payment.reference_id)) or legacy_contribution_by_payment.get(payment.id)
+   if contribution is not None:movements.append(_movement(f'ledger:{entry.id}','REVERSAL',_reversal_direction('CONTRIBUTION_PAYMENT'),entry.created_at,'Reversão de pagamento de contribuição',entry.amount,competence=contribution.competence,payment_id=payment.id,receipt_available=payment.id in settlements))
+  elif payment is not None and (payment.reference_type or '').upper()=='LOAN_INSTALLMENT':
+   installment=installment_by_id.get(_int_or_none(payment.reference_id))
+   if installment is not None:movements.append(_movement(f'ledger:{entry.id}','REVERSAL',_reversal_direction('LOAN_INSTALLMENT_PAYMENT'),entry.created_at,f'Reversão de pagamento da parcela {installment.number} do empréstimo #{installment.loan_id}',entry.amount,loan_id=installment.loan_id,installment_number=installment.number,payment_id=payment.id,receipt_available=payment.id in settlements))
+  elif payment is not None and (payment.reference_type or '').upper()=='AGREEMENT_INSTALLMENT':
+   installment=db.get(AgreementInstallment,_int_or_none(payment.reference_id)); agreement=db.get(CollectionAgreement,installment.agreement_id) if installment is not None else None
+   if agreement is not None and agreement.member_id==member_id:movements.append(_movement(f'ledger:{entry.id}','REVERSAL',_reversal_direction('AGREEMENT_INSTALLMENT_PAYMENT'),entry.created_at,f'Reversão de pagamento da parcela {installment.number} do acordo #{agreement.id}',entry.amount,loan_id=agreement.loan_id,installment_number=installment.number,payment_id=payment.id))
+ return sorted(movements,key=lambda item:(item['occurred_at'] or '',item['id']),reverse=True)
+
+def member_statement(db, member_id):
+ result=_legacy_member_statement(db,member_id)
+ if result is None:return None
+ contributions=db.query(Contribution).filter(Contribution.member_id==member_id).all()
+ loans=db.query(Loan).filter(Loan.member_id==member_id).all(); loan_ids=[loan.id for loan in loans]
+ installments=db.query(LoanInstallment).filter(LoanInstallment.loan_id.in_(loan_ids)).all() if loan_ids else []
+ result['movements']=_statement_movements(db,member_id,contributions,loans,installments)
+ return result
