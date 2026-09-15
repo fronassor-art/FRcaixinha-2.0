@@ -4,10 +4,12 @@ from datetime import date, datetime, timezone, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from sqlalchemy import func
 from sqlalchemy.orm import Session
-from app.models import (Contribution, Payment, WebhookEvent, LedgerEntry, Loan, LoanInstallment,
-                        Expense, CollectionAgreement, AgreementInstallment, FinancialReconciliation)
+from app.models import (Contribution, Payment, PaymentSettlement, WebhookEvent, LedgerEntry, Loan, LoanInstallment,
+                        Expense, CollectionAgreement, AgreementInstallment, FinancialReconciliation,
+                        MemberFinancialAccount, MemberFinancialEntry)
 
 CENT=Decimal('0.01')
+ZERO=Decimal('0.00')
 def money(v): return str(Decimal(v or 0).quantize(CENT, rounding=ROUND_HALF_UP))
 def bounds(d): return d.replace(day=1), d.replace(day=monthrange(d.year,d.month)[1])
 def dt_start(d): return datetime.combine(d, datetime.min.time(), tzinfo=timezone.utc)
@@ -19,6 +21,58 @@ def _sum_ledger(db, direction, ref_types=None, start=None, end=None):
     if start: q=q.filter(LedgerEntry.created_at>=start)
     if end: q=q.filter(LedgerEntry.created_at<end)
     return Decimal(q.scalar() or 0).quantize(CENT)
+
+def _pix_installment_settlement_findings(db):
+    """Cross-check current PIX installment settlements against their evidence."""
+    issues = []
+    settlements = db.query(PaymentSettlement).filter(PaymentSettlement.obligation_type == "LOAN_INSTALLMENT").all()
+    by_installment = {}
+    def dec(value): return Decimal(value or 0).quantize(CENT, rounding=ROUND_HALF_UP)
+    def issue(key, detail): issues.append(f"{key}: {detail}")
+    for settlement in settlements:
+        pid = settlement.payment_id
+        payment = db.get(Payment, pid)
+        installment = db.get(LoanInstallment, settlement.loan_installment_id)
+        loan = db.get(Loan, installment.loan_id) if installment else None
+        received, applied = dec(settlement.amount_received), dec(settlement.amount_applied)
+        principal, interest = dec(settlement.principal_applied), dec(settlement.interest_applied)
+        penalty, excess = dec(settlement.penalty_applied), dec(settlement.excess_amount)
+        by_installment.setdefault(settlement.loan_installment_id, []).append(settlement)
+        if payment is None:
+            issue(pid, "Payment inexistente")
+        else:
+            if payment.status != "approved": issue(pid, f"Payment.status={payment.status!r}")
+            if (payment.reference_type or "").upper() != "LOAN_INSTALLMENT": issue(pid, "Payment.reference_type incompatível")
+            if payment.reference_id != str(settlement.loan_installment_id): issue(pid, "Payment.reference_id incompatível")
+            expected_received = dec(payment.amount_received if payment.amount_received is not None else payment.amount)
+            if expected_received != received: issue(pid, "Payment.amount_received/amount diverge do settlement")
+        if installment is None: issue(pid, "LoanInstallment inexistente")
+        elif loan is None: issue(pid, "Loan inexistente")
+        elif loan.member_id != settlement.member_id: issue(pid, "membro do settlement diverge do empréstimo")
+        if received != dec(applied + excess): issue(pid, "amount_received != amount_applied + excess_amount")
+        if applied != dec(principal + interest + penalty): issue(pid, "amount_applied != soma dos componentes")
+        def rows(kind): return db.query(LedgerEntry).filter(LedgerEntry.reference_type == kind, LedgerEntry.reference_id == str(pid)).all()
+        ir = rows("LOAN_INTEREST_PAYMENT")
+        iv = [x for x in ir if x.direction == "CREDIT" and x.account == "CAIXINHA"]
+        if interest > ZERO:
+            if len(ir) != 1 or len(iv) != 1 or dec(iv[0].amount) != interest: issue(pid, "ledger de juros ausente, duplicado ou incorreto")
+        elif ir: issue(pid, "ledger de juros indevido para componente zero")
+        pr = rows("LOAN_PENALTY_PAYMENT")
+        pv = [x for x in pr if x.direction == "CREDIT" and x.account == "CAIXINHA"]
+        if penalty > ZERO:
+            if len(pr) != 1 or len(pv) != 1 or dec(pv[0].amount) != penalty: issue(pid, "ledger de multa ausente, duplicado ou incorreto")
+        elif pr: issue(pid, "ledger de multa indevido para componente zero")
+        mr = db.query(MemberFinancialEntry).join(MemberFinancialAccount, MemberFinancialEntry.account_id == MemberFinancialAccount.id).filter(MemberFinancialEntry.entry_type == "LOAN_PRINCIPAL_PAYMENT", MemberFinancialEntry.reference_type == "LOAN_PRINCIPAL_PAYMENT", MemberFinancialEntry.reference_id == str(pid)).all()
+        mv = [x for x in mr if x.direction == "CREDIT" and x.account.member_id == settlement.member_id]
+        if principal > ZERO:
+            if len(mr) != 1 or len(mv) != 1 or dec(mv[0].amount) != principal: issue(pid, "principal ausente, duplicado ou incorreto")
+        elif mr: issue(pid, "principal indevido para componente zero")
+    for iid, rows in by_installment.items():
+        installment = db.get(LoanInstallment, iid)
+        if installment is None: continue
+        if sum((dec(x.principal_applied) + dec(x.interest_applied) for x in rows), ZERO) != dec(installment.paid_amount): issue(f"installment:{iid}", "soma principal+juros diverge de paid_amount")
+        if sum((dec(x.penalty_applied) for x in rows), ZERO) != dec(installment.paid_penalty_amount): issue(f"installment:{iid}", "soma multa diverge de paid_penalty_amount")
+    return issues
 
 def build_advanced_reconciliation(db: Session, competence: date):
     a,b=bounds(competence); start=dt_start(a); end=dt_end(b)
@@ -41,6 +95,8 @@ def build_advanced_reconciliation(db: Session, competence: date):
     check('APPROVED_PAYMENTS',approved,posted,'Pagamentos aprovados devem estar contabilizados.')
     unprocessed=db.query(WebhookEvent).filter(WebhookEvent.processed==False).count()  # noqa
     findings.append({'code':'UNPROCESSED_WEBHOOKS','status':'PASS' if unprocessed==0 else 'FAIL','details':'Webhooks pendentes bloqueiam fechamento.','expected':'0','observed':str(unprocessed)})
+    pix_issues = _pix_installment_settlement_findings(db)
+    findings.append({'code':'PIX_INSTALLMENT_SETTLEMENT','status':'FAIL' if pix_issues else 'PASS','details':'Settlements PIX atuais de parcelas consistentes.' if not pix_issues else '; '.join(pix_issues),'expected':'0','observed':str(len(pix_issues))})
     negative=db.query(LoanInstallment).filter(LoanInstallment.status!='PAID',(LoanInstallment.amount+LoanInstallment.penalty_amount-LoanInstallment.paid_amount)<0).count()
     findings.append({'code':'NEGATIVE_INSTALLMENTS','status':'PASS' if negative==0 else 'FAIL','details':'Parcelas abertas não podem ter saldo negativo.','expected':'0','observed':str(negative)})
     # Operational exposure tie-out: open loan base/penalty and agreement balances must be non-negative.
