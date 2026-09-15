@@ -74,6 +74,108 @@ def _pix_installment_settlement_findings(db):
         if sum((dec(x.penalty_applied) for x in rows), ZERO) != dec(installment.paid_penalty_amount): issue(f"installment:{iid}", "soma multa diverge de paid_penalty_amount")
     return issues
 
+def _payment_ledger_rows(db, payment_id):
+    return db.query(LedgerEntry).filter(LedgerEntry.reference_id == str(payment_id)).all()
+
+
+def _approved_contribution_issues(db, payment):
+    issues = []
+    pid = str(payment.id)
+    settlements = db.query(PaymentSettlement).filter(PaymentSettlement.payment_id == payment.id).all()
+    if len(settlements) != 1:
+        issues.append(f"{pid}: settlement de contribuição ausente ou duplicado")
+        return issues
+    settlement = settlements[0]
+    if settlement.obligation_type != "CONTRIBUTION":
+        issues.append(f"{pid}: obligation_type incompatível")
+    if settlement.loan_installment_id is not None:
+        issues.append(f"{pid}: settlement aponta para parcela de empréstimo")
+    contribution = db.get(Contribution, settlement.contribution_id) if settlement.contribution_id is not None else None
+    if contribution is None:
+        issues.append(f"{pid}: contribuição do settlement inexistente")
+    else:
+        if contribution.member_id != settlement.member_id:
+            issues.append(f"{pid}: membro da contribuição diverge do settlement")
+        if (payment.reference_type or "").upper() != "CONTRIBUTION" or payment.reference_id != str(contribution.id):
+            issues.append(f"{pid}: referência da contribuição incompatível")
+    expected_received = money(payment.amount_received if payment.amount_received is not None else payment.amount)
+    if money(settlement.amount_received) != expected_received:
+        issues.append(f"{pid}: amount_received do settlement diverge do Payment")
+    if money(settlement.amount_received) != money(settlement.amount_applied + settlement.excess_amount):
+        issues.append(f"{pid}: settlement recebido não fecha aplicação e excesso")
+    rows = _payment_ledger_rows(db, payment.id)
+    if Decimal(money(settlement.amount_applied)) > ZERO:
+        expected = [row for row in rows if row.reference_type == "CONTRIBUTION_PAYMENT"]
+        if len(rows) != 1 or len(expected) != 1:
+            issues.append(f"{pid}: ledger de contribuição ausente, duplicado ou com tipo incorreto")
+        else:
+            row = expected[0]
+            if row.direction != "CREDIT" or row.account != "CAIXINHA" or money(row.amount) != money(settlement.amount_applied):
+                issues.append(f"{pid}: ledger de contribuição incorreto")
+    elif rows:
+        issues.append(f"{pid}: ledger indevido para aplicação de contribuição zero")
+    return issues
+
+
+def _approved_agreement_issues(db, payment):
+    issues = []
+    pid = str(payment.id)
+    if (payment.reference_type or "").upper() != "AGREEMENT_INSTALLMENT" or not (payment.reference_id or "").isdigit():
+        return [f"{pid}: referência de acordo inválida"]
+    installment = db.get(AgreementInstallment, int(payment.reference_id))
+    if installment is None:
+        return [f"{pid}: parcela de acordo inexistente"]
+    agreement = db.get(CollectionAgreement, installment.agreement_id)
+    if agreement is None:
+        issues.append(f"{pid}: acordo inexistente")
+    rows = _payment_ledger_rows(db, payment.id)
+    expected = [row for row in rows if row.reference_type == "AGREEMENT_INSTALLMENT_PAYMENT"]
+    if len(rows) != 1 or len(expected) != 1:
+        issues.append(f"{pid}: ledger de acordo ausente, duplicado ou com tipo incorreto")
+    else:
+        row = expected[0]
+        if row.direction != "CREDIT" or row.account != "CAIXINHA" or Decimal(money(row.amount)) <= ZERO:
+            issues.append(f"{pid}: ledger de acordo incorreto")
+        if payment.amount_received is not None and Decimal(money(payment.amount_received)) > ZERO:
+            expected_applied = min(Decimal(money(payment.amount_received)), Decimal(money(payment.amount)))
+            if Decimal(money(row.amount)) != expected_applied:
+                issues.append(f"{pid}: ledger de acordo diverge do valor aplicado esperado")
+    return issues
+
+
+def _approved_loan_issues(db, payment, pix_issues):
+    pid = str(payment.id)
+    settlements = db.query(PaymentSettlement).filter(PaymentSettlement.payment_id == payment.id).all()
+    if len(settlements) != 1:
+        return [f"{pid}: settlement PIX de empréstimo ausente ou duplicado"]
+    settlement = settlements[0]
+    if settlement.loan_installment_id is None:
+        return [f"{pid}: settlement PIX sem parcela de empréstimo"]
+    matched = [issue for issue in pix_issues if issue.startswith(f"{pid}:") or issue.startswith(f"installment:{settlement.loan_installment_id}:")]
+    return [f"{pid}: {issue}" for issue in matched] if matched else []
+
+
+def _approved_payment_issues(db, competence_start, competence_end):
+    payments = db.query(Payment).filter(
+        Payment.status == "approved",
+        Payment.created_at >= competence_start,
+        Payment.created_at < competence_end,
+    ).all()
+    pix_issues = _pix_installment_settlement_findings(db)
+    issues = []
+    for payment in payments:
+        reference_type = (payment.reference_type or "").strip().upper()
+        if reference_type == "CONTRIBUTION":
+            issues.extend(_approved_contribution_issues(db, payment))
+        elif reference_type == "LOAN_INSTALLMENT":
+            issues.extend(_approved_loan_issues(db, payment, pix_issues))
+        elif reference_type == "AGREEMENT_INSTALLMENT":
+            issues.extend(_approved_agreement_issues(db, payment))
+        else:
+            issues.append(f"{payment.id}: reference_type ausente ou desconhecido")
+    return issues
+
+
 def build_advanced_reconciliation(db: Session, competence: date):
     a,b=bounds(competence); start=dt_start(a); end=dt_end(b)
     findings=[]
@@ -90,9 +192,10 @@ def build_advanced_reconciliation(db: Session, competence: date):
     exp_ledger=_sum_ledger(db,'DEBIT',['EXPENSE'],start,end)
     check('EXPENSES',exp,exp_ledger,'Despesas lançadas devem bater com débitos no Ledger no período.')
     check('LOAN_PAYMENT_TOTAL',loan_pay+agr_pay,_sum_ledger(db,'CREDIT',['LOAN_INSTALLMENT_PAYMENT','AGREEMENT_INSTALLMENT_PAYMENT'],start,end),'Recebimentos de empréstimos/acordos devem estar no Ledger.')
-    approved=Decimal(db.query(func.coalesce(func.sum(func.coalesce(Payment.amount_received, Payment.amount)),0)).filter(Payment.status=='approved',Payment.created_at>=start,Payment.created_at<end).scalar() or 0)
-    posted=Decimal(db.query(func.coalesce(func.sum(func.coalesce(Payment.amount_received, Payment.amount)),0)).filter(Payment.status=='approved',Payment.ledger_posted_at.is_not(None),Payment.created_at>=start,Payment.created_at<end).scalar() or 0)
-    check('APPROVED_PAYMENTS',approved,posted,'Pagamentos aprovados devem estar contabilizados.')
+    approved_total = Decimal(db.query(func.coalesce(func.sum(func.coalesce(Payment.amount_received, Payment.amount)),0)).filter(Payment.status=='approved',Payment.created_at>=start,Payment.created_at<end).scalar() or 0)
+    posted_total = Decimal(db.query(func.coalesce(func.sum(func.coalesce(Payment.amount_received, Payment.amount)),0)).filter(Payment.status=='approved',Payment.ledger_posted_at.is_not(None),Payment.created_at>=start,Payment.created_at<end).scalar() or 0)
+    approved_issues = _approved_payment_issues(db, start, end)
+    findings.append({'code':'APPROVED_PAYMENTS','status':'FAIL' if approved_issues else 'PASS','details':'Pagamentos aprovados possuem evidência contábil compatível.' if not approved_issues else '; '.join(approved_issues),'expected':str(money(approved_total)),'observed':str(money(posted_total))})
     unprocessed=db.query(WebhookEvent).filter(WebhookEvent.processed==False).count()  # noqa
     findings.append({'code':'UNPROCESSED_WEBHOOKS','status':'PASS' if unprocessed==0 else 'FAIL','details':'Webhooks pendentes bloqueiam fechamento.','expected':'0','observed':str(unprocessed)})
     pix_issues = _pix_installment_settlement_findings(db)
@@ -126,7 +229,7 @@ def build_advanced_reconciliation(db: Session, competence: date):
       'contributions_paid':money(contrib),'contributions_ledger':money(contrib_ledger),
       'loan_payments_ledger':money(loan_pay),'agreement_payments_ledger':money(agr_pay),
       'loan_disbursements_ledger':money(disb),'expenses_posted':money(exp),'expenses_ledger':money(exp_ledger),
-      'approved_payments':money(approved),'posted_payments':money(posted),
+      'approved_payments':money(approved_total),'posted_payments':money(posted_total),
       'open_loan_exposure':money(loan_out),'open_agreement_exposure':money(agr_out),
       'ledger_credits':money(_sum_ledger(db,'CREDIT',start=start,end=end)),
       'ledger_debits':money(_sum_ledger(db,'DEBIT',start=start,end=end)),
