@@ -97,12 +97,27 @@ def build_advanced_reconciliation(db: Session, competence: date):
     findings.append({'code':'UNPROCESSED_WEBHOOKS','status':'PASS' if unprocessed==0 else 'FAIL','details':'Webhooks pendentes bloqueiam fechamento.','expected':'0','observed':str(unprocessed)})
     pix_issues = _pix_installment_settlement_findings(db)
     findings.append({'code':'PIX_INSTALLMENT_SETTLEMENT','status':'FAIL' if pix_issues else 'PASS','details':'Settlements PIX atuais de parcelas consistentes.' if not pix_issues else '; '.join(pix_issues),'expected':'0','observed':str(len(pix_issues))})
-    negative=db.query(LoanInstallment).filter(LoanInstallment.status!='PAID',(LoanInstallment.amount+LoanInstallment.penalty_amount-LoanInstallment.paid_amount)<0).count()
+    open_installments = db.query(LoanInstallment).filter(LoanInstallment.status!='PAID').all()
+    negative = sum(
+        1 for i in open_installments
+        if (
+            Decimal(i.amount or 0).quantize(CENT, rounding=ROUND_HALF_UP) < ZERO
+            or Decimal(i.paid_amount or 0).quantize(CENT, rounding=ROUND_HALF_UP) < ZERO
+            or Decimal(i.penalty_amount or 0).quantize(CENT, rounding=ROUND_HALF_UP) < ZERO
+            or Decimal(i.paid_penalty_amount or 0).quantize(CENT, rounding=ROUND_HALF_UP) < ZERO
+            or Decimal(i.paid_amount or 0).quantize(CENT, rounding=ROUND_HALF_UP)
+            > Decimal(i.amount or 0).quantize(CENT, rounding=ROUND_HALF_UP)
+            or Decimal(i.paid_penalty_amount or 0).quantize(CENT, rounding=ROUND_HALF_UP)
+            > Decimal(i.penalty_amount or 0).quantize(CENT, rounding=ROUND_HALF_UP)
+        )
+    )
     findings.append({'code':'NEGATIVE_INSTALLMENTS','status':'PASS' if negative==0 else 'FAIL','details':'Parcelas abertas não podem ter saldo negativo.','expected':'0','observed':str(negative)})
     # Operational exposure tie-out: open loan base/penalty and agreement balances must be non-negative.
     loan_out=Decimal('0')
-    for i in db.query(LoanInstallment).filter(LoanInstallment.status!='PAID').all():
-        loan_out += max(Decimal('0'),Decimal(i.amount)+Decimal(i.penalty_amount or 0)-Decimal(i.paid_amount or 0))
+    for i in open_installments:
+        base_open = max(Decimal('0.00'), Decimal(i.amount or 0) - Decimal(i.paid_amount or 0))
+        penalty_open = max(Decimal('0.00'), Decimal(i.penalty_amount or 0) - Decimal(i.paid_penalty_amount or 0))
+        loan_out += base_open + penalty_open
     agr_out=Decimal('0')
     for i in db.query(AgreementInstallment).filter(AgreementInstallment.status!='PAID').all():
         agr_out += max(Decimal('0'),Decimal(i.amount)+Decimal(i.penalty_amount or 0)-Decimal(i.paid_amount or 0))
