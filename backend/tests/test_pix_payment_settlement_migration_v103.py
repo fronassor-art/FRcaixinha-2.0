@@ -50,7 +50,7 @@ def _payment(db, suffix="1"):
 def test_0079_is_the_only_alembic_head():
     config = Config(str(BACKEND_ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(BACKEND_ROOT / "alembic"))
-    assert tuple(ScriptDirectory.from_config(config).get_heads()) == ("0081_master_integrity_v104",)
+    assert tuple(ScriptDirectory.from_config(config).get_heads()) == ("0082_payment_settlement_agreement_v104",)
 
 
 def test_migration_is_additive_and_declares_auditable_schema():
@@ -73,7 +73,7 @@ def test_models_expose_required_indexes_constraints_and_foreign_keys():
     settlement = PaymentSettlement.__table__
 
     assert {fk.column.table.name for fk in settlement.foreign_keys} == {
-        "payments", "members", "contributions", "loan_installments", "webhook_events"
+        "payments", "members", "contributions", "loan_installments", "agreement_installments", "webhook_events"
     }
     assert {constraint.name for constraint in settlement.constraints if constraint.name} >= {
         "ck_payment_settlements_nonnegative_amounts",
@@ -98,6 +98,7 @@ def test_models_expose_required_indexes_constraints_and_foreign_keys():
         "ix_payment_settlements_member_confirmed",
         "ix_payment_settlements_contribution_id",
         "ix_payment_settlements_loan_installment_id",
+        "ix_payment_settlements_agreement_installment_id",
         "ix_payment_settlements_webhook_event_id",
     }
     assert "payment_settlements" in inspect(engine).get_table_names()

@@ -205,6 +205,7 @@ class PaymentSettlement(Base):
     obligation_type: Mapped[str] = mapped_column(String(30))
     contribution_id: Mapped[int | None] = mapped_column(ForeignKey("contributions.id"))
     loan_installment_id: Mapped[int | None] = mapped_column(ForeignKey("loan_installments.id"))
+    agreement_installment_id: Mapped[int | None] = mapped_column(ForeignKey("agreement_installments.id"))
     amount_received: Mapped[Decimal] = mapped_column(Numeric(14,2), default=Decimal("0.00"))
     amount_applied: Mapped[Decimal] = mapped_column(Numeric(14,2), default=Decimal("0.00"))
     principal_applied: Mapped[Decimal] = mapped_column(Numeric(14,2), default=Decimal("0.00"))
@@ -225,13 +226,15 @@ class PaymentSettlement(Base):
         CheckConstraint("amount_received >= 0 AND amount_applied >= 0 AND principal_applied >= 0 AND interest_applied >= 0 AND penalty_applied >= 0 AND excess_amount >= 0", name="ck_payment_settlements_nonnegative_amounts"),
         CheckConstraint("amount_received = amount_applied + excess_amount", name="ck_payment_settlements_received_allocation"),
         CheckConstraint("amount_applied = principal_applied + interest_applied + penalty_applied", name="ck_payment_settlements_applied_components"),
-        CheckConstraint("(obligation_type = 'CONTRIBUTION' AND contribution_id IS NOT NULL AND loan_installment_id IS NULL) OR (obligation_type = 'LOAN_INSTALLMENT' AND loan_installment_id IS NOT NULL AND contribution_id IS NULL)", name="ck_payment_settlements_single_obligation"),
-        CheckConstraint("obligation_status_before IN ('PENDING', 'PARTIAL', 'OVERDUE', 'PAID')", name="ck_payment_settlements_status_before"),
-        CheckConstraint("obligation_status_after IN ('PENDING', 'PARTIAL', 'OVERDUE', 'PAID')", name="ck_payment_settlements_status_after"),
+        CheckConstraint("(obligation_type = 'CONTRIBUTION' AND contribution_id IS NOT NULL AND loan_installment_id IS NULL AND agreement_installment_id IS NULL) OR (obligation_type = 'LOAN_INSTALLMENT' AND contribution_id IS NULL AND loan_installment_id IS NOT NULL AND agreement_installment_id IS NULL) OR (obligation_type = 'AGREEMENT_INSTALLMENT' AND contribution_id IS NULL AND loan_installment_id IS NULL AND agreement_installment_id IS NOT NULL)", name="ck_payment_settlements_single_obligation"),
+        CheckConstraint("obligation_status_before IN ('OPEN', 'PENDING', 'PARTIAL', 'OVERDUE', 'PAID')", name="ck_payment_settlements_status_before"),
+        CheckConstraint("obligation_status_after IN ('OPEN', 'PENDING', 'PARTIAL', 'OVERDUE', 'PAID')", name="ck_payment_settlements_status_after"),
+        CheckConstraint("obligation_type != 'AGREEMENT_INSTALLMENT' OR interest_applied = 0", name="ck_payment_settlements_agreement_no_interest"),
         CheckConstraint("receipt_version = 'v1'", name="ck_payment_settlements_receipt_version"),
         Index("ix_payment_settlements_member_confirmed", "member_id", "confirmed_at"),
         Index("ix_payment_settlements_contribution_id", "contribution_id"),
         Index("ix_payment_settlements_loan_installment_id", "loan_installment_id"),
+        Index("ix_payment_settlements_agreement_installment_id", "agreement_installment_id"),
         Index("ix_payment_settlements_webhook_event_id", "webhook_event_id"),
     )
 
