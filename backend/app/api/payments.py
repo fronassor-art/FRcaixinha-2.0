@@ -10,8 +10,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import current_user, require_admin
 from app.core.config import settings
 from app.db.session import get_db
-from app.models import AgreementInstallment, CollectionAgreement, Contribution, Group, Loan, LoanInstallment, Member, Payment, PaymentSettlement, User, WebhookEvent
-from app.services.agreement_payments_v039 import apply_confirmed_agreement_payment
+from app.models import AgreementInstallment, CollectionAgreement, Contribution, Group, LedgerEntry, Loan, LoanInstallment, Member, Payment, PaymentSettlement, User, WebhookEvent
 from app.services.mercado_pago import MercadoPagoClient
 from app.services.notifications_v12 import create_notification
 from app.services.payment_settlement import contribution_financial_status, installment_financial_status, settle_confirmed_pix_payment
@@ -319,13 +318,25 @@ async def mercado_pago_webhook(request: Request, db: Session = Depends(get_db)):
                                 if installment is not None and loan is not None and member is not None:
                                     create_notification(db, member.user_id, "LOAN_INSTALLMENT_PAID", "Parcela paga", f"A parcela {installment.number} do empréstimo #{loan.id} foi confirmada.", "LOAN_INSTALLMENT", str(installment.id))
                 elif (payment.reference_type or "").upper() == "AGREEMENT_INSTALLMENT" and payment.reference_id:
-                    installment = db.get(AgreementInstallment, int(payment.reference_id))
-                    if installment is not None:
-                        changed = apply_confirmed_agreement_payment(db, payment, installment)
-                        agreement = db.get(CollectionAgreement, installment.agreement_id)
-                        if changed and agreement is not None:
-                            member = db.get(Member, agreement.member_id)
-                            if member is not None:
+                    legacy = payment.ledger_posted_at is not None or db.query(LedgerEntry).filter(
+                        LedgerEntry.reference_type == "AGREEMENT_INSTALLMENT_PAYMENT",
+                        LedgerEntry.reference_id == str(payment.id),
+                    ).first() is not None
+                    if not legacy:
+                        was_settled = db.query(PaymentSettlement).filter(PaymentSettlement.payment_id == payment.id).first() is not None
+                        settlement = settle_confirmed_pix_payment(
+                            db,
+                            payment,
+                            confirmation_source="WEBHOOK",
+                            webhook_event_id=event.id,
+                            remote_payload=remote_payload,
+                            confirmed_at=_remote_confirmed_at(remote_payment),
+                        )
+                        if not was_settled and settlement.amount_applied > ZERO:
+                            installment = db.get(AgreementInstallment, settlement.agreement_installment_id)
+                            agreement = db.get(CollectionAgreement, installment.agreement_id) if installment is not None else None
+                            member = db.get(Member, settlement.member_id)
+                            if installment is not None and agreement is not None and member is not None:
                                 create_notification(db, member.user_id, "AGREEMENT_INSTALLMENT_PAID", "Parcela do acordo paga", f"A parcela {installment.number} do acordo #{agreement.id} foi confirmada.", "AGREEMENT_INSTALLMENT", str(installment.id))
             event.processed = True
     else:

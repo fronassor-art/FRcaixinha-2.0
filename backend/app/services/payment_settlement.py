@@ -9,8 +9,8 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.models import Contribution, LedgerEntry, Loan, LoanInstallment, Member, Payment, PaymentSettlement
-from app.services.ledger import post_contribution_payment
+from app.models import AgreementInstallment, CollectionAgreement, Contribution, LedgerEntry, Loan, LoanInstallment, Member, Payment, PaymentSettlement
+from app.services.ledger import post_contribution_payment, post_entry
 from app.services.loan_engine_v17 import ensure_loan_completion
 from app.services.loan_payments_v17 import apply_confirmed_payment
 
@@ -140,6 +140,29 @@ def _locked_installment(db: Session, payment: Payment) -> LoanInstallment | None
     return query.one_or_none()
 
 
+def _locked_agreement_installment(db: Session, payment: Payment) -> AgreementInstallment | None:
+    if (payment.reference_type or "").upper() != "AGREEMENT_INSTALLMENT" or not (payment.reference_id or "").isdigit():
+        return None
+    query = db.query(AgreementInstallment).filter(AgreementInstallment.id == int(payment.reference_id))
+    if _is_postgresql(db):
+        query = query.with_for_update()
+    return query.one_or_none()
+
+
+def _locked_collection_agreement(db: Session, agreement_id: int) -> CollectionAgreement | None:
+    query = db.query(CollectionAgreement).filter(CollectionAgreement.id == agreement_id)
+    if _is_postgresql(db):
+        query = query.with_for_update()
+    return query.one_or_none()
+
+
+def _legacy_agreement_ledger_exists(db: Session, payment_id: int) -> bool:
+    return db.query(LedgerEntry).filter(
+        LedgerEntry.reference_type == "AGREEMENT_INSTALLMENT_PAYMENT",
+        LedgerEntry.reference_id == str(payment_id),
+    ).first() is not None
+
+
 def _ledger_snapshot(db: Session, payment_id: int) -> list[dict[str, Any]]:
     rows = db.query(LedgerEntry).filter(LedgerEntry.reference_id == str(payment_id)).order_by(LedgerEntry.id).all()
     return [
@@ -157,6 +180,16 @@ def _ledger_snapshot(db: Session, payment_id: int) -> list[dict[str, Any]]:
 
 
 def _receipt_snapshot(*, payment: Payment, settlement: PaymentSettlement, ledger: list[dict[str, Any]]) -> dict[str, Any]:
+    obligation = {
+        "type": settlement.obligation_type,
+        "contribution_id": settlement.contribution_id,
+        "loan_installment_id": settlement.loan_installment_id,
+        "member_id": settlement.member_id,
+        "status_before": settlement.obligation_status_before,
+        "status_after": settlement.obligation_status_after,
+    }
+    if settlement.obligation_type == "AGREEMENT_INSTALLMENT":
+        obligation["agreement_installment_id"] = settlement.agreement_installment_id
     return {
         "receipt_version": RECEIPT_VERSION,
         "receipt_number": settlement.receipt_number,
@@ -171,14 +204,7 @@ def _receipt_snapshot(*, payment: Payment, settlement: PaymentSettlement, ledger
             "reference_type": payment.reference_type,
             "reference_id": payment.reference_id,
         },
-        "obligation": {
-            "type": settlement.obligation_type,
-            "contribution_id": settlement.contribution_id,
-            "loan_installment_id": settlement.loan_installment_id,
-            "member_id": settlement.member_id,
-            "status_before": settlement.obligation_status_before,
-            "status_after": settlement.obligation_status_after,
-        },
+        "obligation": obligation,
         "amounts": {
             "received": format(_money(settlement.amount_received), "f"),
             "applied": format(_money(settlement.amount_applied), "f"),
@@ -215,6 +241,9 @@ def settle_confirmed_pix_payment(
     existing = db.query(PaymentSettlement).filter(PaymentSettlement.payment_id == payment.id).one_or_none()
     if existing is not None:
         return existing
+    reference_type = (payment.reference_type or "").strip().upper()
+    if reference_type == "AGREEMENT_INSTALLMENT" and (payment.ledger_posted_at is not None or _legacy_agreement_ledger_exists(db, payment.id)):
+        raise ValueError("Pagamento legado de acordo já lançado não pode receber settlement retroativo.")
     if payment.ledger_posted_at is not None:
         raise ValueError("Pagamento legado já lançado não pode ser relançado sem recibo de liquidação.")
 
@@ -233,11 +262,53 @@ def settle_confirmed_pix_payment(
 
     contribution = _locked_contribution(db, payment)
     installment = _locked_installment(db, payment)
-    if (contribution is None) == (installment is None):
+    agreement_installment = None
+    if reference_type == "AGREEMENT_INSTALLMENT":
+        if payment.status != "approved":
+            raise ValueError("Pagamento de acordo precisa estar aprovado.")
+        agreement_installment = _locked_agreement_installment(db, payment)
+        if agreement_installment is None:
+            raise ValueError("Referência de parcela de acordo inválida.")
+    elif (contribution is None) == (installment is None):
         raise ValueError("Pagamento deve referenciar exatamente uma contribuição ou parcela de empréstimo.")
 
     penalty_applied = interest_applied = principal_applied = ZERO
-    if contribution is not None:
+    if agreement_installment is not None:
+        agreement = _locked_collection_agreement(db, agreement_installment.agreement_id)
+        if agreement is None:
+            raise ValueError("Acordo da parcela não encontrado.")
+        member = db.get(Member, agreement.member_id)
+        if member is None:
+            raise ValueError("Participante do acordo não encontrado.")
+        before_status = agreement_installment.status
+        before_penalty = _money(agreement_installment.paid_penalty_amount)
+        before_principal = _money(agreement_installment.paid_amount)
+        penalty_open = max(ZERO, _money(agreement_installment.penalty_amount) - before_penalty)
+        principal_open = max(ZERO, _money(agreement_installment.principal) - before_principal)
+        due = _money(penalty_open + principal_open)
+        applied = min(received, due)
+        if applied <= ZERO:
+            raise ValueError("Parcela de acordo não possui saldo aplicável.")
+        penalty_applied = min(penalty_open, applied)
+        principal_applied = min(principal_open, _money(applied - penalty_applied))
+        agreement_installment.paid_penalty_amount = _money(before_penalty + penalty_applied)
+        agreement_installment.paid_amount = _money(before_principal + principal_applied)
+        remaining = max(ZERO, _money(agreement_installment.penalty_amount) - agreement_installment.paid_penalty_amount)
+        remaining += max(ZERO, _money(agreement_installment.principal) - agreement_installment.paid_amount)
+        after_status = "PAID" if remaining == ZERO else ("PARTIAL" if applied > ZERO else "OPEN")
+        agreement_installment.status = after_status
+        if after_status == "PAID":
+            agreement_installment.paid_at = effective_at
+        post_entry(db, "CAIXINHA", "CREDIT", applied, "AGREEMENT_INSTALLMENT_PAYMENT", str(payment.id))
+        items = db.query(AgreementInstallment).filter(AgreementInstallment.agreement_id == agreement.id).all()
+        if items and all(item.status == "PAID" for item in items):
+            agreement.status = "SETTLED"
+        obligation_type = "AGREEMENT_INSTALLMENT"
+        member_id = member.id
+        contribution_id = None
+        loan_installment_id = None
+        agreement_installment_id = agreement_installment.id
+    elif contribution is not None:
         before_paid = _contribution_paid_amount(contribution)
         before_status = contribution_financial_status(contribution, before_paid, effective_at)
         open_amount = max(ZERO, _money(contribution.amount) - before_paid)
@@ -255,6 +326,7 @@ def settle_confirmed_pix_payment(
         member_id = contribution.member_id
         contribution_id = contribution.id
         loan_installment_id = None
+        agreement_installment_id = None
     else:
         assert installment is not None
         loan = db.get(Loan, installment.loan_id)
@@ -279,6 +351,7 @@ def settle_confirmed_pix_payment(
         member_id = member.id
         contribution_id = None
         loan_installment_id = installment.id
+        agreement_installment_id = None
 
     excess = _money(received - applied)
     payment.ledger_posted_at = datetime.now(timezone.utc)
@@ -289,6 +362,7 @@ def settle_confirmed_pix_payment(
         obligation_type=obligation_type,
         contribution_id=contribution_id,
         loan_installment_id=loan_installment_id,
+        agreement_installment_id=agreement_installment_id,
         amount_received=received,
         amount_applied=applied,
         principal_applied=principal_applied,
