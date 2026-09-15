@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.models import (Contribution, Payment, PaymentSettlement, WebhookEvent, LedgerEntry, Loan, LoanInstallment,
                         Expense, CollectionAgreement, AgreementInstallment, FinancialReconciliation,
                         MemberFinancialAccount, MemberFinancialEntry)
+from app.services.payment_settlement import _canonical_json, _ledger_snapshot, _receipt_snapshot
 
 CENT=Decimal('0.01')
 ZERO=Decimal('0.00')
@@ -78,6 +79,175 @@ def _payment_ledger_rows(db, payment_id):
     return db.query(LedgerEntry).filter(LedgerEntry.reference_id == str(payment_id)).all()
 
 
+def _agreement_settlement_issue(code, settlement, detail):
+    return f"{code}: settlement {settlement.id} (payment {settlement.payment_id}): {detail}"
+
+
+def _agreement_settlement_findings(db):
+    """Validate agreement settlements while leaving settlement-less legacy payments unchanged."""
+    invalid = []
+    ledger_mismatch = []
+    cumulative = []
+    settlements = db.query(PaymentSettlement).order_by(
+        PaymentSettlement.agreement_installment_id,
+        PaymentSettlement.confirmed_at,
+        PaymentSettlement.id,
+    ).all()
+    by_installment = {}
+    allowed_statuses = {"OPEN", "PENDING", "PARTIAL", "OVERDUE", "PAID"}
+
+    def dec(value):
+        return Decimal(value or 0).quantize(CENT, rounding=ROUND_HALF_UP)
+
+    def add(code, settlement, detail):
+        target = invalid if code == "AGREEMENT_SETTLEMENT_INVALID" else ledger_mismatch
+        target.append(_agreement_settlement_issue(code, settlement, detail))
+
+    for settlement in settlements:
+        pid = settlement.payment_id
+        payment = db.get(Payment, pid)
+        payment_is_agreement = payment is not None and (payment.reference_type or "").strip().upper() == "AGREEMENT_INSTALLMENT"
+        settlement_is_agreement = settlement.obligation_type == "AGREEMENT_INSTALLMENT"
+        if not (payment_is_agreement or settlement_is_agreement):
+            continue
+        installment = db.get(AgreementInstallment, settlement.agreement_installment_id) if settlement.agreement_installment_id is not None else None
+        agreement = db.get(CollectionAgreement, installment.agreement_id) if installment else None
+        if settlement_is_agreement and settlement.agreement_installment_id is not None:
+            by_installment.setdefault(settlement.agreement_installment_id, []).append(settlement)
+
+        if payment is None:
+            add("AGREEMENT_SETTLEMENT_INVALID", settlement, "Payment inexistente")
+            continue
+        if payment.status != "approved":
+            add("AGREEMENT_SETTLEMENT_INVALID", settlement, f"Payment.status={payment.status!r}")
+        if not payment_is_agreement:
+            add("AGREEMENT_SETTLEMENT_INVALID", settlement, "Payment.reference_type incompatível")
+        if not settlement_is_agreement:
+            add("AGREEMENT_SETTLEMENT_INVALID", settlement, "obligation_type incompatível com Payment de acordo")
+        if not payment.reference_id or payment.reference_id != str(settlement.agreement_installment_id):
+            add("AGREEMENT_SETTLEMENT_INVALID", settlement, "Payment.reference_id incompatível")
+        if not settlement_is_agreement or settlement.agreement_installment_id is None:
+            add("AGREEMENT_SETTLEMENT_INVALID", settlement, "agreement_installment_id incompatível ou ausente")
+        elif installment is None:
+            add("AGREEMENT_SETTLEMENT_INVALID", settlement, "AgreementInstallment inexistente")
+        elif agreement is None:
+            add("AGREEMENT_SETTLEMENT_INVALID", settlement, "CollectionAgreement inexistente")
+        elif settlement.member_id != agreement.member_id:
+            add("AGREEMENT_SETTLEMENT_INVALID", settlement, "member_id diverge do membro da obrigação")
+        if settlement.payment_id != payment.id:
+            add("AGREEMENT_SETTLEMENT_INVALID", settlement, "payment_id diverge do Payment.id")
+
+        received = dec(settlement.amount_received)
+        applied = dec(settlement.amount_applied)
+        principal = dec(settlement.principal_applied)
+        interest = dec(settlement.interest_applied)
+        penalty = dec(settlement.penalty_applied)
+        excess = dec(settlement.excess_amount)
+        if any(value < ZERO for value in (received, applied, principal, interest, penalty, excess)):
+            add("AGREEMENT_SETTLEMENT_INVALID", settlement, "valores negativos")
+        if interest != ZERO:
+            add("AGREEMENT_SETTLEMENT_INVALID", settlement, "interest_applied deve ser zero")
+        if received != dec(applied + excess):
+            add("AGREEMENT_SETTLEMENT_INVALID", settlement, "amount_received != amount_applied + excess_amount")
+        if applied != dec(principal + interest + penalty):
+            add("AGREEMENT_SETTLEMENT_INVALID", settlement, "amount_applied != soma dos componentes")
+
+        for field in ("obligation_status_before", "obligation_status_after"):
+            if getattr(settlement, field) not in allowed_statuses:
+                add("AGREEMENT_SETTLEMENT_INVALID", settlement, f"{field} inválido")
+        if applied > ZERO and settlement.obligation_status_after not in {"PARTIAL", "PAID"}:
+            add("AGREEMENT_SETTLEMENT_INVALID", settlement, "pagamento aplicado não pode terminar em OPEN/PENDING/OVERDUE")
+        if installment is not None and dec(installment.principal) < ZERO:
+            add("AGREEMENT_SETTLEMENT_INVALID", settlement, "principal da obrigação negativo")
+        if installment is not None and dec(installment.penalty_amount) < ZERO:
+            add("AGREEMENT_SETTLEMENT_INVALID", settlement, "penalty_amount da obrigação negativo")
+
+        if payment is not None:
+            expected_received = dec(payment.amount_received if payment.amount_received is not None else payment.amount)
+            if received != expected_received:
+                add("AGREEMENT_SETTLEMENT_INVALID", settlement, "amount_received diverge do Payment")
+            rows = _payment_ledger_rows(db, payment.id)
+            expected_rows = [row for row in rows if row.reference_type == "AGREEMENT_INSTALLMENT_PAYMENT"]
+            valid_rows = [row for row in expected_rows if row.direction == "CREDIT" and row.account == "CAIXINHA" and dec(row.amount) == applied]
+            if len(rows) != 1 or len(expected_rows) != 1 or len(valid_rows) != 1:
+                ledger_mismatch.append(_agreement_settlement_issue(
+                    "AGREEMENT_SETTLEMENT_LEDGER_MISMATCH", settlement,
+                    "ledger ausente, duplicado, extra, ou com direção/conta/valor incompatível"))
+
+        # Receipt fields are part of the immutable evidence generated by payment_settlement.py.
+        if settlement.receipt_number != f"PIX-V1-{pid:012d}":
+            add("AGREEMENT_SETTLEMENT_INVALID", settlement, "receipt_number inválido")
+        if settlement.receipt_version != "v1":
+            add("AGREEMENT_SETTLEMENT_INVALID", settlement, "receipt_version inválido")
+        try:
+            snapshot = json.loads(settlement.receipt_snapshot_json)
+            expected_snapshot = _receipt_snapshot(payment=payment, settlement=settlement, ledger=_ledger_snapshot(db, pid))
+            canonical_snapshot = _canonical_json(expected_snapshot)
+            if snapshot != expected_snapshot or settlement.receipt_snapshot_json != canonical_snapshot:
+                add("AGREEMENT_SETTLEMENT_INVALID", settlement, "receipt_snapshot_json inválido")
+            expected_hash = hashlib.sha256(canonical_snapshot.encode("utf-8")).hexdigest()
+            if settlement.receipt_hash != expected_hash:
+                add("AGREEMENT_SETTLEMENT_INVALID", settlement, "receipt_hash inválido")
+        except (TypeError, ValueError, json.JSONDecodeError, AttributeError):
+            add("AGREEMENT_SETTLEMENT_INVALID", settlement, "receipt_snapshot_json ilegível")
+
+    for installment_id, rows in by_installment.items():
+        installment = db.get(AgreementInstallment, installment_id)
+        if installment is None:
+            continue
+        legacy = db.query(Payment).filter(
+            Payment.status == "approved",
+            Payment.reference_type == "AGREEMENT_INSTALLMENT",
+            Payment.reference_id == str(installment_id),
+            ~db.query(PaymentSettlement).filter(PaymentSettlement.payment_id == Payment.id).exists(),
+        ).count()
+        settled_principal = sum((dec(row.principal_applied) for row in rows), ZERO)
+        settled_penalty = sum((dec(row.penalty_applied) for row in rows), ZERO)
+        settled_applied = sum((dec(row.amount_applied) for row in rows), ZERO)
+        settled_excess = sum((dec(row.excess_amount) for row in rows), ZERO)
+        principal_open = max(ZERO, dec(installment.principal) - settled_principal)
+        penalty_open = max(ZERO, dec(installment.penalty_amount) - settled_penalty)
+        cumulative_mismatch = (
+            settled_principal > dec(installment.principal)
+            or settled_penalty > dec(installment.penalty_amount)
+            or settled_applied != dec(settled_principal + settled_penalty)
+            or dec(installment.paid_amount) != settled_principal
+            or dec(installment.paid_penalty_amount) != settled_penalty
+        )
+        if not legacy and cumulative_mismatch:
+            cumulative.append(
+                f"AGREEMENT_SETTLEMENT_CUMULATIVE_MISMATCH: installment {installment_id}: "
+                f"principal/penalty settlements={money(settled_principal)}/{money(settled_penalty)} "
+                f"paid={money(installment.paid_amount)}/{money(installment.paid_penalty_amount)} "
+                f"open={money(principal_open)}/{money(penalty_open)} "
+                f"applied={money(settled_applied)} excess={money(settled_excess)}"
+            )
+
+        timestamps_complete = all(row.confirmed_at is not None for row in rows)
+        timestamps_unique = timestamps_complete and len({row.confirmed_at for row in rows}) == len(rows)
+        if timestamps_unique:
+            ordered = sorted(rows, key=lambda row: (row.confirmed_at, row.id))
+            for previous, current in zip(ordered, ordered[1:]):
+                if previous.obligation_status_after != current.obligation_status_before:
+                    invalid.append(_agreement_settlement_issue(
+                        "AGREEMENT_SETTLEMENT_INVALID", current,
+                        "sequência histórica de status incompatível"))
+    return invalid, ledger_mismatch, cumulative
+
+
+def _agreement_collection_status_findings(db):
+    issues = []
+    agreements = db.query(CollectionAgreement).all()
+    for agreement in agreements:
+        installments = db.query(AgreementInstallment).filter(AgreementInstallment.agreement_id == agreement.id).all()
+        all_paid = bool(installments) and all(item.status == "PAID" for item in installments)
+        if agreement.status == "SETTLED" and not all_paid:
+            issues.append(f"AGREEMENT_COLLECTION_STATUS_MISMATCH: acordo {agreement.id} SETTLED sem todas installments PAID")
+        if all_paid and agreement.status != "SETTLED":
+            issues.append(f"AGREEMENT_COLLECTION_STATUS_MISMATCH: acordo {agreement.id} com todas installments PAID sem status SETTLED")
+    return issues
+
+
 def _approved_contribution_issues(db, payment):
     issues = []
     pid = str(payment.id)
@@ -120,6 +290,9 @@ def _approved_contribution_issues(db, payment):
 def _approved_agreement_issues(db, payment):
     issues = []
     pid = str(payment.id)
+    if db.query(PaymentSettlement).filter(PaymentSettlement.payment_id == payment.id).first() is not None:
+        # Settlement-backed agreements are validated by the structured v1 findings below.
+        return issues
     if (payment.reference_type or "").upper() != "AGREEMENT_INSTALLMENT" or not (payment.reference_id or "").isdigit():
         return [f"{pid}: referência de acordo inválida"]
     installment = db.get(AgreementInstallment, int(payment.reference_id))
@@ -201,6 +374,21 @@ def build_advanced_reconciliation(db: Session, competence: date):
     findings.append({'code':'UNPROCESSED_WEBHOOKS','status':'PASS' if unprocessed==0 else 'FAIL','details':'Webhooks pendentes bloqueiam fechamento.','expected':'0','observed':str(unprocessed)})
     pix_issues = _pix_installment_settlement_findings(db)
     findings.append({'code':'PIX_INSTALLMENT_SETTLEMENT','status':'FAIL' if pix_issues else 'PASS','details':'Settlements PIX atuais de parcelas consistentes.' if not pix_issues else '; '.join(pix_issues),'expected':'0','observed':str(len(pix_issues))})
+    agreement_invalid, agreement_ledger, agreement_cumulative = _agreement_settlement_findings(db)
+    agreement_collection = _agreement_collection_status_findings(db)
+    for code, issues in (
+        ('AGREEMENT_SETTLEMENT_INVALID', agreement_invalid),
+        ('AGREEMENT_SETTLEMENT_LEDGER_MISMATCH', agreement_ledger),
+        ('AGREEMENT_SETTLEMENT_CUMULATIVE_MISMATCH', agreement_cumulative),
+        ('AGREEMENT_COLLECTION_STATUS_MISMATCH', agreement_collection),
+    ):
+        findings.append({
+            'code': code,
+            'status': 'FAIL' if issues else 'PASS',
+            'details': 'Settlements de acordos consistentes.' if not issues else '; '.join(issues),
+            'expected': '0',
+            'observed': str(len(issues)),
+        })
     open_installments = db.query(LoanInstallment).filter(LoanInstallment.status!='PAID').all()
     negative = sum(
         1 for i in open_installments
