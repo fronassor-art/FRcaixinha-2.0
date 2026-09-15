@@ -1,6 +1,6 @@
 from datetime import datetime, date, timezone
 from decimal import Decimal
-from sqlalchemy import String, Integer, Boolean, DateTime, Date, Numeric, ForeignKey, Text, UniqueConstraint, Index, CheckConstraint
+from sqlalchemy import String, Integer, Boolean, DateTime, Date, Numeric, ForeignKey, Text, UniqueConstraint, Index, CheckConstraint, false, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy import event
 from app.db.base import Base
@@ -19,9 +19,19 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(Text())
     role: Mapped[str] = mapped_column(String(20), default="USER")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_master: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
     accepted_terms_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     member: Mapped["Member | None"] = relationship(back_populates="user", uselist=False)
+    __table_args__ = (
+        Index(
+            "uq_users_one_active_master",
+            "is_master",
+            unique=True,
+            postgresql_where=text("is_master = true AND is_active = true AND role = 'ADMIN'"),
+            sqlite_where=text("is_master = 1 AND is_active = 1 AND role = 'ADMIN'"),
+        ),
+    )
 
 
 class UserSession(Base):

@@ -42,3 +42,9 @@ def require_admin(user=Depends(current_user)):
     if user.role != "ADMIN":
         raise HTTPException(status_code=403, detail="Acesso restrito ao administrador")
     return user
+
+
+def require_master(user=Depends(current_user)):
+    if not user.is_active or user.role != "ADMIN" or not user.is_master:
+        raise HTTPException(status_code=403, detail="Acesso restrito ao Administrador Master")
+    return user
