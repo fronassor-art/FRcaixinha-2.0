@@ -31,6 +31,10 @@ class User(Base):
             postgresql_where=text("is_master = true AND is_active = true AND role = 'ADMIN'"),
             sqlite_where=text("is_master = 1 AND is_active = 1 AND role = 'ADMIN'"),
         ),
+        CheckConstraint(
+            "is_master = false OR (role = 'ADMIN' AND is_active = true)",
+            name="ck_users_master_requires_active_admin",
+        ),
     )
 
 

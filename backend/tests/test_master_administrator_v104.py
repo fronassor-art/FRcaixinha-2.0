@@ -86,27 +86,27 @@ def test_database_allows_at_most_one_active_master():
     db.close()
 
 
-def test_database_allows_inactive_master_record_without_second_active_master():
+def test_database_rejects_inactive_master():
     db = _db()
-    first = User(
-        name="Inactive Master",
-        email="inactive-master@test",
-        cpf="inactive-master",
-        password_hash="x",
-        role="ADMIN",
-        is_active=False,
-        is_master=True,
-    )
-    second = User(
-        name="Active Master",
-        email="active-master@test",
-        cpf="active-master",
-        password_hash="x",
-        role="ADMIN",
-        is_active=True,
-        is_master=True,
-    )
-    db.add_all([first, second])
+    db.add(User(name="Inactive Master", email="inactive-master@test", cpf="inactive-master", password_hash="x", role="ADMIN", is_active=False, is_master=True))
+    with pytest.raises(IntegrityError):
+        db.commit()
+    db.rollback()
+    db.close()
+
+
+def test_database_rejects_non_admin_master():
+    db = _db()
+    db.add(User(name="User Master", email="user-master@test", cpf="user-master", password_hash="x", role="USER", is_active=True, is_master=True))
+    with pytest.raises(IntegrityError):
+        db.commit()
+    db.rollback()
+    db.close()
+
+
+def test_database_accepts_active_admin_master():
+    db = _db()
+    db.add(User(name="Active Master", email="active-master@test", cpf="active-master", password_hash="x", role="ADMIN", is_active=True, is_master=True))
     db.commit()
-    assert db.query(User).filter(User.is_master.is_(True), User.is_active.is_(True)).count() == 1
+    assert db.query(User).filter(User.is_master.is_(True)).count() == 1
     db.close()
