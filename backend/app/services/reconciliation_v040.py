@@ -224,7 +224,9 @@ def build_advanced_reconciliation(db: Session, competence: date):
         loan_out += base_open + penalty_open
     agr_out=Decimal('0')
     for i in db.query(AgreementInstallment).filter(AgreementInstallment.status!='PAID').all():
-        agr_out += max(Decimal('0'),Decimal(i.amount)+Decimal(i.penalty_amount or 0)-Decimal(i.paid_amount or 0))
+        principal_open = max(Decimal('0.00'), Decimal(i.principal or 0) - Decimal(i.paid_amount or 0))
+        penalty_open = max(Decimal('0.00'), Decimal(i.penalty_amount or 0) - Decimal(i.paid_penalty_amount or 0))
+        agr_out += principal_open + penalty_open
     snapshot={
       'schema':'v0.40','competence':a.isoformat(),'period_end':b.isoformat(),
       'contributions_paid':money(contrib),'contributions_ledger':money(contrib_ledger),

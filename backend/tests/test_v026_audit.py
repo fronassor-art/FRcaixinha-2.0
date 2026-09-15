@@ -31,7 +31,7 @@ def test_security_chain_is_present_and_single_head():
         if line.strip()
     ]
 
-    assert heads == ["0079_pix_payment_settlement_v103"]
+    assert heads == ["0081_master_integrity_v104"]
 
     rows = revisions()
     assert rows["0006_security_v11"] == "0005_financial_operations"
