@@ -20,5 +20,5 @@ def close_month_v040(db: Session, competence: date, admin_id: int):
     snap['reconciliation_hash']=recon['snapshot_hash']
     raw=json.dumps(snap,sort_keys=True,separators=(',',':')).encode(); h=hashlib.sha256(raw).hexdigest()
     if not existing: existing=MonthlyClosing(competence=competence); db.add(existing); db.flush()
-    existing.status='CLOSED'; existing.total_contributions=Decimal(snap['contributions_paid']); existing.total_expenses=Decimal(snap['expenses_posted']); existing.total_interest_received=Decimal(snap['loan_payments_ledger'])+Decimal(snap['agreement_payments_ledger']); existing.ledger_balance=Decimal(snap['ledger_net']); existing.closed_by=admin_id; existing.closed_at=datetime.now(timezone.utc); existing.snapshot_json=json.dumps(snap,sort_keys=True,separators=(',',':')); existing.snapshot_hash=h
+    existing.status='CLOSED'; existing.total_contributions=Decimal(snap['contributions_paid']); existing.total_expenses=Decimal(snap['expenses_posted']); existing.total_interest_received=Decimal(snap['interest_received']); existing.ledger_balance=Decimal(snap['ledger_net']); existing.closed_by=admin_id; existing.closed_at=datetime.now(timezone.utc); existing.snapshot_json=json.dumps(snap,sort_keys=True,separators=(',',':')); existing.snapshot_hash=h
     return existing,snap,h

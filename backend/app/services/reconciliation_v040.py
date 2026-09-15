@@ -187,6 +187,7 @@ def build_advanced_reconciliation(db: Session, competence: date):
     check('CONTRIBUTIONS',contrib,contrib_ledger,'Contribuições pagas devem bater com créditos no Ledger no período.')
     loan_pay=_sum_ledger(db,'CREDIT',['LOAN_INSTALLMENT_PAYMENT'],start,end)
     agr_pay=_sum_ledger(db,'CREDIT',['AGREEMENT_INSTALLMENT_PAYMENT'],start,end)
+    interest_received=_sum_ledger(db,'CREDIT',['LOAN_INTEREST_PAYMENT'],start,end)
     disb=_sum_ledger(db,'DEBIT',['LOAN_DISBURSEMENT'],start,end)
     exp=Decimal(db.query(func.coalesce(func.sum(Expense.amount),0)).filter(Expense.status=='POSTED',Expense.expense_date.between(a,b)).scalar() or 0)
     exp_ledger=_sum_ledger(db,'DEBIT',['EXPENSE'],start,end)
@@ -228,6 +229,7 @@ def build_advanced_reconciliation(db: Session, competence: date):
       'schema':'v0.40','competence':a.isoformat(),'period_end':b.isoformat(),
       'contributions_paid':money(contrib),'contributions_ledger':money(contrib_ledger),
       'loan_payments_ledger':money(loan_pay),'agreement_payments_ledger':money(agr_pay),
+      'interest_received':money(interest_received),
       'loan_disbursements_ledger':money(disb),'expenses_posted':money(exp),'expenses_ledger':money(exp_ledger),
       'approved_payments':money(approved_total),'posted_payments':money(posted_total),
       'open_loan_exposure':money(loan_out),'open_agreement_exposure':money(agr_out),
