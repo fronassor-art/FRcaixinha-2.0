@@ -23,6 +23,7 @@ class User(Base):
     accepted_terms_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     member: Mapped["Member | None"] = relationship(back_populates="user", uselist=False)
+    payment_reversals: Mapped[list["PaymentReversal"]] = relationship(back_populates="admin")
     __table_args__ = (
         Index(
             "uq_users_one_active_master",
@@ -190,6 +191,7 @@ class Payment(Base):
     reference_type: Mapped[str | None] = mapped_column(String(50), index=True)
     reference_id: Mapped[str | None] = mapped_column(String(80), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    payment_reversal: Mapped["PaymentReversal | None"] = relationship(back_populates="payment", uselist=False)
     __table_args__ = (
         UniqueConstraint("provider", "provider_payment_id", name="uq_provider_payment"),
         Index("uq_payments_provider_pix_txid", "provider", "pix_txid", unique=True),
@@ -222,6 +224,11 @@ class PaymentSettlement(Base):
     receipt_snapshot_json: Mapped[str] = mapped_column(Text())
     receipt_hash: Mapped[str] = mapped_column(String(64), unique=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    loan_status_before: Mapped[str | None] = mapped_column(String(30))
+    loan_status_after: Mapped[str | None] = mapped_column(String(30))
+    loan_state_revision_before: Mapped[int | None] = mapped_column(Integer)
+    loan_state_revision_after: Mapped[int | None] = mapped_column(Integer)
+    payment_reversal: Mapped["PaymentReversal | None"] = relationship(back_populates="settlement", uselist=False)
     __table_args__ = (
         CheckConstraint("amount_received >= 0 AND amount_applied >= 0 AND principal_applied >= 0 AND interest_applied >= 0 AND penalty_applied >= 0 AND excess_amount >= 0", name="ck_payment_settlements_nonnegative_amounts"),
         CheckConstraint("amount_received = amount_applied + excess_amount", name="ck_payment_settlements_received_allocation"),
@@ -230,7 +237,13 @@ class PaymentSettlement(Base):
         CheckConstraint("obligation_status_before IN ('OPEN', 'PENDING', 'PARTIAL', 'OVERDUE', 'PAID')", name="ck_payment_settlements_status_before"),
         CheckConstraint("obligation_status_after IN ('OPEN', 'PENDING', 'PARTIAL', 'OVERDUE', 'PAID')", name="ck_payment_settlements_status_after"),
         CheckConstraint("obligation_type != 'AGREEMENT_INSTALLMENT' OR interest_applied = 0", name="ck_payment_settlements_agreement_no_interest"),
-        CheckConstraint("receipt_version = 'v1'", name="ck_payment_settlements_receipt_version"),
+        CheckConstraint("receipt_version IN ('v1', 'v2')", name="ck_payment_settlements_receipt_version"),
+        CheckConstraint("(loan_status_before IS NULL AND loan_status_after IS NULL AND loan_state_revision_before IS NULL AND loan_state_revision_after IS NULL) OR (loan_status_before IS NOT NULL AND loan_status_after IS NOT NULL AND loan_state_revision_before IS NOT NULL AND loan_state_revision_after IS NOT NULL)", name="ck_payment_settlements_loan_evidence_complete"),
+        CheckConstraint("loan_status_before IS NULL OR loan_status_before IN ('REQUESTED', 'APPROVED', 'REJECTED', 'ACTIVE', 'OVERDUE', 'IN_COLLECTION', 'PAID', 'RESTRUCTURED')", name="ck_payment_settlements_loan_status_before"),
+        CheckConstraint("loan_status_after IS NULL OR loan_status_after IN ('REQUESTED', 'APPROVED', 'REJECTED', 'ACTIVE', 'OVERDUE', 'IN_COLLECTION', 'PAID', 'RESTRUCTURED')", name="ck_payment_settlements_loan_status_after"),
+        CheckConstraint("loan_state_revision_before IS NULL OR loan_state_revision_before >= 0", name="ck_payment_settlements_loan_revision_before"),
+        CheckConstraint("loan_state_revision_after IS NULL OR loan_state_revision_after >= 0", name="ck_payment_settlements_loan_revision_after"),
+        CheckConstraint("loan_state_revision_before IS NULL OR loan_state_revision_after > loan_state_revision_before", name="ck_payment_settlements_loan_revision_order"),
         Index("ix_payment_settlements_member_confirmed", "member_id", "confirmed_at"),
         Index("ix_payment_settlements_contribution_id", "contribution_id"),
         Index("ix_payment_settlements_loan_installment_id", "loan_installment_id"),
@@ -265,6 +278,8 @@ class Loan(Base):
     decided_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
     disbursed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    state_revision: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    __table_args__ = (CheckConstraint("state_revision >= 0", name="ck_loans_state_revision_nonnegative"),)
 
 
 class LoanSimulation(Base):
@@ -326,6 +341,74 @@ class LedgerEntry(Base):
     entry_hash: Mapped[str | None] = mapped_column(String(64), unique=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     __table_args__ = (Index("ix_ledger_reference", "reference_type", "reference_id"),)
+
+
+class PaymentReversal(Base):
+    __tablename__ = "payment_reversals"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    payment_id: Mapped[int] = mapped_column(ForeignKey("payments.id"))
+    settlement_id: Mapped[int] = mapped_column(ForeignKey("payment_settlements.id"))
+    admin_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    reason: Mapped[str] = mapped_column(Text())
+    reversed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    reversal_competence: Mapped[date] = mapped_column(Date)
+    original_competence: Mapped[date | None] = mapped_column(Date)
+    original_due_date: Mapped[date | None] = mapped_column(Date)
+    original_date_kind: Mapped[str] = mapped_column(String(40))
+    amount_received: Mapped[Decimal] = mapped_column(Numeric(14, 2))
+    amount_applied: Mapped[Decimal] = mapped_column(Numeric(14, 2))
+    principal_applied: Mapped[Decimal] = mapped_column(Numeric(14, 2))
+    interest_applied: Mapped[Decimal] = mapped_column(Numeric(14, 2))
+    penalty_applied: Mapped[Decimal] = mapped_column(Numeric(14, 2))
+    excess_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2))
+    receipt_number: Mapped[str] = mapped_column(String(80))
+    receipt_version: Mapped[str] = mapped_column(String(20))
+    receipt_snapshot_json: Mapped[str] = mapped_column(Text())
+    receipt_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+    payment: Mapped["Payment"] = relationship(back_populates="payment_reversal")
+    settlement: Mapped["PaymentSettlement"] = relationship(back_populates="payment_reversal")
+    admin: Mapped["User"] = relationship(back_populates="payment_reversals")
+    components: Mapped[list["PaymentReversalComponent"]] = relationship(back_populates="payment_reversal")
+
+    __table_args__ = (
+        UniqueConstraint("payment_id", name="uq_payment_reversals_payment_id"),
+        UniqueConstraint("settlement_id", name="uq_payment_reversals_settlement_id"),
+        UniqueConstraint("receipt_number", name="uq_payment_reversals_receipt_number"),
+        UniqueConstraint("receipt_hash", name="uq_payment_reversals_receipt_hash"),
+        CheckConstraint("length(trim(reason)) >= 5", name="ck_payment_reversals_reason"),
+        CheckConstraint("amount_received >= 0 AND amount_applied >= 0 AND principal_applied >= 0 AND interest_applied >= 0 AND penalty_applied >= 0 AND excess_amount >= 0", name="ck_payment_reversals_nonnegative_amounts"),
+        CheckConstraint("amount_received = amount_applied + excess_amount", name="ck_payment_reversals_received_allocation"),
+        CheckConstraint("amount_applied = principal_applied + interest_applied + penalty_applied", name="ck_payment_reversals_applied_components"),
+        CheckConstraint("((original_date_kind = 'CONTRIBUTION_COMPETENCE' AND original_competence IS NOT NULL AND original_due_date IS NULL) OR (original_date_kind = 'LOAN_INSTALLMENT_DUE_DATE' AND original_competence IS NULL AND original_due_date IS NOT NULL) OR (original_date_kind = 'AGREEMENT_INSTALLMENT_DUE_DATE' AND original_competence IS NULL AND original_due_date IS NOT NULL))", name="ck_payment_reversals_original_date"),
+        CheckConstraint("receipt_version = 'v1'", name="ck_payment_reversals_receipt_version"),
+        Index("ix_payment_reversals_admin_id", "admin_id"),
+        Index("ix_payment_reversals_reversed_at", "reversed_at"),
+        Index("ix_payment_reversals_reversal_competence", "reversal_competence"),
+    )
+
+
+class PaymentReversalComponent(Base):
+    __tablename__ = "payment_reversal_components"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    payment_reversal_id: Mapped[int] = mapped_column(ForeignKey("payment_reversals.id"))
+    original_ledger_entry_id: Mapped[int] = mapped_column(ForeignKey("ledger_entries.id"))
+    compensating_ledger_entry_id: Mapped[int] = mapped_column(ForeignKey("ledger_entries.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+    payment_reversal: Mapped["PaymentReversal"] = relationship(back_populates="components")
+    original_ledger_entry: Mapped["LedgerEntry"] = relationship(foreign_keys=[original_ledger_entry_id])
+    compensating_ledger_entry: Mapped["LedgerEntry"] = relationship(foreign_keys=[compensating_ledger_entry_id])
+
+    __table_args__ = (
+        UniqueConstraint("original_ledger_entry_id", name="uq_payment_reversal_components_original_ledger"),
+        UniqueConstraint("compensating_ledger_entry_id", name="uq_payment_reversal_components_compensating_ledger"),
+        CheckConstraint("original_ledger_entry_id <> compensating_ledger_entry_id", name="ck_payment_reversal_components_distinct_ledgers"),
+        Index("ix_payment_reversal_components_reversal_id", "payment_reversal_id"),
+    )
 
 
 class Expense(Base):
@@ -1385,15 +1468,24 @@ class MemberFinancialEntry(Base):
         default=now_utc,
         index=True,
     )
+    payment_reversal_id: Mapped[int | None] = mapped_column(ForeignKey("payment_reversals.id"))
 
     account: Mapped["MemberFinancialAccount"] = relationship(
         back_populates="entries",
     )
+    payment_reversal: Mapped["PaymentReversal | None"] = relationship()
 
     __table_args__ = (
         Index(
             "ix_member_financial_entries_reference",
             "reference_type",
             "reference_id",
+        ),
+        Index(
+            "uq_member_financial_entries_one_payment_reversal",
+            "payment_reversal_id",
+            unique=True,
+            postgresql_where=text("payment_reversal_id IS NOT NULL"),
+            sqlite_where=text("payment_reversal_id IS NOT NULL"),
         ),
     )
