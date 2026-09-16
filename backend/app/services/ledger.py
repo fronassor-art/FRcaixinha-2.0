@@ -3,7 +3,7 @@ import json
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timezone
 from sqlalchemy import text
-from app.models import LedgerEntry, Payment
+from app.models import LedgerEntry, Payment, PaymentSettlement
 
 CENT = Decimal("0.01")
 
@@ -65,6 +65,19 @@ def post_contribution_payment(db, payment: Payment, *, amount: Decimal | None = 
 def reverse_entry(db, original: LedgerEntry, reason: str):
     if not reason or len(reason.strip()) < 5:
         raise ValueError("Informe um motivo de reversão com pelo menos 5 caracteres")
+    payment_component_types = {
+        "LOAN_INTEREST_PAYMENT",
+        "LOAN_PENALTY_PAYMENT",
+        "LOAN_INSTALLMENT_PAYMENT",
+    }
+    if original.reference_type in payment_component_types and (original.reference_id or "").isdigit():
+        settlement = db.query(PaymentSettlement).filter(
+            PaymentSettlement.payment_id == int(original.reference_id),
+        ).one_or_none()
+        if settlement is not None:
+            raise ValueError(
+                "Componente de pagamento deve ser revertido pelo PaymentReversal integral."
+            )
     return post_entry(db, original.account, "CREDIT" if original.direction == "DEBIT" else "DEBIT",
                       Decimal(original.amount), "REVERSAL", str(original.id), reversal_of_id=original.id)
 

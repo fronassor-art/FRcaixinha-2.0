@@ -117,6 +117,7 @@ def calculate_member_financial_position(entries):
     - LOAN_PRINCIPAL_COMMITMENT apenas aumenta o valor comprometido.
     - OWN_BALANCE_RENEGOTIATION reduz o patrimônio e o comprometido.
     - OWN_BALANCE_SETTLEMENT reduz o patrimônio e o comprometido.
+    - LOAN_PRINCIPAL_REVERSAL reduz o patrimônio e recompõe o comprometido.
     - Saldo disponível = patrimônio próprio - comprometido.
     """
     own_balance = ZERO
@@ -155,6 +156,10 @@ def calculate_member_financial_position(entries):
                     ZERO,
                     committed_balance - amount,
                 )
+
+            if entry.entry_type == "LOAN_PRINCIPAL_REVERSAL":
+                own_balance -= amount
+                committed_balance += amount
 
     available_balance = max(
         ZERO,

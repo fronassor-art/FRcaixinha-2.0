@@ -12,6 +12,9 @@ from app.models import (
     AuditLog,
     Contribution,
     LedgerEntry,
+    Loan,
+    LoanInstallment,
+    MemberFinancialEntry,
     Payment,
     PaymentReversal,
     PaymentReversalComponent,
@@ -19,6 +22,8 @@ from app.models import (
     User,
 )
 from app.services.ledger import post_entry
+from app.services.loan_engine_v17 import lock_loan, touch_loan
+from app.services.member_financial import add_member_financial_entry, get_member_financial_position, lock_member_financial_account
 from app.services.payment_settlement import _is_postgresql, _money, contribution_financial_status
 
 
@@ -71,7 +76,7 @@ def _validate_admin(db: Session, admin_id: int) -> User:
     return admin
 
 
-def _validate_money(settlement: PaymentSettlement, payment: Payment) -> dict[str, Decimal]:
+def _validate_money(settlement: PaymentSettlement, payment: Payment, *, loan: bool = False) -> dict[str, Decimal]:
     values = {
         "amount_received": _money(settlement.amount_received),
         "amount_applied": _money(settlement.amount_applied),
@@ -89,9 +94,9 @@ def _validate_money(settlement: PaymentSettlement, payment: Payment) -> dict[str
     expected_received = _money(payment.amount_received if payment.amount_received is not None else payment.amount)
     if values["amount_received"] != expected_received:
         raise ValueError("Settlement não corresponde ao valor recebido pelo pagamento.")
-    if values["interest_applied"] != ZERO or values["penalty_applied"] != ZERO:
+    if not loan and (values["interest_applied"] != ZERO or values["penalty_applied"] != ZERO):
         raise ValueError("Contribution não pode possuir juros ou multa aplicados.")
-    if values["principal_applied"] != values["amount_applied"]:
+    if not loan and values["principal_applied"] != values["amount_applied"]:
         raise ValueError("Settlement de Contribution possui principal incompatível.")
     return values
 
@@ -212,15 +217,220 @@ def _receipt_snapshot(
     }
 
 
+def _lock_installment(db: Session, installment_id: int) -> LoanInstallment | None:
+    with db.no_autoflush:
+        query = db.query(LoanInstallment).filter(LoanInstallment.id == installment_id)
+        if _is_postgresql(db):
+            query = query.with_for_update().populate_existing()
+        return query.one_or_none()
+
+
+def _same_timestamp(left: datetime | None, right: datetime | None) -> bool:
+    def normalize(value):
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    return normalize(left) == normalize(right)
+
+
+def _timestamp_iso(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat()
+
+
+def _loan_ledgers(db: Session, payment_id: int, values: dict[str, Decimal]) -> list[LedgerEntry]:
+    with db.no_autoflush:
+        query = db.query(LedgerEntry).filter(LedgerEntry.reference_id == str(payment_id)).order_by(LedgerEntry.id)
+        if _is_postgresql(db):
+            query = query.with_for_update()
+        rows = query.all()
+    result = []
+    for kind, amount in (("LOAN_INTEREST_PAYMENT", values["interest_applied"]), ("LOAN_PENALTY_PAYMENT", values["penalty_applied"])):
+        matches = [row for row in rows if row.reference_type == kind]
+        if amount > ZERO:
+            if len(matches) != 1:
+                raise ValueError("Ledger de componente ausente ou duplicado.")
+            row = matches[0]
+            if row.account != "CAIXINHA" or row.direction != "CREDIT" or _money(row.amount) != amount or row.reversal_of_id is not None:
+                raise ValueError("Ledger de componente incompatível.")
+            if db.query(LedgerEntry).filter(LedgerEntry.reversal_of_id == row.id).first() is not None:
+                raise ValueError("Ledger de componente já possui reversão.")
+            result.append(row)
+        elif matches:
+            raise ValueError("Ledger fictício para componente sem valor aplicado.")
+    return result
+
+
+def _validate_loan_settlement(payment: Payment, settlement: PaymentSettlement) -> dict[str, Decimal]:
+    if settlement.receipt_version != "v4":
+        raise ValueError("Reversão de Loan exige PaymentSettlement v4.")
+    if settlement.payment_id != payment.id or settlement.obligation_type != "LOAN_INSTALLMENT":
+        raise ValueError("Settlement incompatível com reversão de LoanInstallment.")
+    if settlement.loan_installment_id is None or settlement.loan_installment_status_before is None or settlement.loan_installment_status_after is None:
+        raise ValueError("Settlement v4 sem evidência completa da parcela.")
+    try:
+        snapshot = json.loads(settlement.receipt_snapshot_json)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Snapshot do settlement inválido.") from exc
+    canonical = _canonical_json(snapshot)
+    if canonical != settlement.receipt_snapshot_json or hashlib.sha256(canonical.encode()).hexdigest() != settlement.receipt_hash:
+        raise ValueError("Receipt/hash do settlement inválido.")
+    state = snapshot.get("loan_installment_state") or {}
+    if state.get("status_before") != settlement.loan_installment_status_before or state.get("status_after") != settlement.loan_installment_status_after:
+        raise ValueError("Evidência operacional da parcela não corresponde ao snapshot.")
+    if state.get("paid_at_before") != _timestamp_iso(settlement.loan_installment_paid_at_before) or state.get("paid_at_after") != _timestamp_iso(settlement.loan_installment_paid_at_after):
+        raise ValueError("paid_at operacional da parcela não corresponde ao snapshot.")
+    loan_state = snapshot.get("loan_state") or {}
+    expected_loan_state = {
+        "status_before": settlement.loan_status_before,
+        "status_after": settlement.loan_status_after,
+        "state_revision_before": settlement.loan_state_revision_before,
+        "state_revision_after": settlement.loan_state_revision_after,
+        "paid_at_before": _timestamp_iso(settlement.loan_paid_at_before),
+        "paid_at_after": _timestamp_iso(settlement.loan_paid_at_after),
+    }
+    if loan_state != expected_loan_state:
+        raise ValueError("Evidência do Loan não corresponde ao snapshot.")
+    values = _validate_money(settlement, payment, loan=True)
+    expected_amounts = {
+        "received": values["amount_received"], "applied": values["amount_applied"],
+        "principal": values["principal_applied"], "interest": values["interest_applied"],
+        "penalty": values["penalty_applied"], "excess": values["excess_amount"],
+    }
+    amounts = snapshot.get("amounts") or {}
+    if any(amounts.get(key) != format(value, "f") for key, value in expected_amounts.items()):
+        raise ValueError("Valores do settlement não correspondem ao snapshot.")
+    payment_snapshot = snapshot.get("payment") or {}
+    obligation_snapshot = snapshot.get("obligation") or {}
+    if payment_snapshot.get("id") != payment.id or payment_snapshot.get("reference_type") != payment.reference_type or payment_snapshot.get("reference_id") != payment.reference_id:
+        raise ValueError("Identidade do Payment não corresponde ao snapshot.")
+    if obligation_snapshot.get("type") != settlement.obligation_type or obligation_snapshot.get("loan_installment_id") != settlement.loan_installment_id or obligation_snapshot.get("member_id") != settlement.member_id:
+        raise ValueError("Referência da obrigação não corresponde ao snapshot.")
+    if any(getattr(settlement, name) is None for name in ("loan_status_before", "loan_status_after", "loan_state_revision_before", "loan_state_revision_after")):
+        raise ValueError("Settlement v4 sem evidência completa do Loan.")
+    if settlement.loan_state_revision_after != settlement.loan_state_revision_before + 1:
+        raise ValueError("Settlement v4 possui revisão do Loan inválida.")
+    return values
+
+
+def _loan_reversal_snapshot(reversal, payment, settlement, loan, installment, original_mfe, compensating_mfe, components):
+    def iso(value):
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc).isoformat()
+    return {
+        "receipt_version": reversal.receipt_version,
+        "receipt_number": reversal.receipt_number,
+        "reversal": {"id": reversal.id, "reversed_at": iso(reversal.reversed_at), "reversal_competence": reversal.reversal_competence.isoformat(), "admin_id": reversal.admin_id, "reason": reversal.reason},
+        "payment": {"id": payment.id, "status": payment.status, "reference_type": payment.reference_type, "reference_id": payment.reference_id},
+        "settlement": {"id": settlement.id, "receipt_number": settlement.receipt_number, "receipt_version": settlement.receipt_version, "receipt_hash": settlement.receipt_hash},
+        "member": {"id": settlement.member_id},
+        "loan": {"id": loan.id, "status_before": settlement.loan_status_before, "status_after": settlement.loan_status_after, "state_revision_before": settlement.loan_state_revision_before, "state_revision_after": settlement.loan_state_revision_after, "status_restored": loan.status, "state_revision": loan.state_revision, "paid_at_before": iso(settlement.loan_paid_at_before), "paid_at_after": iso(settlement.loan_paid_at_after)},
+        "loan_installment": {"id": installment.id, "due_date": installment.due_date.isoformat(), "status_before": settlement.loan_installment_status_before, "status_after": settlement.loan_installment_status_after, "paid_at_before": iso(settlement.loan_installment_paid_at_before), "paid_at_after": iso(settlement.loan_installment_paid_at_after), "status_restored": installment.status, "paid_amount_restored": format(_money(installment.paid_amount), "f"), "paid_penalty_amount_restored": format(_money(installment.paid_penalty_amount), "f")},
+        "amounts": {name: format(_money(getattr(reversal, name)), "f") for name in ("amount_received", "amount_applied", "principal_applied", "interest_applied", "penalty_applied", "excess_amount")},
+        "member_financial": {"original_entry_id": original_mfe.id if original_mfe else None, "compensating_entry_id": compensating_mfe.id if compensating_mfe else None},
+        "ledger_components": [{"original_ledger_entry_id": c.original_ledger_entry_id, "compensating_ledger_entry_id": c.compensating_ledger_entry_id, "reversal_of_id": c.compensating_ledger_entry.reversal_of_id, "amount": format(_money(c.original_ledger_entry.amount), "f"), "original_direction": c.original_ledger_entry.direction, "compensating_direction": c.compensating_ledger_entry.direction} for c in sorted(components, key=lambda item: item.original_ledger_entry_id)],
+    }
+
+
+def _reverse_loan_payment(db, payment, settlement, admin_id, reason, reversed_at):
+    values = _validate_loan_settlement(payment, settlement)
+    member, account = lock_member_financial_account(db, settlement.member_id)
+    unlocked_installment = db.get(LoanInstallment, settlement.loan_installment_id)
+    if unlocked_installment is None or payment.reference_type != "LOAN_INSTALLMENT" or payment.reference_id != str(unlocked_installment.id):
+        raise ValueError("Payment não corresponde à LoanInstallment.")
+    loan = lock_loan(db, db.get(Loan, unlocked_installment.loan_id))
+    installment = _lock_installment(db, unlocked_installment.id)
+    if installment is None:
+        raise ValueError("LoanInstallment não encontrado.")
+    if loan.member_id != member.id or loan.status != settlement.loan_status_after or loan.state_revision != settlement.loan_state_revision_after:
+        raise ValueError("Estado atual do Loan diverge do settlement v4.")
+    if not _same_timestamp(loan.paid_at, settlement.loan_paid_at_after):
+        raise ValueError("paid_at atual do Loan diverge do settlement v4.")
+    if installment.status != settlement.loan_installment_status_after or not _same_timestamp(installment.paid_at, settlement.loan_installment_paid_at_after):
+        raise ValueError("Estado atual da parcela diverge do settlement v4.")
+    with db.no_autoflush:
+        query = db.query(MemberFinancialEntry).filter(MemberFinancialEntry.account_id == account.id, MemberFinancialEntry.reference_id == str(payment.id))
+        if _is_postgresql(db):
+            query = query.with_for_update()
+        entries = query.all()
+    principal_candidates = [e for e in entries if e.entry_type == "LOAN_PRINCIPAL_PAYMENT"]
+    original_mfe = None
+    if values["principal_applied"] > ZERO:
+        candidates = [e for e in entries if e.entry_type == "LOAN_PRINCIPAL_PAYMENT"]
+        matches = [e for e in candidates if e.direction == "CREDIT" and e.reference_type == "LOAN_PRINCIPAL_PAYMENT" and _money(e.amount) == values["principal_applied"]]
+        if len(candidates) != 1 or len(matches) != 1:
+            raise ValueError("MFE original de principal ausente, duplicada ou incompatível.")
+        original_mfe = matches[0]
+        if get_member_financial_position(db, member)["own_balance"] < values["principal_applied"]:
+            raise ValueError("Saldo próprio insuficiente para estorno integral.")
+    elif principal_candidates:
+        raise ValueError("MFE de principal inesperada para settlement sem principal.")
+    originals = _loan_ledgers(db, payment.id, values)
+    base = values["principal_applied"] + values["interest_applied"]
+    if _money(installment.paid_amount) < base or _money(installment.paid_penalty_amount) < values["penalty_applied"]:
+        raise ValueError("Parcela não possui valores pagos suficientes para restauração.")
+    reversal = PaymentReversal(payment_id=payment.id, settlement_id=settlement.id, admin_id=admin_id, reason=reason, reversed_at=reversed_at, reversal_competence=date(reversed_at.year, reversed_at.month, 1), original_competence=None, original_due_date=installment.due_date, original_date_kind="LOAN_INSTALLMENT_DUE_DATE", amount_received=values["amount_received"], amount_applied=values["amount_applied"], principal_applied=values["principal_applied"], interest_applied=values["interest_applied"], penalty_applied=values["penalty_applied"], excess_amount=values["excess_amount"], receipt_number=f"PIX-REV-V1-{payment.id}", receipt_version=REVERSAL_RECEIPT_VERSION, receipt_snapshot_json=f"pending:{payment.id}", receipt_hash=hashlib.sha256(f"pending:{payment.id}".encode()).hexdigest())
+    db.add(reversal)
+    db.flush()
+    compensating_mfe = None
+    if original_mfe is not None:
+        compensating_mfe = add_member_financial_entry(db, member, entry_type="LOAN_PRINCIPAL_REVERSAL", direction="DEBIT", amount=values["principal_applied"], reference_type="PAYMENT_REVERSAL", reference_id=str(reversal.id), description="Compensação de principal de pagamento estornado.", account=account)
+        compensating_mfe.payment_reversal_id = reversal.id
+        db.flush()
+    components = []
+    for original in originals:
+        compensating = post_entry(db, original.account, "DEBIT" if original.direction == "CREDIT" else "CREDIT", _money(original.amount), "REVERSAL", str(original.id), reversal_of_id=original.id)
+        db.flush()
+        component = PaymentReversalComponent(payment_reversal_id=reversal.id, original_ledger_entry_id=original.id, compensating_ledger_entry_id=compensating.id)
+        db.add(component)
+        components.append(component)
+    db.flush()
+    installment.paid_amount = _money(installment.paid_amount) - base
+    installment.paid_penalty_amount = _money(installment.paid_penalty_amount) - values["penalty_applied"]
+    installment.status = settlement.loan_installment_status_before
+    installment.paid_at = settlement.loan_installment_paid_at_before
+    loan.status = settlement.loan_status_before
+    loan.paid_at = settlement.loan_paid_at_before
+    touch_loan(loan)
+    db.flush()
+    snapshot = _loan_reversal_snapshot(reversal, payment, settlement, loan, installment, original_mfe, compensating_mfe, components)
+    reversal.receipt_snapshot_json = _canonical_json(snapshot)
+    reversal.receipt_hash = hashlib.sha256(reversal.receipt_snapshot_json.encode()).hexdigest()
+    db.add(AuditLog(actor_user_id=admin_id, action="PAYMENT_REVERSED_LOAN_INSTALLMENT", entity_type="PAYMENT", entity_id=str(payment.id), details=_canonical_json(snapshot)))
+    db.flush()
+    return reversal
+
+
 def reverse_payment(
     db: Session,
-    *,
-    payment_id: int,
-    admin_id: int,
-    reason: str,
+    payment_id: int | Payment = None,
+    admin_id: int | User = None,
+    reason: str = "",
     now: datetime | None = None,
+    *,
+    payment: Payment | None = None,
+    admin: User | None = None,
 ) -> PaymentReversal:
-    """Reverse one Contribution payment, without committing the transaction."""
+    """Reverse a Contribution or v4 LoanInstallment payment, without commit."""
+    if payment is not None:
+        payment_id = payment.id
+    elif isinstance(payment_id, Payment):
+        payment = payment_id
+        payment_id = payment.id
+    if admin is not None:
+        admin_id = admin.id
+    if isinstance(admin_id, User):
+        admin_id = admin_id.id
+    if payment_id is None or admin_id is None:
+        raise ValueError("Pagamento e administrador são obrigatórios.")
     normalized_reason = reason.strip() if isinstance(reason, str) else ""
     if len(normalized_reason) < 5:
         raise ValueError("Informe um motivo de reversão com pelo menos 5 caracteres.")
@@ -238,6 +448,8 @@ def reverse_payment(
     settlement = _lock_settlement(db, payment.id)
     if settlement is None:
         raise ValueError("PaymentSettlement obrigatório não encontrado.")
+    if settlement.obligation_type == "LOAN_INSTALLMENT":
+        return _reverse_loan_payment(db, payment, settlement, admin_id, normalized_reason, reversed_at)
     if settlement.contribution_id is None:
         raise ValueError("Settlement não referencia Contribution.")
     contribution = _lock_contribution(db, settlement.contribution_id)
