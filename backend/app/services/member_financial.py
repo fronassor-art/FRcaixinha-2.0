@@ -15,19 +15,47 @@ def get_or_create_member_financial_account(
     db: Session,
     member: Member,
 ) -> MemberFinancialAccount:
-    """Obtém ou cria a conta financeira própria do participante."""
-    account = (
-        db.query(MemberFinancialAccount)
-        .filter(MemberFinancialAccount.member_id == member.id)
-        .first()
-    )
-
-    if account is None:
-        account = MemberFinancialAccount(member_id=member.id)
-        db.add(account)
-        db.flush()
-
+    """Obtém/cria a conta sob o mutex financeiro do membro."""
+    _, account = lock_member_financial_account(db, member)
     return account
+
+
+def lock_member_financial_account(
+    db: Session,
+    member_or_id: Member | int,
+) -> tuple[Member, MemberFinancialAccount]:
+    """Adquire ``Member -> Account``; não faz commit.
+
+    PostgreSQL usa locks de linha. SQLite mantém apenas o caminho lógico;
+    não oferece semântica equivalente de row-level lock.
+    """
+    member_id = member_or_id.id if isinstance(member_or_id, Member) else member_or_id
+    with db.no_autoflush:
+        member_query = db.query(Member).filter(Member.id == member_id)
+        if db.bind is not None and db.bind.dialect.name == "postgresql":
+            member_query = member_query.with_for_update().populate_existing()
+        locked_member = member_query.one_or_none()
+        if locked_member is None:
+            raise ValueError("Participante não encontrado.")
+
+        account = (
+            db.query(MemberFinancialAccount)
+            .filter(MemberFinancialAccount.member_id == locked_member.id)
+            .first()
+        )
+        if account is None:
+            account = MemberFinancialAccount(member_id=locked_member.id)
+            db.add(account)
+            db.flush()
+
+        account_query = db.query(MemberFinancialAccount).filter(
+            MemberFinancialAccount.id == account.id
+        )
+        if db.bind is not None and db.bind.dialect.name == "postgresql":
+            account_query = account_query.with_for_update().populate_existing()
+        locked_account = account_query.one()
+
+    return locked_member, locked_account
 
 
 def add_member_financial_entry(
@@ -40,6 +68,7 @@ def add_member_financial_entry(
     reference_type: str | None = None,
     reference_id: str | None = None,
     description: str | None = None,
+    account: MemberFinancialAccount | None = None,
 ) -> MemberFinancialEntry:
     """
     Registra um lançamento financeiro próprio do participante.
@@ -55,7 +84,10 @@ def add_member_financial_entry(
     if direction not in {"CREDIT", "DEBIT"}:
         raise ValueError("direction deve ser CREDIT ou DEBIT.")
 
-    account = get_or_create_member_financial_account(db, member)
+    # Callers that already hold Loan must pass the Account returned by
+    # lock_member_financial_account; otherwise this function acquires it.
+    if account is None:
+        member, account = lock_member_financial_account(db, member)
 
     entry = MemberFinancialEntry(
         account_id=account.id,

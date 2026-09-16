@@ -13,7 +13,10 @@ from app.services.notifications_v12 import create_notification
 from app.services.loan_engine_v17 import add_months, lock_loan, money, touch_loan
 from app.services.loan_amortization import build_loan_simulation, calculate_linear_amortization
 from app.services.loan_eligibility import evaluate_loan_eligibility
-from app.services.member_financial import get_member_financial_position
+from app.services.member_financial import (
+    get_member_financial_position,
+    lock_member_financial_account,
+)
 from app.services.risk_v036 import cash_balance
 from app.core.loan_rules import LOAN_CALCULATION_VERSION, LOAN_SIMULATION_TTL_MINUTES, OFFICIAL_LOAN_MONTHLY_RATE, validate_loan_installments
 
@@ -100,6 +103,8 @@ def _member_for(user, db):
 
 def _loan_eligibility(member, loan, db):
     from app.models import Group, Quota
+
+    member, _account = lock_member_financial_account(db, member)
 
     group = db.get(Group, member.group_id)
     if group is None:

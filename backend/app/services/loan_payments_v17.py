@@ -9,11 +9,16 @@ from app.models import (
     LedgerEntry,
     Loan,
     Member,
+    MemberFinancialAccount,
     MemberFinancialEntry,
 )
 from app.services.loan_engine_v17 import apply_payment, ensure_loan_completion, lock_loan, touch_loan
 from app.services.ledger import post_entry
-from app.services.member_financial import add_member_financial_entry
+from app.services.member_financial import (
+    add_member_financial_entry,
+    get_member_financial_position,
+    lock_member_financial_account,
+)
 
 
 def apply_confirmed_payment(
@@ -24,6 +29,8 @@ def apply_confirmed_payment(
     amount: Decimal | None = None,
     locks_acquired: bool = False,
     loan: Loan | None = None,
+    member: Member | None = None,
+    account: MemberFinancialAccount | None = None,
 ):
     if payment.ledger_posted_at is not None:
         return False
@@ -31,15 +38,20 @@ def apply_confirmed_payment(
     amount = Decimal(payment.amount if amount is None else amount)
 
     if not locks_acquired:
-        loan = lock_loan(db, db.get(Loan, installment.loan_id))
+        unlocked_loan = db.get(Loan, installment.loan_id)
+        if unlocked_loan is None:
+            raise ValueError('Empréstimo não encontrado.')
+        member, account = lock_member_financial_account(db, unlocked_loan.member_id)
+        loan = lock_loan(db, db.get(Loan, unlocked_loan.id))
         with db.no_autoflush:
             installment_query = db.query(LoanInstallment).filter(LoanInstallment.id == installment.id)
             if db.bind is not None and db.bind.dialect.name == "postgresql":
                 installment_query = installment_query.with_for_update().populate_existing()
             installment = installment_query.one()
-    elif loan is None:
-        loan = db.get(Loan, installment.loan_id)
+    elif loan is None or member is None or account is None:
         if loan is None:
+            loan = db.get(Loan, installment.loan_id)
+        if loan is None or member is None or account is None:
             raise ValueError('Empréstimo não encontrado.')
 
     # Guardamos os valores anteriores porque apply_payment()
@@ -120,13 +132,6 @@ def apply_confirmed_payment(
     # PRINCIPAL -> SALDO PRÓPRIO DO PARTICIPANTE
     # ============================================================
     if principal_applied > 0:
-        member = db.get(Member, loan.member_id)
-
-        if member is None:
-            raise ValueError(
-                "Participante do empréstimo não encontrado."
-            )
-
         add_member_financial_entry(
             db=db,
             member=member,
@@ -136,6 +141,7 @@ def apply_confirmed_payment(
             reference_type="LOAN_PRINCIPAL_PAYMENT",
             reference_id=ref,
             description="Pagamento de principal de parcela de empréstimo.",
+            account=account,
         )
 
     # ============================================================
@@ -157,17 +163,12 @@ def settle_loan_with_own_balance(db, loan: Loan, actor_id: int):
     """
 
     from app.models import AuditLog
-    from app.services.member_financial import get_member_financial_position
-
-    loan = lock_loan(db, loan)
+    member, account = lock_member_financial_account(db, loan.member_id)
+    loan = lock_loan(db, db.get(Loan, loan.id))
 
     # ------------------------------------------------------------
     # PARTICIPANTE
     # ------------------------------------------------------------
-    member = db.get(Member, loan.member_id)
-    if member is None:
-        raise ValueError("Participante do empréstimo não encontrado.")
-
     # ------------------------------------------------------------
     # IDEMPOTÊNCIA
     # ------------------------------------------------------------
@@ -199,12 +200,13 @@ def settle_loan_with_own_balance(db, loan: Loan, actor_id: int):
     # ------------------------------------------------------------
     # PARCELAS
     # ------------------------------------------------------------
-    installments = (
-        db.query(LoanInstallment)
-        .filter(LoanInstallment.loan_id == loan.id)
-        .order_by(LoanInstallment.number)
-        .all()
-    )
+    with db.no_autoflush:
+        installments_query = db.query(LoanInstallment).filter(
+            LoanInstallment.loan_id == loan.id
+        ).order_by(LoanInstallment.number)
+        if db.bind is not None and db.bind.dialect.name == "postgresql":
+            installments_query = installments_query.with_for_update().populate_existing()
+        installments = installments_query.all()
 
     if not installments:
         raise ValueError("Empréstimo não possui parcelas.")
@@ -270,6 +272,7 @@ def settle_loan_with_own_balance(db, loan: Loan, actor_id: int):
             "Liquidação integral do principal do empréstimo "
             "com saldo próprio. Juros futuros dispensados."
         ),
+        account=account,
     )
 
     # ------------------------------------------------------------
@@ -333,17 +336,12 @@ def renegotiate_loan_with_own_balance(
 ):
     """Amortiza parcialmente o principal de um empréstimo com saldo próprio."""
     from app.models import AuditLog
-    from app.services.member_financial import get_member_financial_position
-
-    loan = lock_loan(db, loan)
+    member, account = lock_member_financial_account(db, loan.member_id)
+    loan = lock_loan(db, db.get(Loan, loan.id))
     amount = Decimal(amount).quantize(Decimal("0.01"))
 
     if amount <= Decimal("0.00"):
         raise ValueError("O valor da renegociação deve ser maior que zero.")
-
-    member = db.get(Member, loan.member_id)
-    if member is None:
-        raise ValueError("Participante do empréstimo não encontrado.")
 
     if loan.status not in {"ACTIVE", "OVERDUE", "IN_COLLECTION"}:
         raise ValueError(
@@ -409,6 +407,7 @@ def renegotiate_loan_with_own_balance(
             "Amortização parcial do principal com saldo próprio. "
             "Juros futuros permanecem sujeitos às regras do novo saldo devedor."
         ),
+        account=account,
     )
 
     loan.principal_settled_with_own_balance = (

@@ -5,7 +5,10 @@ from sqlalchemy.orm import Session
 
 from app.models import Loan, LoanInstallment, LedgerEntry, AuditLog, Member, MemberFinancialEntry
 from app.services.ledger import post_entry
-from app.services.member_financial import add_member_financial_entry
+from app.services.member_financial import (
+    add_member_financial_entry,
+    lock_member_financial_account,
+)
 
 CENT = Decimal('0.01')
 
@@ -101,7 +104,8 @@ def ensure_loan_completion(db: Session, loan: Loan, *, revision_already_bumped: 
     return False
 
 def release_loan(db: Session, loan: Loan, admin_id: int):
-    loan = lock_loan(db, loan)
+    member, account = lock_member_financial_account(db, loan.member_id)
+    loan = lock_loan(db, db.get(Loan, loan.id))
     exists = db.query(LedgerEntry).filter(LedgerEntry.reference_type == 'LOAN_DISBURSEMENT', LedgerEntry.reference_id == str(loan.id)).first()
     if exists:
         changed = loan.status != 'ACTIVE'
@@ -116,10 +120,6 @@ def release_loan(db: Session, loan: Loan, admin_id: int):
     if loan.status != 'APPROVED':
         raise ValueError('Somente empréstimos aprovados podem ser liberados.')
     post_entry(db, 'CAIXINHA', 'DEBIT', money(loan.principal), 'LOAN_DISBURSEMENT', str(loan.id))
-
-    member = db.get(Member, loan.member_id)
-    if member is None:
-        raise ValueError('Participante do empréstimo não encontrado.')
 
     commitment_exists = db.query(MemberFinancialEntry).filter(
         MemberFinancialEntry.entry_type == 'LOAN_PRINCIPAL_COMMITMENT',
@@ -137,6 +137,7 @@ def release_loan(db: Session, loan: Loan, admin_id: int):
             reference_type='LOAN_PRINCIPAL_COMMITMENT',
             reference_id=str(loan.id),
             description='Comprometimento do saldo próprio pelo principal do empréstimo.',
+            account=account,
         )
 
     loan.status = 'ACTIVE'

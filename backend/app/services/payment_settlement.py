@@ -13,6 +13,7 @@ from app.models import AgreementInstallment, CollectionAgreement, Contribution, 
 from app.services.ledger import post_contribution_payment, post_entry
 from app.services.loan_engine_v17 import lock_loan
 from app.services.loan_payments_v17 import apply_confirmed_payment
+from app.services.member_financial import lock_member_financial_account
 
 
 CENT = Decimal("0.01")
@@ -159,6 +160,14 @@ def _locked_collection_agreement(db: Session, agreement_id: int) -> CollectionAg
     return query.one_or_none()
 
 
+def _lock_payment_settlement(db: Session, payment_id: int) -> PaymentSettlement | None:
+    with db.no_autoflush:
+        query = db.query(PaymentSettlement).filter(PaymentSettlement.payment_id == payment_id)
+        if _is_postgresql(db):
+            query = query.with_for_update().populate_existing()
+        return query.one_or_none()
+
+
 def _legacy_agreement_ledger_exists(db: Session, payment_id: int) -> bool:
     return db.query(LedgerEntry).filter(
         LedgerEntry.reference_type == "AGREEMENT_INSTALLMENT_PAYMENT",
@@ -264,7 +273,7 @@ def settle_confirmed_pix_payment(
         raise ValueError("Origem da confirmação é obrigatória.")
 
     payment = _lock_payment(db, payment.id)
-    existing = db.query(PaymentSettlement).filter(PaymentSettlement.payment_id == payment.id).one_or_none()
+    existing = _lock_payment_settlement(db, payment.id)
     if existing is not None:
         return existing
     reference_type = (payment.reference_type or "").strip().upper()
@@ -358,15 +367,16 @@ def settle_confirmed_pix_payment(
         agreement_installment_id = None
     else:
         assert installment is not None
-        loan = lock_loan(db, db.get(Loan, installment.loan_id))
+        unlocked_loan = db.get(Loan, installment.loan_id)
+        if unlocked_loan is None:
+            raise ValueError("Empréstimo da parcela não encontrado.")
+        member, account = lock_member_financial_account(db, unlocked_loan.member_id)
+        loan = lock_loan(db, db.get(Loan, unlocked_loan.id))
         installment = _locked_installment(db, payment, lock=True, refresh=True)
         if installment is None:
             raise ValueError("Parcela de empréstimo não encontrada.")
         if loan is None:
             raise ValueError("Empréstimo da parcela não encontrado.")
-        member = db.get(Member, loan.member_id)
-        if member is None:
-            raise ValueError("Participante do empréstimo não encontrado.")
         loan_status_before = loan.status
         loan_state_revision_before = loan.state_revision
         loan_paid_at_before = loan.paid_at
@@ -381,6 +391,8 @@ def settle_confirmed_pix_payment(
             amount=received,
             locks_acquired=True,
             loan=loan,
+            member=member,
+            account=account,
         )
         loan_status_after = loan.status
         loan_state_revision_after = loan.state_revision
