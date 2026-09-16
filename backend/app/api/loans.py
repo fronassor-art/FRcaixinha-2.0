@@ -10,7 +10,7 @@ from app.models import User, Member, Loan, LoanSimulation, LoanInstallment, Audi
 from app.schemas.finance import LoanRequestIn, LoanDecisionIn, LoanSimulationIn, LoanSimulationConfirmationIn
 from app.api.deps import current_user, require_admin
 from app.services.notifications_v12 import create_notification
-from app.services.loan_engine_v17 import add_months, money
+from app.services.loan_engine_v17 import add_months, lock_loan, money, touch_loan
 from app.services.loan_amortization import build_loan_simulation, calculate_linear_amortization
 from app.services.loan_eligibility import evaluate_loan_eligibility
 from app.services.member_financial import get_member_financial_position
@@ -254,8 +254,11 @@ def my_loan(loan_id: int, user: User=Depends(current_user), db: Session=Depends(
 @router.post("/{loan_id}/decision")
 def decide_loan(loan_id: int, data: LoanDecisionIn, admin=Depends(require_admin), db: Session=Depends(get_db)):
     loan = db.get(Loan, loan_id)
-    if not loan or loan.status != "REQUESTED": raise HTTPException(404, "Solicitação não encontrada ou já decidida.")
+    if not loan: raise HTTPException(404, "Solicitação não encontrada ou já decidida.")
+    loan = lock_loan(db, loan)
+    if loan.status != "REQUESTED": raise HTTPException(404, "Solicitação não encontrada ou já decidida.")
     loan.status = "APPROVED" if data.approve else "REJECTED"; loan.decided_by = admin.id
+    touch_loan(loan)
     from datetime import datetime, timezone
     loan.decided_at = datetime.now(timezone.utc)
     if data.approve:

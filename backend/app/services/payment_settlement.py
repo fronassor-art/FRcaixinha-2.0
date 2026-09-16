@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.models import AgreementInstallment, CollectionAgreement, Contribution, LedgerEntry, Loan, LoanInstallment, Member, Payment, PaymentSettlement
 from app.services.ledger import post_contribution_payment, post_entry
-from app.services.loan_engine_v17 import ensure_loan_completion
+from app.services.loan_engine_v17 import lock_loan
 from app.services.loan_payments_v17 import apply_confirmed_payment
 
 
@@ -131,13 +131,16 @@ def _locked_contribution(db: Session, payment: Payment) -> Contribution | None:
     return contribution
 
 
-def _locked_installment(db: Session, payment: Payment) -> LoanInstallment | None:
+def _locked_installment(db: Session, payment: Payment, *, lock: bool = True, refresh: bool = False) -> LoanInstallment | None:
     if (payment.reference_type or "").upper() != "LOAN_INSTALLMENT" or not (payment.reference_id or "").isdigit():
         return None
-    query = db.query(LoanInstallment).filter(LoanInstallment.id == int(payment.reference_id))
-    if _is_postgresql(db):
-        query = query.with_for_update()
-    return query.one_or_none()
+    with db.no_autoflush:
+        query = db.query(LoanInstallment).filter(LoanInstallment.id == int(payment.reference_id))
+        if lock and _is_postgresql(db):
+            query = query.with_for_update()
+        if refresh and _is_postgresql(db):
+            query = query.populate_existing()
+        return query.one_or_none()
 
 
 def _locked_agreement_installment(db: Session, payment: Payment) -> AgreementInstallment | None:
@@ -261,7 +264,7 @@ def settle_confirmed_pix_payment(
     _persist_remote_payload(payment, remote_payload)
 
     contribution = _locked_contribution(db, payment)
-    installment = _locked_installment(db, payment)
+    installment = _locked_installment(db, payment, lock=False)
     agreement_installment = None
     if reference_type == "AGREEMENT_INSTALLMENT":
         if payment.status != "approved":
@@ -329,7 +332,10 @@ def settle_confirmed_pix_payment(
         agreement_installment_id = None
     else:
         assert installment is not None
-        loan = db.get(Loan, installment.loan_id)
+        loan = lock_loan(db, db.get(Loan, installment.loan_id))
+        installment = _locked_installment(db, payment, lock=True, refresh=True)
+        if installment is None:
+            raise ValueError("Parcela de empréstimo não encontrada.")
         if loan is None:
             raise ValueError("Empréstimo da parcela não encontrado.")
         member = db.get(Member, loan.member_id)
@@ -339,14 +345,20 @@ def settle_confirmed_pix_payment(
         before_base = _money(installment.paid_amount)
         before_status = installment_financial_status(installment, effective_at)
         interest_open = max(ZERO, _money(installment.interest) - min(_money(installment.interest), before_base))
-        apply_confirmed_payment(db, payment, installment, amount=received)
+        apply_confirmed_payment(
+            db,
+            payment,
+            installment,
+            amount=received,
+            locks_acquired=True,
+            loan=loan,
+        )
         penalty_applied = _money(installment.paid_penalty_amount) - before_penalty
         base_applied = _money(installment.paid_amount) - before_base
         interest_applied = min(base_applied, interest_open)
         principal_applied = max(ZERO, base_applied - interest_applied)
         applied = _money(penalty_applied + base_applied)
         after_status = installment_financial_status(installment, effective_at)
-        ensure_loan_completion(db, loan)
         obligation_type = "LOAN_INSTALLMENT"
         member_id = member.id
         contribution_id = None

@@ -11,16 +11,36 @@ from app.models import (
     Member,
     MemberFinancialEntry,
 )
-from app.services.loan_engine_v17 import apply_payment, ensure_loan_completion
+from app.services.loan_engine_v17 import apply_payment, ensure_loan_completion, lock_loan, touch_loan
 from app.services.ledger import post_entry
 from app.services.member_financial import add_member_financial_entry
 
 
-def apply_confirmed_payment(db, payment: Payment, installment: LoanInstallment, *, amount: Decimal | None = None):
+def apply_confirmed_payment(
+    db,
+    payment: Payment,
+    installment: LoanInstallment,
+    *,
+    amount: Decimal | None = None,
+    locks_acquired: bool = False,
+    loan: Loan | None = None,
+):
     if payment.ledger_posted_at is not None:
         return False
 
     amount = Decimal(payment.amount if amount is None else amount)
+
+    if not locks_acquired:
+        loan = lock_loan(db, db.get(Loan, installment.loan_id))
+        with db.no_autoflush:
+            installment_query = db.query(LoanInstallment).filter(LoanInstallment.id == installment.id)
+            if db.bind is not None and db.bind.dialect.name == "postgresql":
+                installment_query = installment_query.with_for_update().populate_existing()
+            installment = installment_query.one()
+    elif loan is None:
+        loan = db.get(Loan, installment.loan_id)
+        if loan is None:
+            raise ValueError('Empréstimo não encontrado.')
 
     # Guardamos os valores anteriores porque apply_payment()
     # atualiza paid_amount e paid_penalty_amount.
@@ -100,13 +120,6 @@ def apply_confirmed_payment(db, payment: Payment, installment: LoanInstallment, 
     # PRINCIPAL -> SALDO PRÓPRIO DO PARTICIPANTE
     # ============================================================
     if principal_applied > 0:
-        loan = db.get(Loan, installment.loan_id)
-
-        if loan is None:
-            raise ValueError(
-                "Empréstimo da parcela não encontrado."
-            )
-
         member = db.get(Member, loan.member_id)
 
         if member is None:
@@ -130,10 +143,8 @@ def apply_confirmed_payment(db, payment: Payment, installment: LoanInstallment, 
     # ============================================================
     payment.ledger_posted_at = datetime.now(timezone.utc)
 
-    loan = db.get(Loan, installment.loan_id)
-
-    if loan:
-        ensure_loan_completion(db, loan)
+    ensure_loan_completion(db, loan, revision_already_bumped=True, loan_locked=True)
+    touch_loan(loan)
 
     return True
 
@@ -147,6 +158,8 @@ def settle_loan_with_own_balance(db, loan: Loan, actor_id: int):
 
     from app.models import AuditLog
     from app.services.member_financial import get_member_financial_position
+
+    loan = lock_loan(db, loan)
 
     # ------------------------------------------------------------
     # PARTICIPANTE
@@ -285,6 +298,7 @@ def settle_loan_with_own_balance(db, loan: Loan, actor_id: int):
     # ------------------------------------------------------------
     loan.status = "PAID"
     loan.paid_at = datetime.now(timezone.utc)
+    touch_loan(loan)
 
     # ------------------------------------------------------------
     # AUDITORIA
@@ -321,6 +335,7 @@ def renegotiate_loan_with_own_balance(
     from app.models import AuditLog
     from app.services.member_financial import get_member_financial_position
 
+    loan = lock_loan(db, loan)
     amount = Decimal(amount).quantize(Decimal("0.01"))
 
     if amount <= Decimal("0.00"):
@@ -399,6 +414,7 @@ def renegotiate_loan_with_own_balance(
     loan.principal_settled_with_own_balance = (
         Decimal(loan.principal_settled_with_own_balance or 0) + amount
     ).quantize(Decimal("0.01"))
+    touch_loan(loan)
 
     remaining_principal = (
         Decimal(loan.principal)

@@ -19,7 +19,8 @@ from app.models import (
 )
 from app.core.security import hash_password
 from app.services.loan_payments_v17 import apply_confirmed_payment
-from app.services.loan_engine_v17 import release_loan
+from app.services.loan_engine_v17 import accrue_overdue_penalties, ensure_loan_completion, lock_loan, release_loan, touch_loan
+from app.api.loans import decide_loan
 from app.services.member_financial import add_member_financial_entry, get_member_financial_position
 
 
@@ -100,6 +101,8 @@ def test_confirmed_payment_splits_principal_and_interest():
         assert apply_confirmed_payment(db, payment, installment) is True
 
         db.flush()
+        db.refresh(loan)
+        assert loan.state_revision == 1
 
         member_entries = (
             db.query(MemberFinancialEntry)
@@ -232,6 +235,8 @@ def test_confirmed_payment_partial_allocates_interest_before_principal():
 
         assert apply_confirmed_payment(db, payment2, installment) is True
         db.flush()
+        db.refresh(loan)
+        assert loan.state_revision == 2
 
         principal_entries = db.query(MemberFinancialEntry).filter(
             MemberFinancialEntry.reference_type == "LOAN_PRINCIPAL_PAYMENT",
@@ -409,6 +414,8 @@ def test_release_loan_creates_principal_commitment_idempotently():
         # Primeira liberação.
         assert release_loan(db, loan, user.id) is True
         db.flush()
+        db.refresh(loan)
+        assert loan.state_revision == 1
 
         position = get_member_financial_position(db, member)
 
@@ -419,6 +426,8 @@ def test_release_loan_creates_principal_commitment_idempotently():
         # Segunda chamada não pode duplicar o compromisso.
         assert release_loan(db, loan, user.id) is False
         db.flush()
+        db.refresh(loan)
+        assert loan.state_revision == 1
 
         position = get_member_financial_position(db, member)
 
@@ -536,6 +545,8 @@ def test_settle_loan_with_own_balance_full_settlement():
 
         assert result["settled"] is True
         assert result["settlement_amount"] == Decimal("500.00")
+        db.refresh(loan)
+        assert loan.state_revision == 1
 
         position = get_member_financial_position(db, member)
 
@@ -816,9 +827,13 @@ def test_settle_loan_with_own_balance_is_idempotent():
 
         assert first["settled"] is True
         assert first["idempotent"] is False
+        db.refresh(loan)
+        assert loan.state_revision == 1
 
         assert second["settled"] is True
         assert second["idempotent"] is True
+        db.refresh(loan)
+        assert loan.state_revision == 1
 
         position = get_member_financial_position(db, member)
 
@@ -943,6 +958,8 @@ def test_renegotiate_loan_with_own_balance_partial():
         assert result["renegotiated"] is True
         assert result["amount_applied"] == Decimal("250.00")
         assert result["remaining_principal"] == Decimal("250.00")
+        db.refresh(loan)
+        assert loan.state_revision == 1
 
         position = get_member_financial_position(db, member)
 
@@ -991,6 +1008,8 @@ def test_renegotiate_loan_with_own_balance_partial():
         assert second["amount_applied"] == Decimal("250.00")
         assert second["remaining_principal"] == Decimal("250.00")
         assert second["idempotent"] is True
+        db.refresh(loan)
+        assert loan.state_revision == 1
 
         position = get_member_financial_position(db, member)
         assert position["own_balance"] == Decimal("500.00")
@@ -1009,5 +1028,171 @@ def test_renegotiate_loan_with_own_balance_partial():
 
         assert len(renegotiations) == 1
 
+    finally:
+        db.close()
+
+
+def test_ensure_loan_completion_preserves_paid_at_and_revision_on_retry():
+    db = TestingSessionLocal()
+    try:
+        user = User(name="Completion", email="completion@example.com", cpf="completion-cpf", password_hash="x", role="USER")
+        group = Group(name="Completion Group")
+        db.add_all([user, group])
+        db.flush()
+        member = Member(user_id=user.id, group_id=group.id, status="ACTIVE")
+        db.add(member)
+        db.flush()
+        loan = Loan(member_id=member.id, principal=Decimal("100.00"), monthly_rate=Decimal("0.20"), installments=1, status="ACTIVE")
+        db.add(loan)
+        db.flush()
+        installment = LoanInstallment(
+            loan_id=loan.id, number=1, due_date=date.today(), principal=Decimal("100.00"),
+            interest=Decimal("0.00"), amount=Decimal("100.00"), paid_amount=Decimal("100.00"),
+            penalty_amount=Decimal("0.00"), paid_penalty_amount=Decimal("0.00"), status="PAID",
+        )
+        db.add(installment)
+        db.flush()
+
+        assert ensure_loan_completion(db, loan) is True
+        db.flush()
+        first_paid_at = loan.paid_at
+        assert loan.status == "PAID"
+        assert loan.state_revision == 1
+
+        assert ensure_loan_completion(db, loan) is True
+        db.flush()
+        assert loan.paid_at == first_paid_at
+        assert loan.state_revision == 1
+    finally:
+        db.close()
+
+
+def _decision_fixture(db, suffix):
+    user = User(name=f"Decision {suffix}", email=f"decision-{suffix}@example.com", cpf=f"decision-{suffix}", password_hash="x", role="ADMIN")
+    group = Group(name=f"Decision Group {suffix}")
+    db.add_all([user, group])
+    db.flush()
+    member = Member(user_id=user.id, group_id=group.id, status="ACTIVE")
+    db.add(member)
+    db.flush()
+    loan = Loan(member_id=member.id, principal=Decimal("100.00"), monthly_rate=Decimal("0.20"), installments=1, status="REQUESTED")
+    db.add(loan)
+    db.flush()
+    return user, loan
+
+
+def test_loan_decision_approved_and_rejected_increment_once():
+    db = TestingSessionLocal()
+    try:
+        from types import SimpleNamespace
+
+        admin, approved = _decision_fixture(db, "approved")
+        decide_loan(
+            approved.id,
+            SimpleNamespace(approve=True, force_exception=True, admin_note="approved by test"),
+            admin=admin,
+            db=db,
+        )
+        db.refresh(approved)
+        assert approved.status == "APPROVED"
+        assert approved.state_revision == 1
+
+        rejected_admin, rejected = _decision_fixture(db, "rejected")
+        decide_loan(
+            rejected.id,
+            SimpleNamespace(approve=False, force_exception=False, admin_note=None),
+            admin=rejected_admin,
+            db=db,
+        )
+        db.refresh(rejected)
+        assert rejected.status == "REJECTED"
+        assert rejected.state_revision == 1
+    finally:
+        db.close()
+
+
+def test_new_loan_state_revision_defaults_to_zero_and_dirty_lock_is_rejected():
+    db = TestingSessionLocal()
+    try:
+        user, loan = _decision_fixture(db, "reload")
+        assert loan.state_revision == 0
+        db.commit()
+
+        # SQLite does not provide PostgreSQL row-lock/refresh semantics.
+        # A dirty Loan must fail before its lock query can autoflush it.
+        loan.status = "ACTIVE"
+        with pytest.raises(ValueError, match="bloqueado antes"):
+            lock_loan(db, loan)
+        db.rollback()
+        db.refresh(loan)
+        assert loan.status == "REQUESTED"
+        assert loan.state_revision == 0
+    finally:
+        db.close()
+
+
+def test_lock_loan_does_not_autoflush_pending_mutation_before_lock():
+    db = TestingSessionLocal()
+    try:
+        user, loan = _decision_fixture(db, "no-autoflush")
+        pending = Loan(
+            member_id=loan.member_id,
+            principal=Decimal("50.00"),
+            monthly_rate=Decimal("0.20"),
+            installments=1,
+            status="REQUESTED",
+        )
+        db.add(pending)
+        locked = lock_loan(db, loan)
+        assert locked is loan
+        assert pending.id is None
+    finally:
+        db.close()
+
+
+def test_penalty_accrual_touches_each_loan_once_and_is_idempotent_by_date():
+    db = TestingSessionLocal()
+    try:
+        user, loan = _decision_fixture(db, "penalty")
+        loan.status = "ACTIVE"
+        installments = [
+            LoanInstallment(
+                loan_id=loan.id, number=number, due_date=date(2026, 1, 10),
+                principal=Decimal("100.00"), interest=Decimal("0.00"),
+                amount=Decimal("100.00"), paid_amount=Decimal("0.00"),
+                penalty_amount=Decimal("0.00"), paid_penalty_amount=Decimal("0.00"),
+                status="OPEN",
+            )
+            for number in (1, 2)
+        ]
+        db.add_all(installments)
+        db.flush()
+
+        first = accrue_overdue_penalties(db, date(2026, 1, 11), Decimal("0.01"))
+        db.flush()
+        db.refresh(loan)
+        assert first["installments"] == 2
+        assert loan.state_revision == 1
+
+        second = accrue_overdue_penalties(db, date(2026, 1, 11), Decimal("0.01"))
+        db.flush()
+        db.refresh(loan)
+        assert second["installments"] == 0
+        assert loan.state_revision == 1
+    finally:
+        db.close()
+
+
+def test_state_revision_rolls_back_with_the_transaction():
+    db = TestingSessionLocal()
+    try:
+        user, loan = _decision_fixture(db, "rollback")
+        db.commit()
+        locked = lock_loan(db, loan)
+        touch_loan(locked)
+        assert locked.state_revision == 1
+        db.rollback()
+        db.refresh(loan)
+        assert loan.state_revision == 0
     finally:
         db.close()

@@ -129,6 +129,11 @@ def test_overdue_contribution_is_determined_from_due_date_and_quits_to_paid():
 
     assert settlement.obligation_status_before == "OVERDUE"
     assert settlement.obligation_status_after == "PAID"
+    assert settlement.receipt_version == "v1"
+    assert settlement.loan_status_before is None
+    assert settlement.loan_status_after is None
+    assert settlement.loan_state_revision_before is None
+    assert settlement.loan_state_revision_after is None
     assert contribution.status == "PAID"
     assert contribution.paid_at is not None
     db.close()

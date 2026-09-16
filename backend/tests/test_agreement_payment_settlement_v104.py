@@ -18,6 +18,7 @@ from app.models import (
     Group,
     LedgerEntry,
     Loan,
+    LoanInstallment,
     Member,
     MemberFinancialEntry,
     Payment,
@@ -25,6 +26,7 @@ from app.models import (
     User,
 )
 from app.services.payment_settlement import settle_confirmed_pix_payment
+from app.services.agreements_v039 import decide_agreement
 
 
 def _db():
@@ -126,6 +128,30 @@ def test_full_agreement_payment_without_penalty_creates_settlement_and_ledger():
     assert db.query(MemberFinancialEntry).count() == 0
 
 
+def test_decide_agreement_increments_loan_revision_once():
+    db = _db()
+    try:
+        member, agreement, rows = _agreement(db, status="OPEN")
+        agreement.status = "REQUESTED"
+        db.delete(rows[0])
+        db.flush()
+        loan = db.get(Loan, agreement.loan_id)
+        loan.status = "ACTIVE"
+        db.add(LoanInstallment(
+            loan_id=loan.id, number=1, due_date=date(2026, 1, 10),
+            principal=Decimal("100.00"), interest=Decimal("0.00"),
+            amount=Decimal("100.00"), paid_amount=Decimal("0.00"),
+            penalty_amount=Decimal("0.00"), paid_penalty_amount=Decimal("0.00"),
+            status="OPEN",
+        ))
+        db.flush()
+
+        decide_agreement(db, agreement.id, member.user_id, True, "valid approval")
+        db.flush()
+        assert loan.status == "RESTRUCTURED"
+        assert loan.state_revision == 1
+    finally:
+        db.close()
 def test_partial_payment_applies_penalty_before_principal():
     db = _db()
     _, agreement, rows = _agreement(db, principal="100.00", penalty="10.00")

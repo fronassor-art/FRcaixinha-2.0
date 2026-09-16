@@ -9,6 +9,36 @@ from app.services.member_financial import add_member_financial_entry
 
 CENT = Decimal('0.01')
 
+
+def _is_postgresql(db: Session) -> bool:
+    return db.bind is not None and db.bind.dialect.name == 'postgresql'
+
+
+def lock_loan(db: Session, loan: Loan) -> Loan:
+    if loan is None:
+        raise ValueError('Empréstimo não encontrado.')
+    if db.is_modified(loan, include_collections=False):
+        raise ValueError('Loan deve ser bloqueado antes de qualquer mutação local.')
+    # Callers acquire this lock before mutating the Loan. no_autoflush is
+    # required so the lock query itself cannot persist a pre-lock mutation.
+    with db.no_autoflush:
+        query = db.query(Loan).filter(Loan.id == loan.id)
+        if _is_postgresql(db):
+            query = query.with_for_update().populate_existing()
+        locked = query.one_or_none()
+    if locked is None:
+        raise ValueError('Empréstimo não encontrado.')
+    return locked
+
+
+def touch_loan(loan: Loan) -> None:
+    """Increment once; caller must hold a current Loan lock.
+
+    This helper never flushes or commits. One logical operation must call it
+    at most once.
+    """
+    loan.state_revision = int(loan.state_revision or 0) + 1
+
 def money(v):
     return Decimal(v or 0).quantize(CENT, rounding=ROUND_HALF_UP)
 
@@ -55,20 +85,32 @@ def calculate_daily_penalty(inst, on_date: date, daily_rate: Decimal):
     inst.last_penalty_date = on_date
     return increment
 
-def ensure_loan_completion(db: Session, loan: Loan):
+def ensure_loan_completion(db: Session, loan: Loan, *, revision_already_bumped: bool = False, loan_locked: bool = False):
+    if not loan_locked:
+        loan = lock_loan(db, loan)
     installments = db.query(LoanInstallment).filter(LoanInstallment.loan_id == loan.id).all()
     if installments and all(i.status == 'PAID' for i in installments):
-        loan.status = 'PAID'
-        loan.paid_at = datetime.now(timezone.utc)
+        changed = loan.status != 'PAID' or loan.paid_at is None
+        if loan.status != 'PAID':
+            loan.status = 'PAID'
+        if loan.paid_at is None:
+            loan.paid_at = datetime.now(timezone.utc)
+        if changed and not revision_already_bumped:
+            touch_loan(loan)
         return True
     return False
 
 def release_loan(db: Session, loan: Loan, admin_id: int):
+    loan = lock_loan(db, loan)
     exists = db.query(LedgerEntry).filter(LedgerEntry.reference_type == 'LOAN_DISBURSEMENT', LedgerEntry.reference_id == str(loan.id)).first()
     if exists:
+        changed = loan.status != 'ACTIVE'
         loan.status = 'ACTIVE'
         if loan.disbursed_at is None:
             loan.disbursed_at = exists.created_at
+            changed = True
+        if changed:
+            touch_loan(loan)
         return False
 
     if loan.status != 'APPROVED':
@@ -99,6 +141,7 @@ def release_loan(db: Session, loan: Loan, admin_id: int):
 
     loan.status = 'ACTIVE'
     loan.disbursed_at = datetime.now(timezone.utc)
+    touch_loan(loan)
     db.add(AuditLog(actor_user_id=admin_id, action='LOAN_RELEASE', entity_type='LOAN', entity_id=str(loan.id), details='funds released'))
     member = db.get(Member, loan.member_id)
     if member:
@@ -107,12 +150,28 @@ def release_loan(db: Session, loan: Loan, admin_id: int):
     return True
 
 def accrue_overdue_penalties(db: Session, on_date: date, daily_rate: Decimal):
-    rows = db.query(LoanInstallment).filter(LoanInstallment.due_date < on_date, LoanInstallment.status != 'PAID').all()
+    with db.no_autoflush:
+        rows = db.query(LoanInstallment).filter(LoanInstallment.due_date < on_date, LoanInstallment.status != 'PAID').all()
     total = Decimal('0.00')
     changed = 0
-    for inst in rows:
-        inc = calculate_daily_penalty(inst, on_date, daily_rate)
-        if inc:
-            changed += 1
-            total += inc
+    touched_loans = set()
+    for loan_id in sorted({inst.loan_id for inst in rows}):
+        loan = lock_loan(db, db.get(Loan, loan_id))
+        with db.no_autoflush:
+            query = db.query(LoanInstallment).filter(
+                LoanInstallment.loan_id == loan.id,
+                LoanInstallment.due_date < on_date,
+                LoanInstallment.status != 'PAID',
+            )
+            if _is_postgresql(db):
+                query = query.with_for_update()
+            installments = query.populate_existing().all()
+        for inst in installments:
+            inc = calculate_daily_penalty(inst, on_date, daily_rate)
+            if inc:
+                changed += 1
+                total += inc
+                if loan.id not in touched_loans:
+                    touch_loan(loan)
+                    touched_loans.add(loan.id)
     return {'installments': changed, 'penalty_total': money(total)}
