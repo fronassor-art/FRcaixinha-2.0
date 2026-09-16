@@ -193,8 +193,8 @@ def _receipt_snapshot(*, payment: Payment, settlement: PaymentSettlement, ledger
     }
     if settlement.obligation_type == "AGREEMENT_INSTALLMENT":
         obligation["agreement_installment_id"] = settlement.agreement_installment_id
-    return {
-        "receipt_version": RECEIPT_VERSION,
+    snapshot = {
+        "receipt_version": settlement.receipt_version,
         "receipt_number": settlement.receipt_number,
         "payment": {
             "id": payment.id,
@@ -223,6 +223,14 @@ def _receipt_snapshot(*, payment: Payment, settlement: PaymentSettlement, ledger
         },
         "ledger_entries": ledger,
     }
+    if settlement.receipt_version == "v2":
+        snapshot["loan_state"] = {
+            "status_before": settlement.loan_status_before,
+            "status_after": settlement.loan_status_after,
+            "state_revision_before": settlement.loan_state_revision_before,
+            "state_revision_after": settlement.loan_state_revision_after,
+        }
+    return snapshot
 
 
 def settle_confirmed_pix_payment(
@@ -276,6 +284,8 @@ def settle_confirmed_pix_payment(
         raise ValueError("Pagamento deve referenciar exatamente uma contribuição ou parcela de empréstimo.")
 
     penalty_applied = interest_applied = principal_applied = ZERO
+    loan_status_before = loan_status_after = None
+    loan_state_revision_before = loan_state_revision_after = None
     if agreement_installment is not None:
         agreement = _locked_collection_agreement(db, agreement_installment.agreement_id)
         if agreement is None:
@@ -341,6 +351,8 @@ def settle_confirmed_pix_payment(
         member = db.get(Member, loan.member_id)
         if member is None:
             raise ValueError("Participante do empréstimo não encontrado.")
+        loan_status_before = loan.status
+        loan_state_revision_before = loan.state_revision
         before_penalty = _money(installment.paid_penalty_amount)
         before_base = _money(installment.paid_amount)
         before_status = installment_financial_status(installment, effective_at)
@@ -353,6 +365,10 @@ def settle_confirmed_pix_payment(
             locks_acquired=True,
             loan=loan,
         )
+        loan_status_after = loan.status
+        loan_state_revision_after = loan.state_revision
+        if loan_state_revision_after != loan_state_revision_before + 1:
+            raise ValueError("Revisão do Loan inválida para settlement v2.")
         penalty_applied = _money(installment.paid_penalty_amount) - before_penalty
         base_applied = _money(installment.paid_amount) - before_base
         interest_applied = min(base_applied, interest_open)
@@ -367,7 +383,8 @@ def settle_confirmed_pix_payment(
 
     excess = _money(received - applied)
     payment.ledger_posted_at = datetime.now(timezone.utc)
-    receipt_number = f"PIX-V1-{payment.id:012d}"
+    settlement_receipt_version = "v2" if obligation_type == "LOAN_INSTALLMENT" else RECEIPT_VERSION
+    receipt_number = f"PIX-{settlement_receipt_version.upper()}-{payment.id:012d}"
     settlement = PaymentSettlement(
         payment_id=payment.id,
         member_id=member_id,
@@ -387,9 +404,13 @@ def settle_confirmed_pix_payment(
         confirmation_source=confirmation_source,
         webhook_event_id=webhook_event_id,
         receipt_number=receipt_number,
-        receipt_version=RECEIPT_VERSION,
+        receipt_version=settlement_receipt_version,
         receipt_snapshot_json="",
         receipt_hash="",
+        loan_status_before=loan_status_before,
+        loan_status_after=loan_status_after,
+        loan_state_revision_before=loan_state_revision_before,
+        loan_state_revision_after=loan_state_revision_after,
     )
     db.add(settlement)
     db.flush()

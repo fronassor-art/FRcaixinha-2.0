@@ -117,6 +117,12 @@ def test_full_agreement_payment_without_penalty_creates_settlement_and_ledger():
     assert settlement.excess_amount == Decimal("0.00")
     assert settlement.obligation_status_before == "OPEN"
     assert settlement.obligation_status_after == "PAID"
+    assert settlement.receipt_version == "v1"
+    assert settlement.loan_status_before is None
+    assert settlement.loan_status_after is None
+    assert settlement.loan_state_revision_before is None
+    assert settlement.loan_state_revision_after is None
+    assert "loan_state" not in json.loads(settlement.receipt_snapshot_json)
     assert rows[0].status == "PAID"
     assert rows[0].paid_at is not None
     assert agreement.status == "SETTLED"

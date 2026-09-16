@@ -50,6 +50,24 @@ def _pix_installment_settlement_findings(db):
         if installment is None: issue(pid, "LoanInstallment inexistente")
         elif loan is None: issue(pid, "Loan inexistente")
         elif loan.member_id != settlement.member_id: issue(pid, "membro do settlement diverge do empréstimo")
+        if settlement.receipt_version not in {"v1", "v2"}:
+            issue(pid, "receipt_version inválido")
+        if settlement.receipt_version == "v2":
+            if any(getattr(settlement, field) is None for field in (
+                "loan_status_before", "loan_status_after",
+                "loan_state_revision_before", "loan_state_revision_after",
+            )):
+                issue(pid, "evidência de estado do Loan incompleta")
+            else:
+                if settlement.loan_state_revision_before < 0 or settlement.loan_state_revision_after < 0:
+                    issue(pid, "revisão do Loan negativa")
+                if settlement.loan_state_revision_after != settlement.loan_state_revision_before + 1:
+                    issue(pid, "delta de revisão do Loan inválido")
+        elif any(getattr(settlement, field) is not None for field in (
+            "loan_status_before", "loan_status_after",
+            "loan_state_revision_before", "loan_state_revision_after",
+        )):
+            issue(pid, "settlement v1 possui evidência de estado do Loan")
         if received != dec(applied + excess): issue(pid, "amount_received != amount_applied + excess_amount")
         if applied != dec(principal + interest + penalty): issue(pid, "amount_applied != soma dos componentes")
         def rows(kind): return db.query(LedgerEntry).filter(LedgerEntry.reference_type == kind, LedgerEntry.reference_id == str(pid)).all()
@@ -68,6 +86,24 @@ def _pix_installment_settlement_findings(db):
         if principal > ZERO:
             if len(mr) != 1 or len(mv) != 1 or dec(mv[0].amount) != principal: issue(pid, "principal ausente, duplicado ou incorreto")
         elif mr: issue(pid, "principal indevido para componente zero")
+        if settlement.receipt_version == "v2":
+            if settlement.receipt_number != f"PIX-V2-{pid:012d}":
+                issue(pid, "receipt_number v2 inválido")
+            try:
+                snapshot = json.loads(settlement.receipt_snapshot_json)
+                expected_snapshot = _receipt_snapshot(
+                    payment=payment,
+                    settlement=settlement,
+                    ledger=_ledger_snapshot(db, pid),
+                )
+                canonical_snapshot = _canonical_json(expected_snapshot)
+                if snapshot != expected_snapshot or settlement.receipt_snapshot_json != canonical_snapshot:
+                    issue(pid, "receipt_snapshot_json v2 inválido")
+                expected_hash = hashlib.sha256(canonical_snapshot.encode("utf-8")).hexdigest()
+                if settlement.receipt_hash != expected_hash:
+                    issue(pid, "receipt_hash v2 inválido")
+            except (TypeError, ValueError, json.JSONDecodeError, AttributeError):
+                issue(pid, "receipt_snapshot_json v2 ilegível")
     for iid, rows in by_installment.items():
         installment = db.get(LoanInstallment, iid)
         if installment is None: continue
@@ -268,6 +304,8 @@ def _approved_contribution_issues(db, payment):
             issues.append(f"{pid}: membro da contribuição diverge do settlement")
         if (payment.reference_type or "").upper() != "CONTRIBUTION" or payment.reference_id != str(contribution.id):
             issues.append(f"{pid}: referência da contribuição incompatível")
+    if settlement.receipt_version != "v1":
+        issues.append(f"{pid}: contribuição deve usar receipt_version v1")
     expected_received = money(payment.amount_received if payment.amount_received is not None else payment.amount)
     if money(settlement.amount_received) != expected_received:
         issues.append(f"{pid}: amount_received do settlement diverge do Payment")

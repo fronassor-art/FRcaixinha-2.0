@@ -8,7 +8,7 @@ from sqlalchemy.pool import StaticPool
 from app.db.base import Base
 from app.models import (
     AgreementInstallment, CollectionAgreement, Contribution, Group, LedgerEntry,
-    Loan, LoanInstallment, Member, Payment, User,
+    Loan, LoanInstallment, Member, Payment, PaymentSettlement, User,
 )
 from app.services.agreement_payments_v039 import apply_confirmed_agreement_payment
 from app.services.payment_settlement import settle_confirmed_pix_payment
@@ -93,6 +93,15 @@ def test_contribution_excess_and_inconsistent_settlement():
 def test_loan_reuses_pix_installment_validation():
     s = db(); loan_payment(s); assert finding(s)['status'] == 'PASS'; s.close()
     s = db(); loan_payment(s, valid=False); assert finding(s)['status'] == 'FAIL'; s.close()
+
+
+def test_v2_receipt_is_invalid_for_contribution():
+    s = db(); p = contribution_payment(s, suffix='contribution-v2')
+    settlement = s.query(PaymentSettlement).filter_by(payment_id=p.id).one()
+    settlement.receipt_version = 'v2'
+    s.commit()
+    assert finding(s)['status'] == 'FAIL'
+    s.close()
 
 
 def test_agreement_valid_and_missing_or_duplicate_ledger_fails():

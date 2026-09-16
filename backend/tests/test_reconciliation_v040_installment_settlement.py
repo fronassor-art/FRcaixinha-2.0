@@ -1,3 +1,5 @@
+import hashlib
+import json
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import pytest
@@ -5,7 +7,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 from app.db.base import Base
-from app.models import Group, User, Member, Loan, LoanInstallment, Payment, LedgerEntry, MemberFinancialEntry
+from app.models import Group, User, Member, Loan, LoanInstallment, Payment, PaymentSettlement, LedgerEntry, MemberFinancialEntry
 from app.services.payment_settlement import settle_confirmed_pix_payment
 from app.services.reconciliation_v040 import build_advanced_reconciliation
 
@@ -34,3 +36,28 @@ def test_component_evidence_failures(kind):
     db.commit(); assert check(db)['status']=='FAIL'; db.close()
 def test_received_accumulated_and_legacy_do_not_mask():
     db,i,p=make(); p.amount_received=Decimal('119'); db.commit(); assert check(db)['status']=='FAIL'; db.close(); db,i,p=make(); i.paid_amount=Decimal('119'); db.commit(); assert check(db)['status']=='FAIL'; db.close(); db,i,p=make(); db.add(LedgerEntry(account='CAIXINHA',direction='CREDIT',amount=Decimal('20'),reference_type='LOAN_INSTALLMENT_PAYMENT',reference_id=str(p.id))); db.query(LedgerEntry).filter_by(reference_type='LOAN_INTEREST_PAYMENT',reference_id=str(p.id)).delete(); db.commit(); assert check(db)['status']=='FAIL'; db.close()
+
+
+def test_v2_receipt_state_and_hash_mismatches_are_detected():
+    db, _, payment = make()
+    settlement = db.query(PaymentSettlement).filter_by(payment_id=payment.id).one()
+    snapshot = json.loads(settlement.receipt_snapshot_json)
+    snapshot["loan_state"]["state_revision_after"] = 99
+    settlement.receipt_snapshot_json = json.dumps(snapshot, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    db.commit()
+    assert check(db)['status'] == 'FAIL'
+    db.close()
+
+    db, _, payment = make()
+    settlement = db.query(PaymentSettlement).filter_by(payment_id=payment.id).one()
+    settlement.loan_state_revision_after = settlement.loan_state_revision_before + 2
+    db.commit()
+    assert check(db)['status'] == 'FAIL'
+    db.close()
+
+    db, _, payment = make()
+    settlement = db.query(PaymentSettlement).filter_by(payment_id=payment.id).one()
+    settlement.receipt_hash = hashlib.sha256(b"wrong").hexdigest()
+    db.commit()
+    assert check(db)['status'] == 'FAIL'
+    db.close()
