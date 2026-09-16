@@ -30,6 +30,7 @@ from sqlalchemy.exc import IntegrityError
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 MIGRATION_PATH = BACKEND_ROOT / "alembic" / "versions" / "0083_payment_reversal_v104.py"
+MIGRATION_0084_PATH = BACKEND_ROOT / "alembic" / "versions" / "0084_payment_settlement_loan_paid_at_v104.py"
 
 
 def _engine():
@@ -130,6 +131,13 @@ def _load_migration():
     return module
 
 
+def _load_migration_0084():
+    spec = spec_from_file_location("migration_0084", MIGRATION_0084_PATH)
+    module = module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _upgrade(engine):
     migration = _load_migration()
     with engine.begin() as connection:
@@ -139,6 +147,20 @@ def _upgrade(engine):
 
 def _downgrade(engine):
     migration = _load_migration()
+    with engine.begin() as connection:
+        with Operations.context(MigrationContext.configure(connection)):
+            migration.downgrade()
+
+
+def _upgrade_0084(engine):
+    migration = _load_migration_0084()
+    with engine.begin() as connection:
+        with Operations.context(MigrationContext.configure(connection)):
+            migration.upgrade()
+
+
+def _downgrade_0084(engine):
+    migration = _load_migration_0084()
     with engine.begin() as connection:
         with Operations.context(MigrationContext.configure(connection)):
             migration.downgrade()
@@ -482,3 +504,96 @@ def test_downgrade_blocks_every_new_evidence_kind(evidence):
             connection.execute(sa.text("UPDATE loans SET state_revision = 1 WHERE id = 1"))
     with pytest.raises(RuntimeError):
         _downgrade(engine)
+
+
+def test_0084_adds_paid_at_evidence_and_accepts_v1_v2_v3():
+    engine = _db()
+    _seed(engine)
+    _upgrade_0084(engine)
+    columns = _columns(engine, "payment_settlements")
+    assert isinstance(columns["loan_paid_at_before"]["type"], DateTime)
+    assert isinstance(columns["loan_paid_at_after"]["type"], DateTime)
+    assert columns["loan_paid_at_before"]["nullable"] is True
+    assert columns["loan_paid_at_after"]["nullable"] is True
+
+    original_v1 = ("v1", '{"legacy":true}', "settlement-hash-1")
+    now = "2026-09-16 12:00:00+00:00"
+    with engine.begin() as connection:
+        connection.execute(sa.text("UPDATE payment_settlements SET receipt_version = 'v2' WHERE id = 1"))
+        connection.execute(sa.text(
+            "INSERT INTO payment_settlements (id, payment_id, member_id, obligation_type, loan_installment_id, "
+            "amount_received, amount_applied, principal_applied, interest_applied, penalty_applied, excess_amount, "
+            "obligation_status_before, obligation_status_after, loan_status_before, loan_status_after, "
+            "loan_state_revision_before, loan_state_revision_after, loan_paid_at_before, loan_paid_at_after, "
+            "confirmed_at, confirmation_source, receipt_number, receipt_version, receipt_snapshot_json, receipt_hash, created_at) "
+            "VALUES (2, 2, 1, 'LOAN_INSTALLMENT', 1, 10, 10, 10, 0, 0, 0, 'OPEN', 'PAID', 'ACTIVE', 'PAID', 0, 1, NULL, :now, CURRENT_TIMESTAMP, 'TEST', 'settlement-2', 'v3', '{}', 'settlement-hash-2', CURRENT_TIMESTAMP)"
+        ), {"now": now})
+
+    preserved_v2 = engine.connect().execute(sa.text(
+        "SELECT receipt_version, receipt_snapshot_json, receipt_hash FROM payment_settlements WHERE id = 1"
+    )).one()
+    assert tuple(preserved_v2) == ("v2", original_v1[1], original_v1[2])
+
+    with pytest.raises(IntegrityError):
+        with engine.begin() as connection:
+            connection.execute(sa.text("UPDATE payment_settlements SET receipt_version = 'v3' WHERE id = 1"))
+
+
+def test_0084_downgrade_empty_preserves_0083_and_rejects_v3_afterward():
+    engine = _db()
+    _seed(engine)
+    original = engine.connect().execute(sa.text(
+        "SELECT receipt_version, receipt_snapshot_json, receipt_hash FROM payment_settlements WHERE id = 1"
+    )).one()
+    _upgrade_0084(engine)
+    _downgrade_0084(engine)
+    columns = _columns(engine, "payment_settlements")
+    assert "loan_paid_at_before" not in columns
+    assert "loan_paid_at_after" not in columns
+    with engine.begin() as connection:
+        connection.execute(sa.text("UPDATE payment_settlements SET receipt_version = 'v2' WHERE id = 1"))
+    with pytest.raises(IntegrityError):
+        with engine.begin() as connection:
+            connection.execute(sa.text("UPDATE payment_settlements SET receipt_version = 'v3' WHERE id = 1"))
+    restored = engine.connect().execute(sa.text(
+        "SELECT receipt_version, receipt_snapshot_json, receipt_hash FROM payment_settlements WHERE id = 1"
+    )).one()
+    assert tuple(original) == ("v1", "{\"legacy\":true}", "settlement-hash-1")
+    assert tuple(restored) == ("v2", "{\"legacy\":true}", "settlement-hash-1")
+
+
+def test_0084_downgrade_blocks_v3_evidence_before_changes():
+    engine = _db()
+    _seed(engine)
+    _upgrade_0084(engine)
+    now = "2026-09-16 12:00:00+00:00"
+    with engine.begin() as connection:
+        connection.execute(sa.text(
+            "INSERT INTO payment_settlements (id, payment_id, member_id, obligation_type, loan_installment_id, "
+            "amount_received, amount_applied, principal_applied, interest_applied, penalty_applied, excess_amount, "
+            "obligation_status_before, obligation_status_after, loan_status_before, loan_status_after, "
+            "loan_state_revision_before, loan_state_revision_after, loan_paid_at_before, loan_paid_at_after, "
+            "confirmed_at, confirmation_source, receipt_number, receipt_version, receipt_snapshot_json, receipt_hash, created_at) "
+            "VALUES (2, 2, 1, 'LOAN_INSTALLMENT', 1, 10, 10, 10, 0, 0, 0, 'OPEN', 'PAID', 'ACTIVE', 'PAID', 0, 1, NULL, :now, CURRENT_TIMESTAMP, 'TEST', 'settlement-2', 'v3', '{}', 'settlement-hash-2', CURRENT_TIMESTAMP)"
+        ), {"now": now})
+    with pytest.raises(RuntimeError):
+        _downgrade_0084(engine)
+    assert "loan_paid_at_before" in _columns(engine, "payment_settlements")
+
+
+def test_0084_downgrade_blocks_v3_with_null_paid_at_evidence():
+    engine = _db()
+    _seed(engine)
+    _upgrade_0084(engine)
+    with engine.begin() as connection:
+        connection.execute(sa.text(
+            "INSERT INTO payment_settlements (id, payment_id, member_id, obligation_type, loan_installment_id, "
+            "amount_received, amount_applied, principal_applied, interest_applied, penalty_applied, excess_amount, "
+            "obligation_status_before, obligation_status_after, loan_status_before, loan_status_after, "
+            "loan_state_revision_before, loan_state_revision_after, loan_paid_at_before, loan_paid_at_after, "
+            "confirmed_at, confirmation_source, receipt_number, receipt_version, receipt_snapshot_json, receipt_hash, created_at) "
+            "VALUES (2, 2, 1, 'LOAN_INSTALLMENT', 1, 10, 10, 10, 0, 0, 0, 'OPEN', 'PARTIAL', 'ACTIVE', 'ACTIVE', 0, 1, NULL, NULL, CURRENT_TIMESTAMP, 'TEST', 'settlement-2', 'v3', '{}', 'settlement-hash-2', CURRENT_TIMESTAMP)"
+        ))
+    with pytest.raises(RuntimeError):
+        _downgrade_0084(engine)
+    assert "loan_paid_at_before" in _columns(engine, "payment_settlements")

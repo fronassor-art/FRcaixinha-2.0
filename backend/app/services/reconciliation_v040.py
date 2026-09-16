@@ -16,6 +16,15 @@ def bounds(d): return d.replace(day=1), d.replace(day=monthrange(d.year,d.month)
 def dt_start(d): return datetime.combine(d, datetime.min.time(), tzinfo=timezone.utc)
 def dt_end(d): return dt_start(d + timedelta(days=1))
 
+def _utc_datetime(value):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value)
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
 def _sum_ledger(db, direction, ref_types=None, start=None, end=None):
     q=db.query(func.coalesce(func.sum(LedgerEntry.amount),0)).filter(LedgerEntry.direction==direction)
     if ref_types: q=q.filter(LedgerEntry.reference_type.in_(ref_types))
@@ -50,9 +59,9 @@ def _pix_installment_settlement_findings(db):
         if installment is None: issue(pid, "LoanInstallment inexistente")
         elif loan is None: issue(pid, "Loan inexistente")
         elif loan.member_id != settlement.member_id: issue(pid, "membro do settlement diverge do empréstimo")
-        if settlement.receipt_version not in {"v1", "v2"}:
+        if settlement.receipt_version not in {"v1", "v2", "v3"}:
             issue(pid, "receipt_version inválido")
-        if settlement.receipt_version == "v2":
+        if settlement.receipt_version in {"v2", "v3"}:
             if any(getattr(settlement, field) is None for field in (
                 "loan_status_before", "loan_status_after",
                 "loan_state_revision_before", "loan_state_revision_after",
@@ -63,9 +72,26 @@ def _pix_installment_settlement_findings(db):
                     issue(pid, "revisão do Loan negativa")
                 if settlement.loan_state_revision_after != settlement.loan_state_revision_before + 1:
                     issue(pid, "delta de revisão do Loan inválido")
+            if settlement.receipt_version == "v2" and any(
+                getattr(settlement, field) is not None
+                for field in ("loan_paid_at_before", "loan_paid_at_after")
+            ):
+                issue(pid, "settlement v2 possui evidência paid_at de v3")
+            if settlement.receipt_version == "v3":
+                paid_before = settlement.loan_paid_at_before
+                paid_after = settlement.loan_paid_at_after
+                if settlement.loan_status_before == "PAID":
+                    issue(pid, "settlement v3 não pode iniciar com Loan PAID")
+                elif paid_before is not None:
+                    issue(pid, "paid_at_before deve ser NULL para estado inicial não-PAID")
+                if settlement.loan_status_after == "PAID" and paid_after is None:
+                    issue(pid, "paid_at_after é obrigatório ao entrar em PAID")
+                if settlement.loan_status_after != "PAID" and paid_after is not None:
+                    issue(pid, "paid_at_after deve ser NULL fora de PAID")
         elif any(getattr(settlement, field) is not None for field in (
             "loan_status_before", "loan_status_after",
             "loan_state_revision_before", "loan_state_revision_after",
+            "loan_paid_at_before", "loan_paid_at_after",
         )):
             issue(pid, "settlement v1 possui evidência de estado do Loan")
         if received != dec(applied + excess): issue(pid, "amount_received != amount_applied + excess_amount")
@@ -86,9 +112,10 @@ def _pix_installment_settlement_findings(db):
         if principal > ZERO:
             if len(mr) != 1 or len(mv) != 1 or dec(mv[0].amount) != principal: issue(pid, "principal ausente, duplicado ou incorreto")
         elif mr: issue(pid, "principal indevido para componente zero")
-        if settlement.receipt_version == "v2":
-            if settlement.receipt_number != f"PIX-V2-{pid:012d}":
-                issue(pid, "receipt_number v2 inválido")
+        if settlement.receipt_version in {"v2", "v3"}:
+            expected_version = settlement.receipt_version.upper()
+            if settlement.receipt_number != f"PIX-{expected_version}-{pid:012d}":
+                issue(pid, f"receipt_number {settlement.receipt_version} inválido")
             try:
                 snapshot = json.loads(settlement.receipt_snapshot_json)
                 expected_snapshot = _receipt_snapshot(
@@ -96,14 +123,28 @@ def _pix_installment_settlement_findings(db):
                     settlement=settlement,
                     ledger=_ledger_snapshot(db, pid),
                 )
+                if settlement.receipt_version == "v3":
+                    loan_state = snapshot.get("loan_state")
+                    if not isinstance(loan_state, dict):
+                        issue(pid, "snapshot v3 sem loan_state")
+                    else:
+                        for field, column in (
+                            ("paid_at_before", settlement.loan_paid_at_before),
+                            ("paid_at_after", settlement.loan_paid_at_after),
+                        ):
+                            try:
+                                if _utc_datetime(loan_state.get(field)) != _utc_datetime(column):
+                                    issue(pid, f"snapshot v3 {field} diverge das colunas")
+                            except (TypeError, ValueError):
+                                issue(pid, f"snapshot v3 {field} inválido")
                 canonical_snapshot = _canonical_json(expected_snapshot)
                 if snapshot != expected_snapshot or settlement.receipt_snapshot_json != canonical_snapshot:
-                    issue(pid, "receipt_snapshot_json v2 inválido")
+                    issue(pid, f"receipt_snapshot_json {settlement.receipt_version} inválido")
                 expected_hash = hashlib.sha256(canonical_snapshot.encode("utf-8")).hexdigest()
                 if settlement.receipt_hash != expected_hash:
-                    issue(pid, "receipt_hash v2 inválido")
+                    issue(pid, f"receipt_hash {settlement.receipt_version} inválido")
             except (TypeError, ValueError, json.JSONDecodeError, AttributeError):
-                issue(pid, "receipt_snapshot_json v2 ilegível")
+                issue(pid, f"receipt_snapshot_json {settlement.receipt_version} ilegível")
     for iid, rows in by_installment.items():
         installment = db.get(LoanInstallment, iid)
         if installment is None: continue

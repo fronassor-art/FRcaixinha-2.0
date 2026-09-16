@@ -228,6 +228,8 @@ class PaymentSettlement(Base):
     loan_status_after: Mapped[str | None] = mapped_column(String(30))
     loan_state_revision_before: Mapped[int | None] = mapped_column(Integer)
     loan_state_revision_after: Mapped[int | None] = mapped_column(Integer)
+    loan_paid_at_before: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    loan_paid_at_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     payment_reversal: Mapped["PaymentReversal | None"] = relationship(back_populates="settlement", uselist=False)
     __table_args__ = (
         CheckConstraint("amount_received >= 0 AND amount_applied >= 0 AND principal_applied >= 0 AND interest_applied >= 0 AND penalty_applied >= 0 AND excess_amount >= 0", name="ck_payment_settlements_nonnegative_amounts"),
@@ -237,7 +239,9 @@ class PaymentSettlement(Base):
         CheckConstraint("obligation_status_before IN ('OPEN', 'PENDING', 'PARTIAL', 'OVERDUE', 'PAID')", name="ck_payment_settlements_status_before"),
         CheckConstraint("obligation_status_after IN ('OPEN', 'PENDING', 'PARTIAL', 'OVERDUE', 'PAID')", name="ck_payment_settlements_status_after"),
         CheckConstraint("obligation_type != 'AGREEMENT_INSTALLMENT' OR interest_applied = 0", name="ck_payment_settlements_agreement_no_interest"),
-        CheckConstraint("receipt_version IN ('v1', 'v2')", name="ck_payment_settlements_receipt_version"),
+        CheckConstraint("receipt_version IN ('v1', 'v2', 'v3')", name="ck_payment_settlements_receipt_version"),
+        CheckConstraint("receipt_version = 'v3' OR (loan_paid_at_before IS NULL AND loan_paid_at_after IS NULL)", name="ck_payment_settlements_paid_at_version"),
+        CheckConstraint("receipt_version != 'v3' OR obligation_type = 'LOAN_INSTALLMENT'", name="ck_payment_settlements_v3_loan_only"),
         CheckConstraint("(loan_status_before IS NULL AND loan_status_after IS NULL AND loan_state_revision_before IS NULL AND loan_state_revision_after IS NULL) OR (loan_status_before IS NOT NULL AND loan_status_after IS NOT NULL AND loan_state_revision_before IS NOT NULL AND loan_state_revision_after IS NOT NULL)", name="ck_payment_settlements_loan_evidence_complete"),
         CheckConstraint("loan_status_before IS NULL OR loan_status_before IN ('REQUESTED', 'APPROVED', 'REJECTED', 'ACTIVE', 'OVERDUE', 'IN_COLLECTION', 'PAID', 'RESTRUCTURED')", name="ck_payment_settlements_loan_status_before"),
         CheckConstraint("loan_status_after IS NULL OR loan_status_after IN ('REQUESTED', 'APPROVED', 'REJECTED', 'ACTIVE', 'OVERDUE', 'IN_COLLECTION', 'PAID', 'RESTRUCTURED')", name="ck_payment_settlements_loan_status_after"),

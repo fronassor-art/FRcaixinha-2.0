@@ -18,6 +18,54 @@ def make(received='120.00', penalty='0.00'):
 def check(db): return next(x for x in build_advanced_reconciliation(db,date.today())['findings'] if x['code']=='PIX_INSTALLMENT_SETTLEMENT')
 def test_integral_partial_and_excess():
     db,_,_=make(); assert check(db)['status']=='PASS'; db.close(); db,_,_=make('50'); assert check(db)['status']=='PASS'; db.close(); db,_,_=make('150'); assert check(db)['status']=='PASS'; db.close()
+
+def test_v3_active_to_active_has_null_paid_at_evidence():
+    db, installment, payment = make('50')
+    settlement = db.query(PaymentSettlement).filter_by(payment_id=payment.id).one()
+    snapshot = json.loads(settlement.receipt_snapshot_json)
+    assert installment.status == 'PARTIAL'
+    assert settlement.receipt_version == 'v3'
+    assert settlement.loan_status_before == 'ACTIVE'
+    assert settlement.loan_status_after == 'ACTIVE'
+    assert settlement.loan_state_revision_after == settlement.loan_state_revision_before + 1
+    assert settlement.loan_paid_at_before is None
+    assert settlement.loan_paid_at_after is None
+    assert snapshot['loan_state']['paid_at_before'] is None
+    assert snapshot['loan_state']['paid_at_after'] is None
+    assert check(db)['status'] == 'PASS'
+    db.close()
+
+@pytest.mark.parametrize(
+    ('status_before', 'status_after', 'paid_before', 'paid_after'),
+    [
+        ('ACTIVE', 'PAID', None, None),
+        ('ACTIVE', 'ACTIVE', None, datetime(2026, 9, 16, tzinfo=timezone.utc)),
+        ('ACTIVE', 'ACTIVE', datetime(2026, 9, 16, tzinfo=timezone.utc), None),
+        ('PAID', 'ACTIVE', datetime(2026, 9, 16, tzinfo=timezone.utc), None),
+    ],
+)
+def test_v3_paid_at_semantic_mismatches_are_detected_with_valid_hash(
+    status_before, status_after, paid_before, paid_after,
+):
+    db, _, payment = make('50')
+    settlement = db.query(PaymentSettlement).filter_by(payment_id=payment.id).one()
+    settlement.loan_status_before = status_before
+    settlement.loan_status_after = status_after
+    settlement.loan_paid_at_before = paid_before
+    settlement.loan_paid_at_after = paid_after
+    snapshot = json.loads(settlement.receipt_snapshot_json)
+    snapshot['loan_state'].update({
+        'status_before': status_before,
+        'status_after': status_after,
+        'paid_at_before': paid_before.isoformat() if paid_before else None,
+        'paid_at_after': paid_after.isoformat() if paid_after else None,
+    })
+    canonical = json.dumps(snapshot, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+    settlement.receipt_snapshot_json = canonical
+    settlement.receipt_hash = hashlib.sha256(canonical.encode()).hexdigest()
+    db.commit()
+    assert check(db)['status'] == 'FAIL'
+    db.close()
 def test_two_pix_same_installment_and_principal():
     db,i,_=make('50'); p=Payment(provider='test',provider_payment_id='p2',idempotency_key='i2',amount=Decimal('70'),status='approved',reference_type='LOAN_INSTALLMENT',reference_id=str(i.id)); db.add(p); db.flush(); settle_confirmed_pix_payment(db,p,confirmation_source='TEST'); db.commit(); assert check(db)['status']=='PASS'; db.close()
 def test_penalty_only_has_no_principal():

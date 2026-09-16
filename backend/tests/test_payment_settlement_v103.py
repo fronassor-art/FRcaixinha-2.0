@@ -83,6 +83,12 @@ def _settle(db, payment, when=None, **kwargs):
     return result
 
 
+def _utc_iso(value):
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat()
+
+
 def test_full_contribution_uses_canonical_reference_and_posts_hashed_ledger():
     db = _db()
     member = _member(db, "full")
@@ -176,17 +182,21 @@ def test_full_installment_closes_installment_and_loan():
     assert settlement.interest_applied == Decimal("20.00")
     assert settlement.principal_applied == Decimal("100.00")
     assert settlement.penalty_applied == Decimal("0.00")
-    assert settlement.receipt_version == "v2"
+    assert settlement.receipt_version == "v3"
     assert settlement.loan_status_before == "ACTIVE"
     assert settlement.loan_status_after == "PAID"
     assert settlement.loan_state_revision_before == 0
     assert settlement.loan_state_revision_after == 1
+    assert settlement.loan_paid_at_before is None
+    assert settlement.loan_paid_at_after is not None
     snapshot = json.loads(settlement.receipt_snapshot_json)
     assert snapshot["loan_state"] == {
         "status_before": "ACTIVE",
         "status_after": "PAID",
         "state_revision_before": 0,
         "state_revision_after": 1,
+        "paid_at_before": None,
+        "paid_at_after": _utc_iso(settlement.loan_paid_at_after),
     }
     assert hashlib.sha256(settlement.receipt_snapshot_json.encode("utf-8")).hexdigest() == settlement.receipt_hash
     assert verify_ledger_chain(db)["status"] == "PASS"
@@ -207,11 +217,13 @@ def test_partial_installment_applies_penalty_then_interest_then_principal():
     assert settlement.penalty_applied == Decimal("10.00")
     assert settlement.interest_applied == Decimal("20.00")
     assert settlement.principal_applied == Decimal("20.00")
-    assert settlement.receipt_version == "v2"
+    assert settlement.receipt_version == "v3"
     assert settlement.loan_status_before == "ACTIVE"
     assert settlement.loan_status_after == "ACTIVE"
     assert settlement.loan_state_revision_before == 0
     assert settlement.loan_state_revision_after == 1
+    assert settlement.loan_paid_at_before is None
+    assert settlement.loan_paid_at_after is None
     assert [entry.reference_type for entry in db.query(LedgerEntry).order_by(LedgerEntry.id)] == ["LOAN_PENALTY_PAYMENT", "LOAN_INTEREST_PAYMENT"]
     assert verify_ledger_chain(db)["status"] == "PASS"
     db.close()
@@ -228,7 +240,7 @@ def test_loan_settlement_retry_returns_immutable_v2_evidence_without_new_revisio
     revision = loan.state_revision
     second = _settle(db, payment, remote_payload={"status_detail": "ignored"})
     assert second.id == first.id
-    assert second.receipt_version == "v2"
+    assert second.receipt_version == "v3"
     assert second.receipt_snapshot_json == snapshot
     assert second.receipt_hash == receipt_hash
     assert loan.state_revision == revision == 1
