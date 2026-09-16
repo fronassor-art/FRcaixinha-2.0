@@ -234,6 +234,18 @@ class PaymentSettlement(Base):
     loan_installment_status_after: Mapped[str | None] = mapped_column(String(20))
     loan_installment_paid_at_before: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     loan_installment_paid_at_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    agreement_installment_status_before: Mapped[str | None] = mapped_column(String(20))
+    agreement_installment_status_after: Mapped[str | None] = mapped_column(String(20))
+    agreement_installment_paid_at_before: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    agreement_installment_paid_at_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    agreement_installment_paid_amount_before: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    agreement_installment_paid_amount_after: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    agreement_installment_paid_penalty_amount_before: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    agreement_installment_paid_penalty_amount_after: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    collection_agreement_status_before: Mapped[str | None] = mapped_column(String(20))
+    collection_agreement_status_after: Mapped[str | None] = mapped_column(String(20))
+    collection_agreement_state_revision_before: Mapped[int | None] = mapped_column(Integer)
+    collection_agreement_state_revision_after: Mapped[int | None] = mapped_column(Integer)
     payment_reversal: Mapped["PaymentReversal | None"] = relationship(back_populates="settlement", uselist=False)
     __table_args__ = (
         CheckConstraint("amount_received >= 0 AND amount_applied >= 0 AND principal_applied >= 0 AND interest_applied >= 0 AND penalty_applied >= 0 AND excess_amount >= 0", name="ck_payment_settlements_nonnegative_amounts"),
@@ -243,7 +255,7 @@ class PaymentSettlement(Base):
         CheckConstraint("obligation_status_before IN ('OPEN', 'PENDING', 'PARTIAL', 'OVERDUE', 'PAID')", name="ck_payment_settlements_status_before"),
         CheckConstraint("obligation_status_after IN ('OPEN', 'PENDING', 'PARTIAL', 'OVERDUE', 'PAID')", name="ck_payment_settlements_status_after"),
         CheckConstraint("obligation_type != 'AGREEMENT_INSTALLMENT' OR interest_applied = 0", name="ck_payment_settlements_agreement_no_interest"),
-        CheckConstraint("receipt_version IN ('v1', 'v2', 'v3', 'v4')", name="ck_payment_settlements_receipt_version"),
+        CheckConstraint("receipt_version IN ('v1', 'v2', 'v3', 'v4', 'v5')", name="ck_payment_settlements_receipt_version"),
         CheckConstraint("receipt_version IN ('v3', 'v4') OR (loan_paid_at_before IS NULL AND loan_paid_at_after IS NULL)", name="ck_payment_settlements_paid_at_version"),
         CheckConstraint("receipt_version NOT IN ('v3', 'v4') OR obligation_type = 'LOAN_INSTALLMENT'", name="ck_payment_settlements_v3_loan_only"),
         CheckConstraint("receipt_version = 'v4' OR (loan_installment_status_before IS NULL AND loan_installment_status_after IS NULL AND loan_installment_paid_at_before IS NULL AND loan_installment_paid_at_after IS NULL)", name="ck_payment_settlements_installment_state_version"),
@@ -254,6 +266,16 @@ class PaymentSettlement(Base):
         CheckConstraint("loan_state_revision_before IS NULL OR loan_state_revision_before >= 0", name="ck_payment_settlements_loan_revision_before"),
         CheckConstraint("loan_state_revision_after IS NULL OR loan_state_revision_after >= 0", name="ck_payment_settlements_loan_revision_after"),
         CheckConstraint("loan_state_revision_before IS NULL OR loan_state_revision_after > loan_state_revision_before", name="ck_payment_settlements_loan_revision_order"),
+        CheckConstraint("receipt_version != 'v5' OR obligation_type = 'AGREEMENT_INSTALLMENT'", name="ck_payment_settlements_v5_agreement_only"),
+        CheckConstraint("receipt_version = 'v5' OR (agreement_installment_status_before IS NULL AND agreement_installment_status_after IS NULL AND agreement_installment_paid_at_before IS NULL AND agreement_installment_paid_at_after IS NULL AND agreement_installment_paid_amount_before IS NULL AND agreement_installment_paid_amount_after IS NULL AND agreement_installment_paid_penalty_amount_before IS NULL AND agreement_installment_paid_penalty_amount_after IS NULL AND collection_agreement_status_before IS NULL AND collection_agreement_status_after IS NULL AND collection_agreement_state_revision_before IS NULL AND collection_agreement_state_revision_after IS NULL)", name="ck_payment_settlements_agreement_evidence_version"),
+        CheckConstraint("receipt_version != 'v5' OR (agreement_installment_status_before IS NOT NULL AND agreement_installment_status_after IS NOT NULL AND agreement_installment_paid_amount_before IS NOT NULL AND agreement_installment_paid_amount_after IS NOT NULL AND agreement_installment_paid_penalty_amount_before IS NOT NULL AND agreement_installment_paid_penalty_amount_after IS NOT NULL AND collection_agreement_status_before IS NOT NULL AND collection_agreement_status_after IS NOT NULL AND collection_agreement_state_revision_before IS NOT NULL AND collection_agreement_state_revision_after IS NOT NULL)", name="ck_payment_settlements_v5_agreement_evidence_complete"),
+        CheckConstraint("receipt_version != 'v5' OR (loan_status_before IS NULL AND loan_status_after IS NULL AND loan_state_revision_before IS NULL AND loan_state_revision_after IS NULL AND loan_paid_at_before IS NULL AND loan_paid_at_after IS NULL AND loan_installment_status_before IS NULL AND loan_installment_status_after IS NULL AND loan_installment_paid_at_before IS NULL AND loan_installment_paid_at_after IS NULL)", name="ck_payment_settlements_v5_no_loan_evidence"),
+        CheckConstraint("receipt_version != 'v5' OR collection_agreement_state_revision_after = collection_agreement_state_revision_before + 1", name="ck_payment_settlements_v5_agreement_revision_order"),
+        CheckConstraint("receipt_version != 'v5' OR (agreement_installment_paid_amount_before >= 0 AND agreement_installment_paid_amount_after >= 0 AND agreement_installment_paid_penalty_amount_before >= 0 AND agreement_installment_paid_penalty_amount_after >= 0)", name="ck_payment_settlements_v5_agreement_amounts_nonnegative"),
+        CheckConstraint("receipt_version != 'v5' OR (agreement_installment_status_before IN ('OPEN', 'PARTIAL', 'PAID') AND agreement_installment_status_after IN ('OPEN', 'PARTIAL', 'PAID'))", name="ck_payment_settlements_v5_installment_statuses"),
+        CheckConstraint("receipt_version != 'v5' OR (collection_agreement_status_before IN ('APPROVED', 'SETTLED') AND collection_agreement_status_after IN ('APPROVED', 'SETTLED'))", name="ck_payment_settlements_v5_agreement_statuses"),
+        CheckConstraint("receipt_version != 'v5' OR agreement_installment_paid_amount_after = agreement_installment_paid_amount_before + principal_applied", name="ck_payment_settlements_v5_paid_amount_equation"),
+        CheckConstraint("receipt_version != 'v5' OR agreement_installment_paid_penalty_amount_after = agreement_installment_paid_penalty_amount_before + penalty_applied", name="ck_payment_settlements_v5_paid_penalty_equation"),
         Index("ix_payment_settlements_member_confirmed", "member_id", "confirmed_at"),
         Index("ix_payment_settlements_contribution_id", "contribution_id"),
         Index("ix_payment_settlements_loan_installment_id", "loan_installment_id"),
@@ -529,7 +551,8 @@ class CollectionAgreement(Base):
     snapshot: Mapped[str] = mapped_column(Text())
     requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    __table_args__ = (UniqueConstraint("loan_id", "status", name="uq_agreement_loan_status"), Index("ix_agreements_member_status", "member_id", "status"))
+    state_revision: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    __table_args__ = (UniqueConstraint("loan_id", "status", name="uq_agreement_loan_status"), Index("ix_agreements_member_status", "member_id", "status"), CheckConstraint("state_revision >= 0", name="ck_collection_agreements_state_revision_nonnegative"))
 
 class AgreementInstallment(Base):
     __tablename__ = "agreement_installments"

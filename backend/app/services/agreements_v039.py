@@ -7,6 +7,30 @@ from app.services.loan_engine_v17 import add_months, lock_loan, money, touch_loa
 from app.services.notifications_v12 import create_notification
 
 CENT=Decimal('0.01')
+
+
+def _is_postgresql(db: Session) -> bool:
+    return db.bind is not None and db.bind.dialect.name == 'postgresql'
+
+
+def lock_collection_agreement(db: Session, agreement_or_id: CollectionAgreement | int) -> CollectionAgreement:
+    """Reload/lock an Agreement; SQLite retains logic but not row-lock semantics."""
+    agreement_id = agreement_or_id.id if isinstance(agreement_or_id, CollectionAgreement) else agreement_or_id
+    if isinstance(agreement_or_id, CollectionAgreement) and db.is_modified(agreement_or_id, include_collections=False):
+        raise ValueError('CollectionAgreement deve ser bloqueado antes de qualquer mutação local.')
+    with db.no_autoflush:
+        query = db.query(CollectionAgreement).filter(CollectionAgreement.id == agreement_id)
+        if _is_postgresql(db):
+            query = query.with_for_update().populate_existing()
+        agreement = query.one_or_none()
+    if agreement is None:
+        raise ValueError('Acordo não encontrado.')
+    return agreement
+
+
+def touch_collection_agreement(agreement: CollectionAgreement) -> None:
+    """Increment exactly once; caller must hold a current Agreement lock."""
+    agreement.state_revision = int(agreement.state_revision or 0) + 1
 def _split(total,n):
     base=(total/Decimal(n)).quantize(CENT,rounding=ROUND_HALF_UP); out=[]; acc=Decimal('0')
     for i in range(1,n+1):
