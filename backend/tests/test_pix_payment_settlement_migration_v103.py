@@ -50,7 +50,7 @@ def _payment(db, suffix="1"):
 def test_0079_is_the_only_alembic_head():
     config = Config(str(BACKEND_ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(BACKEND_ROOT / "alembic"))
-    assert tuple(ScriptDirectory.from_config(config).get_heads()) == ("0084_payment_settlement_loan_paid_at_v104",)
+    assert tuple(ScriptDirectory.from_config(config).get_heads()) == ("0085_payment_settlement_installment_state_v105",)
 
 
 def test_migration_is_additive_and_declares_auditable_schema():

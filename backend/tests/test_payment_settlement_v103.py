@@ -182,7 +182,7 @@ def test_full_installment_closes_installment_and_loan():
     assert settlement.interest_applied == Decimal("20.00")
     assert settlement.principal_applied == Decimal("100.00")
     assert settlement.penalty_applied == Decimal("0.00")
-    assert settlement.receipt_version == "v3"
+    assert settlement.receipt_version == "v4"
     assert settlement.loan_status_before == "ACTIVE"
     assert settlement.loan_status_after == "PAID"
     assert settlement.loan_state_revision_before == 0
@@ -217,7 +217,7 @@ def test_partial_installment_applies_penalty_then_interest_then_principal():
     assert settlement.penalty_applied == Decimal("10.00")
     assert settlement.interest_applied == Decimal("20.00")
     assert settlement.principal_applied == Decimal("20.00")
-    assert settlement.receipt_version == "v3"
+    assert settlement.receipt_version == "v4"
     assert settlement.loan_status_before == "ACTIVE"
     assert settlement.loan_status_after == "ACTIVE"
     assert settlement.loan_state_revision_before == 0
@@ -240,7 +240,7 @@ def test_loan_settlement_retry_returns_immutable_v2_evidence_without_new_revisio
     revision = loan.state_revision
     second = _settle(db, payment, remote_payload={"status_detail": "ignored"})
     assert second.id == first.id
-    assert second.receipt_version == "v3"
+    assert second.receipt_version == "v4"
     assert second.receipt_snapshot_json == snapshot
     assert second.receipt_hash == receipt_hash
     assert loan.state_revision == revision == 1

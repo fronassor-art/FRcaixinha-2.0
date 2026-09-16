@@ -19,12 +19,12 @@ def check(db): return next(x for x in build_advanced_reconciliation(db,date.toda
 def test_integral_partial_and_excess():
     db,_,_=make(); assert check(db)['status']=='PASS'; db.close(); db,_,_=make('50'); assert check(db)['status']=='PASS'; db.close(); db,_,_=make('150'); assert check(db)['status']=='PASS'; db.close()
 
-def test_v3_active_to_active_has_null_paid_at_evidence():
+def test_v4_active_to_active_has_literal_installment_evidence():
     db, installment, payment = make('50')
     settlement = db.query(PaymentSettlement).filter_by(payment_id=payment.id).one()
     snapshot = json.loads(settlement.receipt_snapshot_json)
     assert installment.status == 'PARTIAL'
-    assert settlement.receipt_version == 'v3'
+    assert settlement.receipt_version == 'v4'
     assert settlement.loan_status_before == 'ACTIVE'
     assert settlement.loan_status_after == 'ACTIVE'
     assert settlement.loan_state_revision_after == settlement.loan_state_revision_before + 1
@@ -32,6 +32,10 @@ def test_v3_active_to_active_has_null_paid_at_evidence():
     assert settlement.loan_paid_at_after is None
     assert snapshot['loan_state']['paid_at_before'] is None
     assert snapshot['loan_state']['paid_at_after'] is None
+    assert snapshot['loan_installment_state']['status_before'] == 'OPEN'
+    assert snapshot['loan_installment_state']['status_after'] == 'PARTIAL'
+    assert snapshot['loan_installment_state']['paid_at_before'] is None
+    assert snapshot['loan_installment_state']['paid_at_after'] is None
     assert check(db)['status'] == 'PASS'
     db.close()
 
@@ -44,7 +48,7 @@ def test_v3_active_to_active_has_null_paid_at_evidence():
         ('PAID', 'ACTIVE', datetime(2026, 9, 16, tzinfo=timezone.utc), None),
     ],
 )
-def test_v3_paid_at_semantic_mismatches_are_detected_with_valid_hash(
+def test_v4_paid_at_semantic_mismatches_are_detected_with_valid_hash(
     status_before, status_after, paid_before, paid_after,
 ):
     db, _, payment = make('50')

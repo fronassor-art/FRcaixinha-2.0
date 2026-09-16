@@ -61,6 +61,16 @@ def _canonical_json(value: dict[str, Any]) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
+def _utc_iso(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        # SQLite's DateTime implementation may return a naive value after
+        # reload; the project convention treats that stored value as UTC.
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat()
+
+
 def _persist_remote_payload(payment: Payment, remote_payload: dict[str, Any] | None) -> None:
     if not remote_payload:
         return
@@ -254,6 +264,21 @@ def _receipt_snapshot(*, payment: Payment, settlement: PaymentSettlement, ledger
                 if settlement.loan_paid_at_after is not None else None
             ),
         }
+    elif settlement.receipt_version == "v4":
+        snapshot["loan_state"] = {
+            "status_before": settlement.loan_status_before,
+            "status_after": settlement.loan_status_after,
+            "state_revision_before": settlement.loan_state_revision_before,
+            "state_revision_after": settlement.loan_state_revision_after,
+            "paid_at_before": _utc_iso(settlement.loan_paid_at_before),
+            "paid_at_after": _utc_iso(settlement.loan_paid_at_after),
+        }
+        snapshot["loan_installment_state"] = {
+            "status_before": settlement.loan_installment_status_before,
+            "status_after": settlement.loan_installment_status_after,
+            "paid_at_before": _utc_iso(settlement.loan_installment_paid_at_before),
+            "paid_at_after": _utc_iso(settlement.loan_installment_paid_at_after),
+        }
     return snapshot
 
 
@@ -311,6 +336,8 @@ def settle_confirmed_pix_payment(
     loan_status_before = loan_status_after = None
     loan_state_revision_before = loan_state_revision_after = None
     loan_paid_at_before = loan_paid_at_after = None
+    loan_installment_status_before = loan_installment_status_after = None
+    loan_installment_paid_at_before = loan_installment_paid_at_after = None
     if agreement_installment is not None:
         agreement = _locked_collection_agreement(db, agreement_installment.agreement_id)
         if agreement is None:
@@ -380,6 +407,8 @@ def settle_confirmed_pix_payment(
         loan_status_before = loan.status
         loan_state_revision_before = loan.state_revision
         loan_paid_at_before = loan.paid_at
+        loan_installment_status_before = installment.status
+        loan_installment_paid_at_before = installment.paid_at
         before_penalty = _money(installment.paid_penalty_amount)
         before_base = _money(installment.paid_amount)
         before_status = installment_financial_status(installment, effective_at)
@@ -397,8 +426,10 @@ def settle_confirmed_pix_payment(
         loan_status_after = loan.status
         loan_state_revision_after = loan.state_revision
         loan_paid_at_after = loan.paid_at
+        loan_installment_status_after = installment.status
+        loan_installment_paid_at_after = installment.paid_at
         if loan_state_revision_after != loan_state_revision_before + 1:
-            raise ValueError("Revisão do Loan inválida para settlement v2.")
+            raise ValueError("Revisão do Loan inválida para settlement v4.")
         penalty_applied = _money(installment.paid_penalty_amount) - before_penalty
         base_applied = _money(installment.paid_amount) - before_base
         interest_applied = min(base_applied, interest_open)
@@ -413,7 +444,26 @@ def settle_confirmed_pix_payment(
 
     excess = _money(received - applied)
     payment.ledger_posted_at = datetime.now(timezone.utc)
-    settlement_receipt_version = "v3" if obligation_type == "LOAN_INSTALLMENT" else RECEIPT_VERSION
+    settlement_receipt_version = "v4" if obligation_type == "LOAN_INSTALLMENT" else RECEIPT_VERSION
+    if settlement_receipt_version == "v4":
+        if loan_installment_status_before is None or loan_installment_status_after is None:
+            raise ValueError("Settlement v4 exige o status operacional da parcela.")
+        if any(value is None for value in (
+            loan_status_before,
+            loan_status_after,
+            loan_state_revision_before,
+            loan_state_revision_after,
+        )):
+            raise ValueError("Settlement v4 exige evidência completa do Loan.")
+        if loan_state_revision_after != loan_state_revision_before + 1:
+            raise ValueError("Settlement v4 possui revisão do Loan inválida.")
+        if loan_status_before == "PAID" or loan_paid_at_before is not None:
+            raise ValueError("Settlement v4 possui paid_at_before incompatível.")
+        if loan_status_after == "PAID":
+            if loan_paid_at_after is None:
+                raise ValueError("Settlement v4 exige paid_at_after ao fechar o Loan.")
+        elif loan_paid_at_after is not None:
+            raise ValueError("Settlement v4 não pode possuir paid_at_after fora de PAID.")
     receipt_number = f"PIX-{settlement_receipt_version.upper()}-{payment.id:012d}"
     settlement = PaymentSettlement(
         payment_id=payment.id,
@@ -443,6 +493,10 @@ def settle_confirmed_pix_payment(
         loan_state_revision_after=loan_state_revision_after,
         loan_paid_at_before=loan_paid_at_before,
         loan_paid_at_after=loan_paid_at_after,
+        loan_installment_status_before=loan_installment_status_before,
+        loan_installment_status_after=loan_installment_status_after,
+        loan_installment_paid_at_before=loan_installment_paid_at_before,
+        loan_installment_paid_at_after=loan_installment_paid_at_after,
     )
     db.add(settlement)
     db.flush()
