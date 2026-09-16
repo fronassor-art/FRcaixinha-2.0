@@ -69,6 +69,7 @@ def reverse_entry(db, original: LedgerEntry, reason: str):
         "LOAN_INTEREST_PAYMENT",
         "LOAN_PENALTY_PAYMENT",
         "LOAN_INSTALLMENT_PAYMENT",
+        "AGREEMENT_INSTALLMENT_PAYMENT",
     }
     if original.reference_type in payment_component_types and (original.reference_id or "").isdigit():
         settlement = db.query(PaymentSettlement).filter(
