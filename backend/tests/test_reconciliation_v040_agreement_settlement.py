@@ -29,7 +29,7 @@ def agreement(db, *, principal="100.00", penalty="10.00", status="OPEN"):
     loan = Loan(member_id=member.id, principal=Decimal("100.00"), monthly_rate=Decimal("0.10"), installments=1, status="ACTIVE")
     db.add(loan)
     db.flush()
-    collection = CollectionAgreement(loan_id=loan.id, member_id=member.id, requested_by=user.id, status="ACTIVE", installments=1, total_amount=Decimal(principal) + Decimal(penalty), snapshot="{}")
+    collection = CollectionAgreement(loan_id=loan.id, member_id=member.id, requested_by=user.id, status="APPROVED", installments=1, total_amount=Decimal(principal) + Decimal(penalty), snapshot="{}")
     db.add(collection)
     db.flush()
     installment = AgreementInstallment(agreement_id=collection.id, number=1, due_date=date.today() + timedelta(days=10), principal=Decimal(principal), penalty_amount=Decimal(penalty), amount=Decimal(principal) + Decimal(penalty), status=status)

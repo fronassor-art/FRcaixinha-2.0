@@ -1,36 +1,33 @@
-from datetime import datetime, timezone
 from decimal import Decimal
-from app.models import AgreementInstallment, CollectionAgreement, Payment, LedgerEntry
-from app.services.loan_engine_v17 import money
+
+from app.models import AgreementInstallment, LedgerEntry, Payment
+from app.services.payment_settlement import settle_confirmed_pix_payment
 
 def apply_confirmed_agreement_payment(db, payment:Payment, installment:AgreementInstallment):
-    if payment.ledger_posted_at is not None: return False
-    if payment.amount_received is None: return False
-    received = money(payment.amount_received)
-    if received <= 0: return False
-    ref = str(payment.id)
+    """Compatibility facade; the canonical writer is settle_confirmed_pix_payment."""
+    if payment.ledger_posted_at is not None or payment.amount_received is None:
+        return False
+    if payment.reference_type != "AGREEMENT_INSTALLMENT" or installment is None or installment.id is None:
+        raise ValueError("Pagamento e parcela de acordo incompatíveis.")
+    if str(installment.id) != str(payment.reference_id):
+        raise ValueError("Parcela legada diverge da referência do Payment.")
+    # These compatibility false-results are decided before delegation and do
+    # not touch the financial objects. All writer errors must propagate.
+    try:
+        received = Decimal(str(payment.amount_received))
+    except (TypeError, ValueError):
+        received = None
+    if received is not None and received <= 0:
+        return False
     existing_ledger = db.query(LedgerEntry).filter(
-        LedgerEntry.reference_type == 'AGREEMENT_INSTALLMENT_PAYMENT',
-        LedgerEntry.reference_id == ref,
+        LedgerEntry.reference_type == "AGREEMENT_INSTALLMENT_PAYMENT",
+        LedgerEntry.reference_id == str(payment.id),
     ).first()
     if existing_ledger is not None:
-        if payment.ledger_posted_at is None:
-            payment.ledger_posted_at = datetime.now(timezone.utc)
         return False
-    penalty_open=max(Decimal('0'),money(installment.penalty_amount)-money(installment.paid_penalty_amount))
-    principal_open=max(Decimal('0'),money(installment.principal)-money(installment.paid_amount))
-    due=money(penalty_open+principal_open); applied=min(received,due)
-    if applied<=0:
+    remaining = max(Decimal("0"), Decimal(installment.penalty_amount or 0) - Decimal(installment.paid_penalty_amount or 0))
+    remaining += max(Decimal("0"), Decimal(installment.principal or 0) - Decimal(installment.paid_amount or 0))
+    if remaining <= 0:
         return False
-    pen=min(penalty_open,applied); principal=min(principal_open,money(applied-pen))
-    installment.paid_penalty_amount=money(installment.paid_penalty_amount+pen); installment.paid_amount=money(installment.paid_amount+principal)
-    installment.status='PAID' if money((installment.penalty_amount-installment.paid_penalty_amount)+(installment.principal-installment.paid_amount))<=0 else 'PARTIAL'
-    if installment.status=='PAID': installment.paid_at=datetime.now(timezone.utc)
-    if not db.query(LedgerEntry).filter(LedgerEntry.reference_type=='AGREEMENT_INSTALLMENT_PAYMENT',LedgerEntry.reference_id==ref).first():
-        db.add(LedgerEntry(account='CAIXINHA',direction='CREDIT',amount=applied,reference_type='AGREEMENT_INSTALLMENT_PAYMENT',reference_id=ref))
-    payment.ledger_posted_at=datetime.now(timezone.utc)
-    ag=db.get(CollectionAgreement,installment.agreement_id)
-    if ag:
-        items=db.query(AgreementInstallment).filter(AgreementInstallment.agreement_id==ag.id).all()
-        if items and all(i.status=='PAID' for i in items): ag.status='SETTLED'
+    settle_confirmed_pix_payment(db, payment, confirmation_source="LEGACY_COMPAT")
     return True

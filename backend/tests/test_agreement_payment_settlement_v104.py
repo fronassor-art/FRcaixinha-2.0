@@ -1,7 +1,7 @@
 import asyncio
 import hashlib
 import json
-from datetime import date
+from datetime import date, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -117,12 +117,13 @@ def test_full_agreement_payment_without_penalty_creates_settlement_and_ledger():
     assert settlement.excess_amount == Decimal("0.00")
     assert settlement.obligation_status_before == "OPEN"
     assert settlement.obligation_status_after == "PAID"
-    assert settlement.receipt_version == "v1"
+    assert settlement.receipt_version == "v5"
     assert settlement.loan_status_before is None
     assert settlement.loan_status_after is None
     assert settlement.loan_state_revision_before is None
     assert settlement.loan_state_revision_after is None
-    assert "loan_state" not in json.loads(settlement.receipt_snapshot_json)
+    assert json.loads(settlement.receipt_snapshot_json)["agreement_installment_state"]["status_before"] == "OPEN"
+    assert json.loads(settlement.receipt_snapshot_json)["agreement_installment_state"]["status_after"] == "PAID"
     assert rows[0].status == "PAID"
     assert rows[0].paid_at is not None
     assert agreement.status == "SETTLED"
@@ -254,6 +255,95 @@ def test_same_payment_is_idempotent_for_obligation_ledger_settlement_and_receipt
     assert (second.id, second.receipt_snapshot_json, second.receipt_hash, rows[0].paid_amount, rows[0].paid_penalty_amount) == original
     assert db.query(PaymentSettlement).filter_by(payment_id=payment.id).count() == 1
     assert db.query(LedgerEntry).count() == ledger_count
+
+
+@pytest.mark.parametrize(
+    ("paid", "received", "before", "after", "expected_paid", "expected_revision"),
+    [
+        ("0.00", "25.00", "OPEN", "PARTIAL", "25.00", 1),
+        ("0.00", "100.00", "OPEN", "PAID", "100.00", 1),
+        ("25.00", "25.00", "PARTIAL", "PARTIAL", "50.00", 1),
+        ("75.00", "25.00", "PARTIAL", "PAID", "100.00", 1),
+    ],
+)
+def test_v5_captures_literal_installment_and_agreement_before_after(
+    paid, received, before, after, expected_paid, expected_revision
+):
+    db = _db()
+    _, agreement, rows = _agreement(db, principal="100.00", paid=paid, status=before)
+    payment = _payment(db, None, rows[0], amount=received, suffix=f"v5-{before}-{after}")
+    settlement = _settle(db, payment)
+
+    assert settlement.receipt_version == "v5"
+    assert settlement.agreement_installment_status_before == before
+    assert settlement.agreement_installment_status_after == after
+    assert settlement.agreement_installment_paid_at_before is None
+    assert settlement.agreement_installment_paid_amount_before == Decimal(paid)
+    assert settlement.agreement_installment_paid_amount_after == Decimal(expected_paid)
+    assert settlement.agreement_installment_paid_penalty_amount_before == Decimal("0.00")
+    assert settlement.agreement_installment_paid_penalty_amount_after == Decimal("0.00")
+    assert settlement.collection_agreement_status_before == "APPROVED"
+    assert settlement.collection_agreement_status_after == ("SETTLED" if after == "PAID" else "APPROVED")
+    assert settlement.collection_agreement_state_revision_before == 0
+    assert settlement.collection_agreement_state_revision_after == expected_revision
+    if after == "PAID":
+        assert settlement.agreement_installment_paid_at_after is not None
+        paid_at_after = settlement.agreement_installment_paid_at_after
+        # SQLite reloads timezone-aware values as naive; the project convention
+        # treats those values as UTC. PostgreSQL preserves the timezone.
+        assert paid_at_after.tzinfo is None or paid_at_after.utcoffset().total_seconds() == 0
+    else:
+        assert settlement.agreement_installment_paid_at_after is None
+
+    snapshot = json.loads(settlement.receipt_snapshot_json)
+    assert snapshot["agreement_installment_state"] == {
+        "status_before": before,
+        "status_after": after,
+        "paid_at_before": None,
+        "paid_at_after": settlement.agreement_installment_paid_at_after.replace(tzinfo=timezone.utc).isoformat()
+        if settlement.agreement_installment_paid_at_after is not None else None,
+        "paid_amount_before": f"{Decimal(paid):.2f}",
+        "paid_amount_after": f"{Decimal(expected_paid):.2f}",
+        "paid_penalty_amount_before": "0.00",
+        "paid_penalty_amount_after": "0.00",
+    }
+    assert snapshot["collection_agreement_state"] == {
+        "status_before": "APPROVED",
+        "status_after": "SETTLED" if after == "PAID" else "APPROVED",
+        "state_revision_before": 0,
+        "state_revision_after": expected_revision,
+    }
+    assert hashlib.sha256(settlement.receipt_snapshot_json.encode()).hexdigest() == settlement.receipt_hash
+    assert agreement.state_revision == expected_revision
+
+
+def test_v5_real_second_payment_advances_revision_without_status_change():
+    db = _db()
+    _, agreement, rows = _agreement(db, principal="100.00")
+    first = _settle(db, _payment(db, None, rows[0], amount="25.00", suffix="v5-first"))
+    second = _settle(db, _payment(db, None, rows[0], amount="25.00", suffix="v5-second"))
+
+    assert first.collection_agreement_state_revision_before == 0
+    assert first.collection_agreement_state_revision_after == 1
+    assert second.collection_agreement_state_revision_before == 1
+    assert second.collection_agreement_state_revision_after == 2
+    assert first.collection_agreement_status_after == second.collection_agreement_status_after == "APPROVED"
+    assert agreement.state_revision == 2
+
+
+def test_fully_excess_agreement_payment_is_rejected_without_settlement_or_revision():
+    db = _db()
+    _, agreement, rows = _agreement(db, principal="100.00", paid="100.00", status="PAID")
+    payment = _payment(db, None, rows[0], amount="10.00", suffix="v5-fully-excess")
+    before = (rows[0].paid_amount, rows[0].paid_penalty_amount, rows[0].status, agreement.status, agreement.state_revision)
+
+    with pytest.raises(ValueError, match="saldo aplicável"):
+        settle_confirmed_pix_payment(db, payment, confirmation_source="TEST")
+    db.rollback()
+
+    assert (rows[0].paid_amount, rows[0].paid_penalty_amount, rows[0].status, agreement.status, agreement.state_revision) == before
+    assert db.query(PaymentSettlement).filter_by(payment_id=payment.id).count() == 0
+    assert db.query(LedgerEntry).filter_by(reference_id=str(payment.id)).count() == 0
 
 
 def test_legacy_agreement_with_ledger_is_not_backfilled_or_reapplied():

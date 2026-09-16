@@ -14,6 +14,7 @@ from app.services.ledger import post_contribution_payment, post_entry
 from app.services.loan_engine_v17 import lock_loan
 from app.services.loan_payments_v17 import apply_confirmed_payment
 from app.services.member_financial import lock_member_financial_account
+from app.services.agreements_v039 import lock_collection_agreement, touch_collection_agreement
 
 
 CENT = Decimal("0.01")
@@ -157,17 +158,18 @@ def _locked_installment(db: Session, payment: Payment, *, lock: bool = True, ref
 def _locked_agreement_installment(db: Session, payment: Payment) -> AgreementInstallment | None:
     if (payment.reference_type or "").upper() != "AGREEMENT_INSTALLMENT" or not (payment.reference_id or "").isdigit():
         return None
-    query = db.query(AgreementInstallment).filter(AgreementInstallment.id == int(payment.reference_id))
-    if _is_postgresql(db):
-        query = query.with_for_update()
-    return query.one_or_none()
+    with db.no_autoflush:
+        query = db.query(AgreementInstallment).filter(AgreementInstallment.id == int(payment.reference_id))
+        if _is_postgresql(db):
+            query = query.with_for_update().populate_existing()
+        return query.one_or_none()
 
 
 def _locked_collection_agreement(db: Session, agreement_id: int) -> CollectionAgreement | None:
-    query = db.query(CollectionAgreement).filter(CollectionAgreement.id == agreement_id)
-    if _is_postgresql(db):
-        query = query.with_for_update()
-    return query.one_or_none()
+    try:
+        return lock_collection_agreement(db, agreement_id)
+    except ValueError:
+        return None
 
 
 def _lock_payment_settlement(db: Session, payment_id: int) -> PaymentSettlement | None:
@@ -279,6 +281,23 @@ def _receipt_snapshot(*, payment: Payment, settlement: PaymentSettlement, ledger
             "paid_at_before": _utc_iso(settlement.loan_installment_paid_at_before),
             "paid_at_after": _utc_iso(settlement.loan_installment_paid_at_after),
         }
+    elif settlement.receipt_version == "v5":
+        snapshot["agreement_installment_state"] = {
+            "status_before": settlement.agreement_installment_status_before,
+            "status_after": settlement.agreement_installment_status_after,
+            "paid_at_before": _utc_iso(settlement.agreement_installment_paid_at_before),
+            "paid_at_after": _utc_iso(settlement.agreement_installment_paid_at_after),
+            "paid_amount_before": format(_money(settlement.agreement_installment_paid_amount_before), "f"),
+            "paid_amount_after": format(_money(settlement.agreement_installment_paid_amount_after), "f"),
+            "paid_penalty_amount_before": format(_money(settlement.agreement_installment_paid_penalty_amount_before), "f"),
+            "paid_penalty_amount_after": format(_money(settlement.agreement_installment_paid_penalty_amount_after), "f"),
+        }
+        snapshot["collection_agreement_state"] = {
+            "status_before": settlement.collection_agreement_status_before,
+            "status_after": settlement.collection_agreement_status_after,
+            "state_revision_before": settlement.collection_agreement_state_revision_before,
+            "state_revision_after": settlement.collection_agreement_state_revision_after,
+        }
     return snapshot
 
 
@@ -315,20 +334,26 @@ def settle_confirmed_pix_payment(
     received = _money(payment.amount_received if payment.amount_received is not None else payment.amount)
     if received < ZERO:
         raise ValueError("Valor confirmado não pode ser negativo.")
-    payment.amount_received = received
-    if payment.confirmed_at is None:
-        payment.confirmed_at = effective_at
-    _persist_remote_payload(payment, remote_payload)
 
     contribution = _locked_contribution(db, payment)
     installment = _locked_installment(db, payment, lock=False)
     agreement_installment = None
+    agreement = None
     if reference_type == "AGREEMENT_INSTALLMENT":
         if payment.status != "approved":
             raise ValueError("Pagamento de acordo precisa estar aprovado.")
+        if not (payment.reference_id or "").isdigit():
+            raise ValueError("Referência de parcela de acordo inválida.")
+        # Read only to discover the parent; actual locks follow Agreement -> Installment.
+        with db.no_autoflush:
+            locator = db.query(AgreementInstallment).filter(AgreementInstallment.id == int(payment.reference_id)).one_or_none()
+        if locator is not None:
+            agreement = lock_collection_agreement(db, locator.agreement_id)
         agreement_installment = _locked_agreement_installment(db, payment)
         if agreement_installment is None:
             raise ValueError("Referência de parcela de acordo inválida.")
+        if agreement is None:
+            raise ValueError("Acordo da parcela não encontrado.")
     elif (contribution is None) == (installment is None):
         raise ValueError("Pagamento deve referenciar exatamente uma contribuição ou parcela de empréstimo.")
 
@@ -338,13 +363,22 @@ def settle_confirmed_pix_payment(
     loan_paid_at_before = loan_paid_at_after = None
     loan_installment_status_before = loan_installment_status_after = None
     loan_installment_paid_at_before = loan_installment_paid_at_after = None
+    agreement_installment_status_before = agreement_installment_status_after = None
+    agreement_installment_paid_at_before = agreement_installment_paid_at_after = None
+    agreement_installment_paid_amount_before = agreement_installment_paid_amount_after = None
+    agreement_installment_paid_penalty_amount_before = agreement_installment_paid_penalty_amount_after = None
+    collection_agreement_status_before = collection_agreement_status_after = None
+    collection_agreement_state_revision_before = collection_agreement_state_revision_after = None
     if agreement_installment is not None:
-        agreement = _locked_collection_agreement(db, agreement_installment.agreement_id)
-        if agreement is None:
-            raise ValueError("Acordo da parcela não encontrado.")
         member = db.get(Member, agreement.member_id)
         if member is None:
             raise ValueError("Participante do acordo não encontrado.")
+        agreement_installment_status_before = agreement_installment.status
+        agreement_installment_paid_at_before = agreement_installment.paid_at
+        agreement_installment_paid_amount_before = _money(agreement_installment.paid_amount)
+        agreement_installment_paid_penalty_amount_before = _money(agreement_installment.paid_penalty_amount)
+        collection_agreement_status_before = agreement.status
+        collection_agreement_state_revision_before = int(agreement.state_revision or 0)
         before_status = agreement_installment.status
         before_penalty = _money(agreement_installment.paid_penalty_amount)
         before_principal = _money(agreement_installment.paid_amount)
@@ -368,6 +402,13 @@ def settle_confirmed_pix_payment(
         items = db.query(AgreementInstallment).filter(AgreementInstallment.agreement_id == agreement.id).all()
         if items and all(item.status == "PAID" for item in items):
             agreement.status = "SETTLED"
+        touch_collection_agreement(agreement)
+        agreement_installment_status_after = agreement_installment.status
+        agreement_installment_paid_at_after = agreement_installment.paid_at
+        agreement_installment_paid_amount_after = _money(agreement_installment.paid_amount)
+        agreement_installment_paid_penalty_amount_after = _money(agreement_installment.paid_penalty_amount)
+        collection_agreement_status_after = agreement.status
+        collection_agreement_state_revision_after = agreement.state_revision
         obligation_type = "AGREEMENT_INSTALLMENT"
         member_id = member.id
         contribution_id = None
@@ -442,9 +483,19 @@ def settle_confirmed_pix_payment(
         loan_installment_id = installment.id
         agreement_installment_id = None
 
+    # Persist provider confirmation only after the obligation has accepted a
+    # positive application; fully-excess Agreement payments remain untouched.
+    payment.amount_received = received
+    if payment.confirmed_at is None:
+        payment.confirmed_at = effective_at
+    _persist_remote_payload(payment, remote_payload)
     excess = _money(received - applied)
     payment.ledger_posted_at = datetime.now(timezone.utc)
-    settlement_receipt_version = "v4" if obligation_type == "LOAN_INSTALLMENT" else RECEIPT_VERSION
+    settlement_receipt_version = (
+        "v4" if obligation_type == "LOAN_INSTALLMENT"
+        else "v5" if obligation_type == "AGREEMENT_INSTALLMENT"
+        else RECEIPT_VERSION
+    )
     if settlement_receipt_version == "v4":
         if loan_installment_status_before is None or loan_installment_status_after is None:
             raise ValueError("Settlement v4 exige o status operacional da parcela.")
@@ -464,6 +515,22 @@ def settle_confirmed_pix_payment(
                 raise ValueError("Settlement v4 exige paid_at_after ao fechar o Loan.")
         elif loan_paid_at_after is not None:
             raise ValueError("Settlement v4 não pode possuir paid_at_after fora de PAID.")
+    if settlement_receipt_version == "v5":
+        required = (
+            agreement_installment_status_before, agreement_installment_status_after,
+            agreement_installment_paid_amount_before, agreement_installment_paid_amount_after,
+            agreement_installment_paid_penalty_amount_before, agreement_installment_paid_penalty_amount_after,
+            collection_agreement_status_before, collection_agreement_status_after,
+            collection_agreement_state_revision_before, collection_agreement_state_revision_after,
+        )
+        if any(value is None for value in required):
+            raise ValueError("Settlement v5 exige evidência completa do Agreement.")
+        if collection_agreement_state_revision_after != collection_agreement_state_revision_before + 1:
+            raise ValueError("Settlement v5 possui revisão do Agreement inválida.")
+        if agreement_installment_paid_amount_after != agreement_installment_paid_amount_before + principal_applied:
+            raise ValueError("Settlement v5 possui equação de paid_amount inválida.")
+        if agreement_installment_paid_penalty_amount_after != agreement_installment_paid_penalty_amount_before + penalty_applied:
+            raise ValueError("Settlement v5 possui equação de paid_penalty_amount inválida.")
     receipt_number = f"PIX-{settlement_receipt_version.upper()}-{payment.id:012d}"
     settlement = PaymentSettlement(
         payment_id=payment.id,
@@ -497,6 +564,18 @@ def settle_confirmed_pix_payment(
         loan_installment_status_after=loan_installment_status_after,
         loan_installment_paid_at_before=loan_installment_paid_at_before,
         loan_installment_paid_at_after=loan_installment_paid_at_after,
+        agreement_installment_status_before=agreement_installment_status_before,
+        agreement_installment_status_after=agreement_installment_status_after,
+        agreement_installment_paid_at_before=agreement_installment_paid_at_before,
+        agreement_installment_paid_at_after=agreement_installment_paid_at_after,
+        agreement_installment_paid_amount_before=agreement_installment_paid_amount_before,
+        agreement_installment_paid_amount_after=agreement_installment_paid_amount_after,
+        agreement_installment_paid_penalty_amount_before=agreement_installment_paid_penalty_amount_before,
+        agreement_installment_paid_penalty_amount_after=agreement_installment_paid_penalty_amount_after,
+        collection_agreement_status_before=collection_agreement_status_before,
+        collection_agreement_status_after=collection_agreement_status_after,
+        collection_agreement_state_revision_before=collection_agreement_state_revision_before,
+        collection_agreement_state_revision_after=collection_agreement_state_revision_after,
     )
     db.add(settlement)
     db.flush()

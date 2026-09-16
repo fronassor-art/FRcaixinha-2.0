@@ -1,6 +1,7 @@
 from datetime import date
 from decimal import Decimal
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -13,10 +14,12 @@ from app.models import (
     LedgerEntry,
     Loan,
     Member,
+    PaymentSettlement,
     Payment,
     User,
 )
 from app.services.agreement_payments_v039 import apply_confirmed_agreement_payment
+from app.services import agreement_payments_v039
 
 
 def make_db():
@@ -206,10 +209,65 @@ def test_existing_ledger_with_unset_posted_at_does_not_reapply_installment():
     assert (installment.paid_amount, installment.paid_penalty_amount, installment.status) == before
     assert len(ledger_rows(db, payment)) == before_count == 1
     assert existing.amount == before_amount == Decimal("40.00")
-    assert payment.ledger_posted_at is not None
+    assert payment.ledger_posted_at is None
 
     assert apply_confirmed_agreement_payment(db, payment, installment) is False
     db.commit()
     assert (installment.paid_amount, installment.paid_penalty_amount, installment.status) == before
     assert len(ledger_rows(db, payment)) == 1
+    db.close()
+
+
+def test_legacy_facade_propagates_late_writer_error_and_rollback_restores_state(monkeypatch):
+    db = make_db()
+    payment, installment = make_payment(db, amount="100.00", received="40.00", penalty="10.00")
+    agreement = db.get(CollectionAgreement, installment.agreement_id)
+    db.commit()
+    before = (installment.paid_amount, installment.paid_penalty_amount, installment.status, agreement.status, agreement.state_revision)
+
+    def late_failure(session, row, **kwargs):
+        installment.paid_amount = Decimal("40.00")
+        installment.status = "PARTIAL"
+        agreement.state_revision = 1
+        session.add(LedgerEntry(account="CAIXINHA", direction="CREDIT", amount=Decimal("40.00"), reference_type="AGREEMENT_INSTALLMENT_PAYMENT", reference_id=str(row.id)))
+        raise ValueError("falha tardia controlada")
+
+    monkeypatch.setattr(agreement_payments_v039, "settle_confirmed_pix_payment", late_failure)
+    with pytest.raises(ValueError, match="falha tardia"):
+        apply_confirmed_agreement_payment(db, payment, installment)
+    db.rollback()
+
+    assert (installment.paid_amount, installment.paid_penalty_amount, installment.status, agreement.status, agreement.state_revision) == before
+    assert db.query(PaymentSettlement).filter_by(payment_id=payment.id).count() == 0
+    assert db.query(LedgerEntry).filter_by(reference_id=str(payment.id)).count() == 0
+    db.close()
+
+
+def test_legacy_facade_rejects_installment_mismatch_before_delegation(monkeypatch):
+    db = make_db()
+    payment, installment = make_payment(db, amount="100.00", received="40.00")
+    other = AgreementInstallment(
+        agreement_id=installment.agreement_id,
+        number=2,
+        due_date=date(2026, 2, 10),
+        principal=Decimal("10.00"),
+        amount=Decimal("10.00"),
+        status="OPEN",
+    )
+    db.add(other)
+    db.flush()
+    called = False
+
+    def unexpected(*args, **kwargs):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(agreement_payments_v039, "settle_confirmed_pix_payment", unexpected)
+    with pytest.raises(ValueError, match="diverge"):
+        apply_confirmed_agreement_payment(db, payment, other)
+    assert called is False
+    assert installment.paid_amount == Decimal("0.00")
+    assert db.query(PaymentSettlement).count() == 0
+    assert db.query(LedgerEntry).count() == 0
+    db.rollback()
     db.close()
