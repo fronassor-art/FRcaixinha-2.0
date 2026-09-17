@@ -798,7 +798,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Parcela de acordo'), findsOneWidget);
-    expect(find.text('Empréstimo #9 • Parcela 1'), findsOneWidget);
+    expect(find.text('Acordo do empréstimo #9 • Parcela 1'), findsOneWidget);
     expect(find.text('Principal pendente: R\$ 60.00'), findsOneWidget);
     expect(find.text('Multa pendente: R\$ 7.00'), findsOneWidget);
     expect(find.text('Contribuição'), findsNothing);
