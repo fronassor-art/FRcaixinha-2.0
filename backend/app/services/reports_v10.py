@@ -3,9 +3,10 @@ from decimal import Decimal, ROUND_HALF_UP
 from calendar import monthrange
 from sqlalchemy import func
 from sqlalchemy.orm import Session
-from app.models import User, Member, Contribution, Loan, LoanInstallment, LedgerEntry, Expense, Payment, PaymentSettlement, MemberFinancialAccount, MemberFinancialEntry, CollectionAgreement, AgreementInstallment
+from app.models import User, Member, Contribution, Loan, LoanInstallment, LedgerEntry, Expense, Payment, PaymentSettlement, PaymentReversal, PaymentReversalComponent, MemberFinancialAccount, MemberFinancialEntry, CollectionAgreement, AgreementInstallment
 from app.services.loan_engine_v17 import installment_due
 from app.services.payment_settlement import contribution_financial_status, installment_financial_status
+from app.services.payment_reversal_evidence import validate_reversal_effect
 ZERO=Decimal('0.00'); CENT=Decimal('0.01')
 def money(v): return str(Decimal(v or 0).quantize(CENT,rounding=ROUND_HALF_UP))
 def month_bounds(c): return c.replace(day=1),c.replace(day=monthrange(c.year,c.month)[1])
@@ -50,12 +51,34 @@ def _reversal_direction(original_movement_type):
 def _movement(movement_id,movement_type,direction,occurred_at,description,total,competence=None,loan_id=None,installment_number=None,principal=None,interest=None,penalty=None,payment_id=None,receipt_available=False):
  return {'id':movement_id,'type':movement_type,'direction':direction,'occurred_at':occurred_at.astimezone(timezone.utc).isoformat() if occurred_at is not None else None,'description':description,'total':money(total),'competence':competence.isoformat() if competence is not None else None,'loan_id':loan_id,'installment_number':installment_number,'principal':money(principal) if principal is not None else None,'interest':money(interest) if interest is not None else None,'penalty':money(penalty) if penalty is not None else None,'payment_id':payment_id,'receipt_available':receipt_available}
 
+def _valid_payment_reversal_index(db, member_id):
+ """Index only complete A1/A2/A3 reversals for statement projection.
+
+ The statement is allowed to show immutable ledger evidence, but only a
+ reversal accepted by the shared H1 validator has economic effect here.
+ """
+ reversals=db.query(PaymentReversal).join(
+  PaymentSettlement,PaymentSettlement.id==PaymentReversal.settlement_id
+ ).filter(PaymentSettlement.member_id==member_id).order_by(PaymentReversal.id).all()
+ valid_by_payment={}; valid_by_compensating={}
+ for reversal in reversals:
+  ok,_=validate_reversal_effect(db,reversal)
+  if not ok:continue
+  valid_by_payment[reversal.payment_id]=reversal
+  components=db.query(PaymentReversalComponent).filter(
+   PaymentReversalComponent.payment_reversal_id==reversal.id
+  ).all()
+  for component in components:
+   valid_by_compensating[component.compensating_ledger_entry_id]=reversal
+ return valid_by_payment,valid_by_compensating
+
 def _statement_movements(db, member_id, contributions, loans, installments):
  """Project only posted movements; settlements are metadata and never monetary input."""
  contribution_by_id={row.id:row for row in contributions}
  legacy_contribution_by_payment={row.payment_id:row for row in contributions if row.payment_id is not None}
  loan_by_id={row.id:row for row in loans}; installment_by_id={row.id:row for row in installments}
  settlements={row.payment_id:row for row in db.query(PaymentSettlement).filter(PaymentSettlement.member_id==member_id).all()}
+ valid_reversals,valid_compensations=_valid_payment_reversal_index(db,member_id)
  movements=[]
  # One posted contribution ledger reference equals one confirmed payment.
  contribution_rows={}
@@ -114,33 +137,60 @@ def _statement_movements(db, member_id, contributions, loans, installments):
   agreement_rows.setdefault(payment_id,{'payment':payment,'installment':installment,'agreement':agreement,'entries':[]})['entries'].append(entry)
  for payment_id,row in agreement_rows.items():
   entries=row['entries']; installment=row['installment']; agreement=row['agreement']
-  movements.append(_movement(f'payment:{payment_id}','AGREEMENT_INSTALLMENT_PAYMENT',_member_direction('AGREEMENT_INSTALLMENT_PAYMENT'),_effective_at(row['payment'],None,[entry.created_at for entry in entries]),f'Pagamento da parcela {installment.number} do acordo #{agreement.id}',sum((Decimal(entry.amount) for entry in entries),ZERO),loan_id=agreement.loan_id,installment_number=installment.number,payment_id=payment_id))
- # A reversal is another immutable ledger movement. Include it only when the
- # reversed entry has one of the canonical member links already resolved above.
+  movements.append(_movement(f'payment:{payment_id}','AGREEMENT_INSTALLMENT_PAYMENT',_member_direction('AGREEMENT_INSTALLMENT_PAYMENT'),_effective_at(row['payment'],None,[entry.created_at for entry in entries]),f'Pagamento da parcela {installment.number} do acordo #{agreement.id}',sum((Decimal(entry.amount) for entry in entries),ZERO),loan_id=agreement.loan_id,installment_number=installment.number,payment_id=payment_id,receipt_available=settlements.get(payment_id) is not None))
+ # A reversal is another immutable ledger movement. Payment-linked entries
+ # receive economic effect only when the shared H1 evidence validator accepts
+ # the complete PaymentReversal chain.
  for entry in db.query(LedgerEntry).filter(LedgerEntry.reference_type=='REVERSAL'):
   original=db.get(LedgerEntry,entry.reversal_of_id or _int_or_none(entry.reference_id))
   if original is None:continue
-  payment_id=_int_or_none(original.reference_id)
-  payment=db.get(Payment,payment_id) if payment_id is not None else None
   if original.reference_type=='LOAN_DISBURSEMENT' and loan_by_id.get(_int_or_none(original.reference_id)) is not None:
    loan=loan_by_id[_int_or_none(original.reference_id)]
    movements.append(_movement(f'ledger:{entry.id}','REVERSAL',_reversal_direction('LOAN_DISBURSEMENT'),entry.created_at,f'Reversão da liberação do empréstimo #{loan.id}',entry.amount,loan_id=loan.id))
-  elif payment is not None and (payment.reference_type or '').upper()=='CONTRIBUTION':
+   continue
+  reversal=valid_compensations.get(entry.id)
+  if reversal is None:continue
+  payment_id=_int_or_none(original.reference_id)
+  payment=db.get(Payment,payment_id) if payment_id is not None else None
+  if payment is None or reversal.payment_id!=payment.id:continue
+  occurred_at=reversal.reversed_at or entry.created_at
+  if original.reference_type=='CONTRIBUTION_PAYMENT':
    contribution=contribution_by_id.get(_int_or_none(payment.reference_id)) or legacy_contribution_by_payment.get(payment.id)
-   if contribution is not None:movements.append(_movement(f'ledger:{entry.id}','REVERSAL',_reversal_direction('CONTRIBUTION_PAYMENT'),entry.created_at,'Reversão de pagamento de contribuição',entry.amount,competence=contribution.competence,payment_id=payment.id,receipt_available=payment.id in settlements))
-  elif payment is not None and (payment.reference_type or '').upper()=='LOAN_INSTALLMENT':
+   if contribution is not None:
+    movements.append(_movement(f'ledger:{entry.id}','REVERSAL','CREDIT',occurred_at,'Reversão de pagamento de contribuição',entry.amount,competence=reversal.reversal_competence,payment_id=payment.id,receipt_available=True))
+  elif original.reference_type in {'LOAN_INTEREST_PAYMENT','LOAN_PENALTY_PAYMENT'}:
    installment=installment_by_id.get(_int_or_none(payment.reference_id))
-   if installment is not None:movements.append(_movement(f'ledger:{entry.id}','REVERSAL',_reversal_direction('LOAN_INSTALLMENT_PAYMENT'),entry.created_at,f'Reversão de pagamento da parcela {installment.number} do empréstimo #{installment.loan_id}',entry.amount,loan_id=installment.loan_id,installment_number=installment.number,payment_id=payment.id,receipt_available=payment.id in settlements))
-  elif payment is not None and (payment.reference_type or '').upper()=='AGREEMENT_INSTALLMENT':
+   if installment is not None:
+    movements.append(_movement(f'ledger:{entry.id}','REVERSAL','CREDIT',occurred_at,f'Reversão de pagamento da parcela {installment.number} do empréstimo #{installment.loan_id}',entry.amount,loan_id=installment.loan_id,installment_number=installment.number,interest=entry.amount if original.reference_type=='LOAN_INTEREST_PAYMENT' else None,penalty=entry.amount if original.reference_type=='LOAN_PENALTY_PAYMENT' else None,payment_id=payment.id,receipt_available=True))
+  elif original.reference_type=='AGREEMENT_INSTALLMENT_PAYMENT':
    installment=db.get(AgreementInstallment,_int_or_none(payment.reference_id)); agreement=db.get(CollectionAgreement,installment.agreement_id) if installment is not None else None
-   if agreement is not None and agreement.member_id==member_id:movements.append(_movement(f'ledger:{entry.id}','REVERSAL',_reversal_direction('AGREEMENT_INSTALLMENT_PAYMENT'),entry.created_at,f'Reversão de pagamento da parcela {installment.number} do acordo #{agreement.id}',entry.amount,loan_id=agreement.loan_id,installment_number=installment.number,payment_id=payment.id))
+   if agreement is not None and agreement.member_id==member_id:
+    movements.append(_movement(f'ledger:{entry.id}','REVERSAL','CREDIT',occurred_at,f'Reversão de pagamento da parcela {installment.number} do acordo #{agreement.id}',entry.amount,loan_id=agreement.loan_id,installment_number=installment.number,payment_id=payment.id,receipt_available=True))
+ # Loan principal is a MemberFinancialEntry, not a LedgerEntry. Project its
+ # compensating event separately, but only for the already validated A2.
+ for reversal in valid_reversals.values():
+  settlement=settlements.get(reversal.payment_id)
+  if settlement is None or settlement.obligation_type!='LOAN_INSTALLMENT' or Decimal(reversal.principal_applied or 0)<=ZERO:continue
+  rows=db.query(MemberFinancialEntry).join(
+   MemberFinancialAccount,MemberFinancialEntry.account_id==MemberFinancialAccount.id
+  ).filter(
+   MemberFinancialAccount.member_id==member_id,
+   MemberFinancialEntry.payment_reversal_id==reversal.id,
+   MemberFinancialEntry.entry_type=='LOAN_PRINCIPAL_REVERSAL',
+   MemberFinancialEntry.direction=='DEBIT',
+  ).all()
+  for row in rows:
+   installment=installment_by_id.get(_int_or_none(db.get(Payment,reversal.payment_id).reference_id))
+   if installment is None:continue
+   movements.append(_movement(f'mfe:{row.id}','REVERSAL','CREDIT',reversal.reversed_at,'Reversão de principal da parcela %s do empréstimo #%s'%(installment.number,installment.loan_id),row.amount,loan_id=installment.loan_id,installment_number=installment.number,principal=row.amount,payment_id=reversal.payment_id,receipt_available=True))
  return sorted(movements,key=lambda item:(item['occurred_at'] or '',item['id']),reverse=True)
 
 def member_statement(db, member_id):
- result=_legacy_member_statement(db,member_id)
- if result is None:return None
- contributions=db.query(Contribution).filter(Contribution.member_id==member_id).all()
- loans=db.query(Loan).filter(Loan.member_id==member_id).all(); loan_ids=[loan.id for loan in loans]
- installments=db.query(LoanInstallment).filter(LoanInstallment.loan_id.in_(loan_ids)).all() if loan_ids else []
- result['movements']=_statement_movements(db,member_id,contributions,loans,installments)
- return result
+ with db.no_autoflush:
+  result=_legacy_member_statement(db,member_id)
+  if result is None:return None
+  contributions=db.query(Contribution).filter(Contribution.member_id==member_id).all()
+  loans=db.query(Loan).filter(Loan.member_id==member_id).all(); loan_ids=[loan.id for loan in loans]
+  installments=db.query(LoanInstallment).filter(LoanInstallment.loan_id.in_(loan_ids)).all() if loan_ids else []
+  result['movements']=_statement_movements(db,member_id,contributions,loans,installments)
+  return result

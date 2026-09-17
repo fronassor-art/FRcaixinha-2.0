@@ -228,7 +228,7 @@ def test_unconfirmed_payment_never_appears_as_a_movement():
     assert member_statement(db, member.id)["movements"] == []
 
 
-def test_reversal_of_member_contribution_ledger_entry_is_a_separate_movement():
+def test_generic_reversal_of_member_contribution_ledger_entry_is_not_payment_compensation():
     db = make_db()
     member = make_member(db)
     contribution = Contribution(member_id=member.id, competence=date(2026, 8, 1), amount=Decimal("50.00"))
@@ -243,8 +243,8 @@ def test_reversal_of_member_contribution_ledger_entry_is_a_separate_movement():
     rows = [row for row in member_statement(db, member.id)["movements"] if row["payment_id"] == payment.id]
 
     assert settlement is not None
-    assert [row["type"] for row in rows] == ["REVERSAL", "CONTRIBUTION_PAYMENT"]
-    assert rows[0]["direction"] == "CREDIT"
+    assert [row["type"] for row in rows] == ["CONTRIBUTION_PAYMENT"]
+    assert rows[0]["direction"] == "DEBIT"
     assert rows[0]["total"] == "50.00"
 
 
