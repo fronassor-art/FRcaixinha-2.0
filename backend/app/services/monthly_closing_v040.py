@@ -5,6 +5,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from sqlalchemy.orm import Session
 from app.models import MonthlyClosing
 from app.services.reconciliation_v040 import build_advanced_reconciliation, dt_start, dt_end
+from app.services.monthly_closing_guard import ensure_monthly_closing_open
 
 CENT=Decimal("0.01")
 def money(v): return str(Decimal(v or 0).quantize(CENT, rounding=ROUND_HALF_UP))
@@ -18,7 +19,7 @@ def snapshot_digest(value):
 def close_month_v040(db: Session, competence: date, admin_id: int):
     competence=competence.replace(day=1)
     existing=db.query(MonthlyClosing).filter(MonthlyClosing.competence==competence).with_for_update().first()
-    if existing and existing.status=='CLOSED': raise ValueError('Competência já encerrada.')
+    ensure_monthly_closing_open(existing)
     recon=build_advanced_reconciliation(db, competence)
     if recon['status']!='PASS': raise ValueError('Reconciliação avançada deve estar PASS antes do fechamento.')
     snap=dict(recon['snapshot'])

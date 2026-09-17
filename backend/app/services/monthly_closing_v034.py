@@ -6,6 +6,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 from app.models import Contribution, Expense, LoanInstallment, LedgerEntry, MonthlyClosing
 from app.services.reconciliation_v032 import reconcile
+from app.services.monthly_closing_guard import ensure_monthly_closing_open
 
 CENT = Decimal('0.01')
 def money(v): return str(Decimal(v or 0).quantize(CENT, rounding=ROUND_HALF_UP))
@@ -29,7 +30,7 @@ def build_snapshot(db: Session, competence: date):
 def close_month(db: Session, competence: date, admin_id: int):
     competence=competence.replace(day=1)
     existing=db.query(MonthlyClosing).filter(MonthlyClosing.competence==competence).with_for_update().first()
-    if existing and existing.status=='CLOSED': raise ValueError('Competência já encerrada.')
+    ensure_monthly_closing_open(existing)
     recon=reconcile(db)
     if recon['status']!='PASS': raise ValueError('Reconciliação financeira deve estar PASS antes do fechamento.')
     snap,h=build_snapshot(db,competence)
