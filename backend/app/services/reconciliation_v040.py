@@ -9,6 +9,7 @@ from app.models import (Contribution, Payment, PaymentSettlement, WebhookEvent, 
                         MemberFinancialAccount, MemberFinancialEntry, PaymentReversal,
                         PaymentReversalComponent)
 from app.services.payment_settlement import _canonical_json, _ledger_snapshot, _receipt_snapshot
+from app.services.payment_reversal_evidence import validate_reversal_effect
 
 CENT=Decimal('0.01')
 ZERO=Decimal('0.00')
@@ -26,16 +27,46 @@ def _utc_datetime(value):
         value = value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
 
-def _sum_ledger(db, direction, ref_types=None, start=None, end=None):
-    q=db.query(func.coalesce(func.sum(LedgerEntry.amount),0)).filter(LedgerEntry.direction==direction)
+def _reversal_index(db):
+    """Return valid original Ledger ids and deterministic invalid findings."""
+    valid_originals = set()
+    invalid = []
+    for reversal in db.query(PaymentReversal).order_by(PaymentReversal.id).all():
+        valid, detail = validate_reversal_effect(db, reversal)
+        if valid:
+            components = db.query(PaymentReversalComponent).filter(
+                PaymentReversalComponent.payment_reversal_id == reversal.id
+            ).all()
+            valid_originals.update(component.original_ledger_entry_id for component in components)
+        else:
+            settlement = db.get(PaymentSettlement, reversal.settlement_id)
+            obligation = settlement.obligation_type if settlement is not None else "UNKNOWN"
+            code = {
+                "CONTRIBUTION": "CONTRIBUTION_PAYMENT_REVERSAL_INVALID",
+                "LOAN_INSTALLMENT": "LOAN_PAYMENT_REVERSAL_INVALID",
+                "AGREEMENT_INSTALLMENT": "AGREEMENT_PAYMENT_REVERSAL_INVALID",
+            }.get(obligation, "PAYMENT_REVERSAL_INVALID")
+            invalid.append(f"{code}: reversal {reversal.id}: {detail}")
+    return valid_originals, invalid
+
+
+def _sum_ledger(db, direction, ref_types=None, start=None, end=None, *, reversed_originals=None):
+    q=db.query(LedgerEntry).filter(LedgerEntry.direction==direction)
     if ref_types: q=q.filter(LedgerEntry.reference_type.in_(ref_types))
     if start: q=q.filter(LedgerEntry.created_at>=start)
     if end: q=q.filter(LedgerEntry.created_at<end)
-    return Decimal(q.scalar() or 0).quantize(CENT)
+    total = ZERO
+    for row in q.all():
+        if reversed_originals and row.id in reversed_originals:
+            continue
+        total += Decimal(row.amount or 0)
+    return total.quantize(CENT)
 
 def _pix_installment_settlement_findings(db):
     """Cross-check current PIX installment settlements against their evidence."""
     issues = []
+    _, reversal_findings = _reversal_index(db)
+    issues.extend(item for item in reversal_findings if item.startswith("LOAN_PAYMENT_REVERSAL_INVALID:"))
     settlements = db.query(PaymentSettlement).filter(PaymentSettlement.obligation_type == "LOAN_INSTALLMENT").all()
     by_installment = {}
     def dec(value): return Decimal(value or 0).quantize(CENT, rounding=ROUND_HALF_UP)
@@ -126,12 +157,16 @@ def _pix_installment_settlement_findings(db):
             expected_version = settlement.receipt_version.upper()
             if settlement.receipt_number != f"PIX-{expected_version}-{pid:012d}":
                 issue(pid, f"receipt_number {settlement.receipt_version} inválido")
+            reversal_is_valid = any(
+                validate_reversal_effect(db, reversal)[0]
+                for reversal in db.query(PaymentReversal).filter(
+                    PaymentReversal.settlement_id == settlement.id
+                ).all()
+            )
             try:
                 snapshot = json.loads(settlement.receipt_snapshot_json)
-                expected_snapshot = _receipt_snapshot(
-                    payment=payment,
-                    settlement=settlement,
-                    ledger=_ledger_snapshot(db, pid),
+                expected_snapshot = None if reversal_is_valid else _receipt_snapshot(
+                    payment=payment, settlement=settlement, ledger=_ledger_snapshot(db, pid)
                 )
                 if settlement.receipt_version in {"v3", "v4"}:
                     loan_state = snapshot.get("loan_state")
@@ -165,19 +200,29 @@ def _pix_installment_settlement_findings(db):
                                     issue(pid, f"snapshot v4 {field} diverge das colunas")
                             except (TypeError, ValueError):
                                 issue(pid, f"snapshot v4 {field} inválido")
-                canonical_snapshot = _canonical_json(expected_snapshot)
-                if snapshot != expected_snapshot or settlement.receipt_snapshot_json != canonical_snapshot:
-                    issue(pid, f"receipt_snapshot_json {settlement.receipt_version} inválido")
-                expected_hash = hashlib.sha256(canonical_snapshot.encode("utf-8")).hexdigest()
-                if settlement.receipt_hash != expected_hash:
-                    issue(pid, f"receipt_hash {settlement.receipt_version} inválido")
+                if expected_snapshot is not None:
+                    canonical_snapshot = _canonical_json(expected_snapshot)
+                    if snapshot != expected_snapshot or settlement.receipt_snapshot_json != canonical_snapshot:
+                        issue(pid, f"receipt_snapshot_json {settlement.receipt_version} inválido")
+                    expected_hash = hashlib.sha256(canonical_snapshot.encode("utf-8")).hexdigest()
+                    if settlement.receipt_hash != expected_hash:
+                        issue(pid, f"receipt_hash {settlement.receipt_version} inválido")
             except (TypeError, ValueError, json.JSONDecodeError, AttributeError):
                 issue(pid, f"receipt_snapshot_json {settlement.receipt_version} ilegível")
     for iid, rows in by_installment.items():
         installment = db.get(LoanInstallment, iid)
         if installment is None: continue
-        if sum((dec(x.principal_applied) + dec(x.interest_applied) for x in rows), ZERO) != dec(installment.paid_amount): issue(f"installment:{iid}", "soma principal+juros diverge de paid_amount")
-        if sum((dec(x.penalty_applied) for x in rows), ZERO) != dec(installment.paid_penalty_amount): issue(f"installment:{iid}", "soma multa diverge de paid_penalty_amount")
+        reversal_by_settlement = {}
+        for reversal in db.query(PaymentReversal).filter(
+            PaymentReversal.settlement_id.in_([row.id for row in rows])
+        ).all():
+            if validate_reversal_effect(db, reversal)[0]:
+                reversal_by_settlement[reversal.settlement_id] = reversal
+        principal_net = sum((dec(x.principal_applied) - dec(reversal_by_settlement[x.id].principal_applied) if x.id in reversal_by_settlement else dec(x.principal_applied) for x in rows), ZERO)
+        interest_net = sum((dec(x.interest_applied) - dec(reversal_by_settlement[x.id].interest_applied) if x.id in reversal_by_settlement else dec(x.interest_applied) for x in rows), ZERO)
+        penalty_net = sum((dec(x.penalty_applied) - dec(reversal_by_settlement[x.id].penalty_applied) if x.id in reversal_by_settlement else dec(x.penalty_applied) for x in rows), ZERO)
+        if principal_net + interest_net != dec(installment.paid_amount): issue(f"installment:{iid}", "soma principal+juros líquida diverge de paid_amount")
+        if penalty_net != dec(installment.paid_penalty_amount): issue(f"installment:{iid}", "soma multa líquida diverge de paid_penalty_amount")
     return issues
 
 def _payment_ledger_rows(db, payment_id):
@@ -186,98 +231,6 @@ def _payment_ledger_rows(db, payment_id):
 
 def _agreement_settlement_issue(code, settlement, detail):
     return f"{code}: settlement {settlement.id} (payment {settlement.payment_id}): {detail}"
-
-
-def _valid_agreement_reversal(db, settlement, payment, reversal):
-    """Validate the persisted A3 evidence before netting a settlement."""
-    def dec(value):
-        return Decimal(value or 0).quantize(CENT, rounding=ROUND_HALF_UP)
-
-    if payment is None or settlement is None:
-        return False, "Payment/Settlement original inexistente."
-    if reversal.payment_id != payment.id or reversal.settlement_id != settlement.id:
-        return False, "PaymentReversal não referencia exatamente Payment/Settlement."
-    if settlement.obligation_type != "AGREEMENT_INSTALLMENT" or settlement.receipt_version != "v5":
-        return False, "Settlement não é Agreement v5."
-    if settlement.agreement_installment_id is None:
-        return False, "Settlement sem AgreementInstallment."
-    installment = db.get(AgreementInstallment, settlement.agreement_installment_id)
-    agreement = db.get(CollectionAgreement, installment.agreement_id) if installment else None
-    if installment is None or agreement is None:
-        return False, "Obrigação Agreement inexistente."
-    if payment.reference_type != "AGREEMENT_INSTALLMENT" or payment.reference_id != str(installment.id):
-        return False, "Referência do Payment incompatível."
-    if settlement.member_id != agreement.member_id:
-        return False, "Membro do settlement incompatível."
-    if reversal.original_date_kind != "AGREEMENT_INSTALLMENT_DUE_DATE" or reversal.original_due_date != installment.due_date or reversal.original_competence is not None:
-        return False, "Evidência de competência/due_date incompatível."
-
-    original_rows = db.query(LedgerEntry).filter(LedgerEntry.reference_id == str(payment.id)).all()
-    originals = [row for row in original_rows if row.reference_type == "AGREEMENT_INSTALLMENT_PAYMENT" and row.reversal_of_id is None]
-    if len(originals) != 1:
-        return False, "Ledger original ausente, duplicado ou com componente extra."
-    original = originals[0]
-    if original.account != "CAIXINHA" or original.direction != "CREDIT" or original.reversal_of_id is not None or dec(original.amount) != dec(settlement.amount_applied):
-        return False, "Ledger original incompatível."
-
-    compensating_rows = db.query(LedgerEntry).filter(LedgerEntry.reversal_of_id == original.id).all()
-    if len(compensating_rows) != 1:
-        return False, "Ledger compensatório ausente ou duplicado."
-    compensating = compensating_rows[0]
-    if any(row.id not in {original.id, compensating.id} for row in original_rows):
-        return False, "Ledger possui componente inesperado."
-    if compensating.account != original.account or compensating.direction != "DEBIT" or dec(compensating.amount) != dec(original.amount) or compensating.reference_type != "REVERSAL" or compensating.reference_id != str(original.id) or compensating.reversal_of_id != original.id:
-        return False, "Ledger compensatório incompatível."
-
-    components = db.query(PaymentReversalComponent).filter(
-        PaymentReversalComponent.payment_reversal_id == reversal.id
-    ).all()
-    if len(components) != 1:
-        return False, "Componente de reversal ausente ou duplicado."
-    component = components[0]
-    if component.original_ledger_entry_id != original.id or component.compensating_ledger_entry_id != compensating.id:
-        return False, "Componente não corresponde aos Ledgers."
-    if db.query(PaymentReversalComponent).filter(
-        PaymentReversalComponent.original_ledger_entry_id == original.id
-    ).count() != 1 or db.query(PaymentReversalComponent).filter(
-        PaymentReversalComponent.compensating_ledger_entry_id == compensating.id
-    ).count() != 1:
-        return False, "Ledger possui componente incompatível adicional."
-
-    try:
-        snapshot = json.loads(reversal.receipt_snapshot_json)
-        canonical = _canonical_json(snapshot)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return False, "Receipt do reversal ilegível."
-    if reversal.receipt_snapshot_json != canonical or hashlib.sha256(canonical.encode("utf-8")).hexdigest() != reversal.receipt_hash:
-        return False, "Receipt/hash do reversal inválido."
-    if snapshot.get("receipt_version") != reversal.receipt_version or snapshot.get("receipt_number") != reversal.receipt_number:
-        return False, "Identidade do receipt do reversal incompatível."
-    reversal_snapshot = snapshot.get("reversal") or {}
-    if reversal_snapshot.get("id") != reversal.id or reversal_snapshot.get("admin_id") != reversal.admin_id or reversal_snapshot.get("reason") != reversal.reason:
-        return False, "Metadados do reversal incompatíveis."
-    obligation = snapshot.get("obligation") or {}
-    if obligation != {
-        "type": "AGREEMENT_INSTALLMENT",
-        "member_id": settlement.member_id,
-        "agreement_installment_id": installment.id,
-        "collection_agreement_id": agreement.id,
-    }:
-        return False, "Obrigação do receipt do reversal incompatível."
-    if (snapshot.get("payment") or {}).get("id") != payment.id:
-        return False, "Payment do receipt do reversal incompatível."
-    if (snapshot.get("settlement") or {}).get("id") != settlement.id:
-        return False, "Settlement do receipt do reversal incompatível."
-    ledger_snapshot = snapshot.get("ledger_component") or {}
-    if ledger_snapshot.get("original_ledger_entry_id") != original.id or ledger_snapshot.get("compensating_ledger_entry_id") != compensating.id or ledger_snapshot.get("amount") != format(dec(original.amount), "f") or ledger_snapshot.get("reversal_of_id") != original.id:
-        return False, "Ledger do receipt do reversal incompatível."
-    expected_amounts = {
-        name: format(dec(getattr(settlement, name)), "f")
-        for name in ("amount_received", "amount_applied", "principal_applied", "interest_applied", "penalty_applied", "excess_amount")
-    }
-    if snapshot.get("amounts") != expected_amounts:
-        return False, "Valores do receipt do reversal incompatíveis."
-    return True, ""
 
 
 def _agreement_settlement_findings(db):
@@ -482,7 +435,7 @@ def _agreement_settlement_findings(db):
         for reversal in reversals:
             linked_settlement = settlements_by_id.get(reversal.settlement_id)
             linked_payment = db.get(Payment, linked_settlement.payment_id) if linked_settlement else None
-            valid, detail = _valid_agreement_reversal(db, linked_settlement, linked_payment, reversal)
+            valid, detail = validate_reversal_effect(db, reversal)
             if valid:
                 valid_reversals.append(reversal)
             else:
@@ -651,20 +604,21 @@ def _approved_payment_issues(db, competence_start, competence_end):
 def build_advanced_reconciliation(db: Session, competence: date):
     a,b=bounds(competence); start=dt_start(a); end=dt_end(b)
     findings=[]
+    valid_reversed_originals, reversal_findings = _reversal_index(db)
     def check(code, expected, observed, details):
         e=Decimal(expected or 0).quantize(CENT); o=Decimal(observed or 0).quantize(CENT)
         ok=e==o; findings.append({'code':code,'status':'PASS' if ok else 'FAIL','details':details,'expected':money(e),'observed':money(o)})
     contrib=Decimal(db.query(func.coalesce(func.sum(func.coalesce(Contribution.paid_amount,0)),0)).filter(Contribution.competence.between(a,b)).scalar() or 0)
-    contrib_ledger=_sum_ledger(db,'CREDIT',['CONTRIBUTION_PAYMENT'],start,end)
+    contrib_ledger=_sum_ledger(db,'CREDIT',['CONTRIBUTION_PAYMENT'],start,end,reversed_originals=valid_reversed_originals)
     check('CONTRIBUTIONS',contrib,contrib_ledger,'Contribuições pagas devem bater com créditos no Ledger no período.')
-    loan_pay=_sum_ledger(db,'CREDIT',['LOAN_INSTALLMENT_PAYMENT'],start,end)
-    agr_pay=_sum_ledger(db,'CREDIT',['AGREEMENT_INSTALLMENT_PAYMENT'],start,end)
-    interest_received=_sum_ledger(db,'CREDIT',['LOAN_INTEREST_PAYMENT'],start,end)
+    loan_pay=_sum_ledger(db,'CREDIT',['LOAN_INSTALLMENT_PAYMENT'],start,end,reversed_originals=valid_reversed_originals)
+    agr_pay=_sum_ledger(db,'CREDIT',['AGREEMENT_INSTALLMENT_PAYMENT'],start,end,reversed_originals=valid_reversed_originals)
+    interest_received=_sum_ledger(db,'CREDIT',['LOAN_INTEREST_PAYMENT'],start,end,reversed_originals=valid_reversed_originals)
     disb=_sum_ledger(db,'DEBIT',['LOAN_DISBURSEMENT'],start,end)
     exp=Decimal(db.query(func.coalesce(func.sum(Expense.amount),0)).filter(Expense.status=='POSTED',Expense.expense_date.between(a,b)).scalar() or 0)
     exp_ledger=_sum_ledger(db,'DEBIT',['EXPENSE'],start,end)
     check('EXPENSES',exp,exp_ledger,'Despesas lançadas devem bater com débitos no Ledger no período.')
-    check('LOAN_PAYMENT_TOTAL',loan_pay+agr_pay,_sum_ledger(db,'CREDIT',['LOAN_INSTALLMENT_PAYMENT','AGREEMENT_INSTALLMENT_PAYMENT'],start,end),'Recebimentos de empréstimos/acordos devem estar no Ledger.')
+    check('LOAN_PAYMENT_TOTAL',loan_pay+agr_pay,_sum_ledger(db,'CREDIT',['LOAN_INSTALLMENT_PAYMENT','AGREEMENT_INSTALLMENT_PAYMENT'],start,end,reversed_originals=valid_reversed_originals),'Recebimentos de empréstimos/acordos devem estar no Ledger.')
     approved_total = Decimal(db.query(func.coalesce(func.sum(func.coalesce(Payment.amount_received, Payment.amount)),0)).filter(Payment.status=='approved',Payment.created_at>=start,Payment.created_at<end).scalar() or 0)
     posted_total = Decimal(db.query(func.coalesce(func.sum(func.coalesce(Payment.amount_received, Payment.amount)),0)).filter(Payment.status=='approved',Payment.ledger_posted_at.is_not(None),Payment.created_at>=start,Payment.created_at<end).scalar() or 0)
     approved_issues = _approved_payment_issues(db, start, end)
@@ -674,12 +628,15 @@ def build_advanced_reconciliation(db: Session, competence: date):
     pix_issues = _pix_installment_settlement_findings(db)
     findings.append({'code':'PIX_INSTALLMENT_SETTLEMENT','status':'FAIL' if pix_issues else 'PASS','details':'Settlements PIX atuais de parcelas consistentes.' if not pix_issues else '; '.join(pix_issues),'expected':'0','observed':str(len(pix_issues))})
     agreement_invalid, agreement_ledger, agreement_cumulative, agreement_reversal_invalid = _agreement_settlement_findings(db)
+    agreement_reversal_invalid = sorted(set(agreement_reversal_invalid + [item for item in reversal_findings if item.startswith("AGREEMENT_PAYMENT_REVERSAL_INVALID:")]))
     agreement_collection = _agreement_collection_status_findings(db)
     for code, issues in (
         ('AGREEMENT_SETTLEMENT_INVALID', agreement_invalid),
         ('AGREEMENT_SETTLEMENT_LEDGER_MISMATCH', agreement_ledger),
         ('AGREEMENT_SETTLEMENT_CUMULATIVE_MISMATCH', agreement_cumulative),
         ('AGREEMENT_PAYMENT_REVERSAL_INVALID', agreement_reversal_invalid),
+        ('CONTRIBUTION_PAYMENT_REVERSAL_INVALID', [item for item in reversal_findings if item.startswith("CONTRIBUTION_PAYMENT_REVERSAL_INVALID:")]),
+        ('LOAN_PAYMENT_REVERSAL_INVALID', [item for item in reversal_findings if item.startswith("LOAN_PAYMENT_REVERSAL_INVALID:")]),
         ('AGREEMENT_COLLECTION_STATUS_MISMATCH', agreement_collection),
     ):
         findings.append({
