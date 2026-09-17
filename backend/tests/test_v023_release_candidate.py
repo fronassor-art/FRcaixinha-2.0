@@ -32,7 +32,7 @@ def test_alembic_chain_has_single_head():
         if line.strip()
     ]
 
-    assert heads == ["0086_payment_settlement_agreement_state_v106"]
+    assert heads == ["0087_monthly_closing_immutability_h3c_a1"]
 
 def test_environment_templates_are_placeholders():
     for name in ('.env.production.example', '.env.staging.example'):
