@@ -10,8 +10,17 @@ from app.api.deps import require_admin
 from app.db.session import get_db
 from app.models import Contribution, LoanInstallment, LedgerEntry, Expense, MonthlyClosing, AuditLog
 from app.services.ledger import post_entry
+from app.services.monthly_closing_v040 import snapshot_digest
 router=APIRouter(prefix="/admin/finance",tags=["admin-finance"])
 def money(v): return str(Decimal(v or 0).quantize(Decimal("0.01")))
+def _is_sha256(value):
+    if not isinstance(value, str) or len(value) != 64:
+        return False
+    try:
+        int(value, 16)
+    except ValueError:
+        return False
+    return True
 def bounds(d): return d.replace(day=1), d.replace(day=monthrange(d.year,d.month)[1])
 def balance(db):
     c=Decimal(db.query(func.coalesce(func.sum(LedgerEntry.amount),0)).filter(LedgerEntry.direction=="CREDIT").scalar() or 0)
@@ -59,11 +68,46 @@ def close_month(competence:date,admin=Depends(require_admin),db:Session=Depends(
 
 @router.get("/closings/{competence}/verify")
 def verify_month(competence:date,admin=Depends(require_admin),db:Session=Depends(get_db)):
-    from app.services.reconciliation_v040 import build_advanced_reconciliation
     c=db.query(MonthlyClosing).filter(MonthlyClosing.competence==competence.replace(day=1)).first()
     if not c or c.status != 'CLOSED': raise HTTPException(404,'Fechamento não encontrado.')
-    result=build_advanced_reconciliation(db,c.competence)
-    return {"competence":c.competence.isoformat(),"status":"PASS" if result["snapshot_hash"]==json.loads(c.snapshot_json).get("reconciliation_hash") else "FAIL","stored_hash":c.snapshot_hash,"current_hash":result["snapshot_hash"],"snapshot":result["snapshot"]}
+    stored_snapshot = None
+    reconciliation_hash = None
+    valid = True
+    try:
+        stored_snapshot = json.loads(c.snapshot_json) if c.snapshot_json is not None else None
+        if not isinstance(stored_snapshot, dict):
+            raise ValueError('snapshot must be an object')
+        if not _is_sha256(c.snapshot_hash):
+            raise ValueError('snapshot hash missing or malformed')
+        if snapshot_digest(stored_snapshot) != c.snapshot_hash:
+            raise ValueError('snapshot hash mismatch')
+        if stored_snapshot.get('closing_schema') != 'v0.40':
+            raise ValueError('unsupported or missing closing schema')
+        reconciliation_hash = stored_snapshot.get('reconciliation_hash')
+        if not _is_sha256(reconciliation_hash):
+            raise ValueError('reconciliation hash missing or malformed')
+        raw_snapshot = dict(stored_snapshot)
+        raw_snapshot.pop('closing_schema')
+        raw_snapshot.pop('reconciliation_hash')
+        if snapshot_digest(raw_snapshot) != reconciliation_hash:
+            raise ValueError('reconciliation hash mismatch')
+        for column, key in (
+            ('total_contributions', 'contributions_paid'),
+            ('total_expenses', 'expenses_posted'),
+            ('total_interest_received', 'interest_received'),
+            ('ledger_balance', 'ledger_net'),
+        ):
+            if Decimal(getattr(c, column)) != Decimal(stored_snapshot[key]):
+                raise ValueError(f'{column} mismatch')
+    except (TypeError, ValueError, KeyError, json.JSONDecodeError, ArithmeticError):
+        valid = False
+    return {
+        "competence":c.competence.isoformat(),
+        "status":"PASS" if valid else "FAIL",
+        "stored_hash":c.snapshot_hash,
+        "current_hash":reconciliation_hash,
+        "snapshot":stored_snapshot,
+    }
 
 @router.get('/loan-engine/overdue')
 def loan_engine_overdue(admin=Depends(require_admin), db: Session = Depends(get_db)):
