@@ -4,6 +4,14 @@ from sqlalchemy.orm import Session
 from app.models import MonthlyClosing
 
 
+_COMPETENCE_UNIQUE_NAMES = frozenset(
+    {
+        "uq_monthly_closing_competence",
+        "ix_monthly_closings_competence",
+    }
+)
+
+
 class MonthlyClosingCreationConflict(Exception):
     """A different transaction created the same monthly closing first."""
 
@@ -15,9 +23,11 @@ class MonthlyClosingCreationConflict(Exception):
 
 def _is_competence_unique_violation(exc: IntegrityError) -> bool:
     original = exc.orig
-    constraint_name = getattr(getattr(original, "diag", None), "constraint_name", None)
-    if constraint_name is not None:
-        return constraint_name == "uq_monthly_closing_competence"
+    diagnostics = getattr(original, "diag", None)
+    constraint_name = getattr(diagnostics, "constraint_name", None)
+    sqlstate = getattr(original, "sqlstate", None) or getattr(original, "pgcode", None)
+    if diagnostics is not None:
+        return sqlstate == "23505" and constraint_name in _COMPETENCE_UNIQUE_NAMES
 
     return str(original) == "UNIQUE constraint failed: monthly_closings.competence"
 

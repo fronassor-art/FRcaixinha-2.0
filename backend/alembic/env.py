@@ -4,6 +4,7 @@ from alembic import context
 from app.db.base import Base
 from app.core.config import settings
 import app.models
+from app.db.alembic_version_table import prepare_version_table
 
 config = context.config
 config.set_main_option("sqlalchemy.url", settings.database_url)
@@ -13,9 +14,11 @@ if config.config_file_name and config.get_section("loggers"):
 target_metadata = Base.metadata
 
 def run_migrations_offline():
-    context.configure(url=settings.database_url, target_metadata=target_metadata, literal_binds=True)
-    with context.begin_transaction():
-        context.run_migrations()
+    raise RuntimeError(
+        "Offline Alembic migrations are disabled: the installed Alembic "
+        "does not expose a public version_num length override, and emitting "
+        "offline SQL with VARCHAR(32) would diverge from the online flow."
+    )
 
 def run_migrations_online():
     connectable = engine_from_config(
@@ -25,6 +28,7 @@ def run_migrations_online():
     with connectable.connect() as connection:
         context.configure(connection=connection, target_metadata=target_metadata)
         with context.begin_transaction():
+            prepare_version_table(connection)
             context.run_migrations()
 
 if context.is_offline_mode():

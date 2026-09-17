@@ -18,7 +18,7 @@ def test_single_alembic_head_after_security_reconciliation():
         if line.strip()
     ]
 
-    assert heads == ["0087_monthly_closing_immutability_h3c_a1"]
+    assert heads == ["0088_monthly_closing_snapshot_schema_h3c_b2"]
 
     root = Path(__file__).parents[1] / "alembic" / "versions"
     rows = {}

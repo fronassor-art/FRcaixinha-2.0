@@ -127,7 +127,7 @@ def _alter_settlements_for_upgrade(bind):
             "ck_payment_settlements_agreement_no_interest",
             "ck_payment_settlements_receipt_version",
         ):
-            op.drop_constraint(name, "payment_settlements", type="check")
+            op.drop_constraint(name, "payment_settlements", type_="check")
         op.create_check_constraint("ck_payment_settlements_nonnegative_amounts", "payment_settlements", "amount_received >= 0 AND amount_applied >= 0 AND principal_applied >= 0 AND interest_applied >= 0 AND penalty_applied >= 0 AND excess_amount >= 0")
         op.create_check_constraint("ck_payment_settlements_received_allocation", "payment_settlements", "amount_received = amount_applied + excess_amount")
         op.create_check_constraint("ck_payment_settlements_applied_components", "payment_settlements", "amount_applied = principal_applied + interest_applied + penalty_applied")
@@ -168,7 +168,7 @@ def _alter_settlements_for_downgrade(bind):
             "ck_payment_settlements_loan_revision_after",
             "ck_payment_settlements_loan_revision_order",
         ):
-            op.drop_constraint(name, "payment_settlements", type="check")
+            op.drop_constraint(name, "payment_settlements", type_="check")
         for column in ("loan_status_before", "loan_status_after", "loan_state_revision_before", "loan_state_revision_after"):
             op.drop_column("payment_settlements", column)
         op.create_check_constraint("ck_payment_settlements_nonnegative_amounts", "payment_settlements", "amount_received >= 0 AND amount_applied >= 0 AND principal_applied >= 0 AND interest_applied >= 0 AND penalty_applied >= 0 AND excess_amount >= 0")
@@ -289,7 +289,7 @@ def downgrade():
             batch_op.drop_constraint("ck_loans_state_revision_nonnegative", type_="check")
             batch_op.drop_column("state_revision")
     else:
-        op.drop_constraint("ck_loans_state_revision_nonnegative", "loans", type="check")
+        op.drop_constraint("ck_loans_state_revision_nonnegative", "loans", type_="check")
         op.drop_column("loans", "state_revision")
 
     op.drop_index("uq_member_financial_entries_one_payment_reversal", table_name="member_financial_entries")
@@ -298,7 +298,7 @@ def downgrade():
             batch_op.drop_constraint("fk_member_financial_entries_payment_reversal_id", type_="foreignkey")
             batch_op.drop_column("payment_reversal_id")
     else:
-        op.drop_constraint("fk_member_financial_entries_payment_reversal_id", "member_financial_entries", type="foreignkey")
+        op.drop_constraint("fk_member_financial_entries_payment_reversal_id", "member_financial_entries", type_="foreignkey")
         op.drop_column("member_financial_entries", "payment_reversal_id")
 
     op.drop_index("ix_payment_reversal_components_reversal_id", table_name="payment_reversal_components")

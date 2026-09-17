@@ -1,3 +1,6 @@
+import sqlite3
+from types import SimpleNamespace
+
 from datetime import date
 from decimal import Decimal
 
@@ -10,6 +13,7 @@ from app.models import MonthlyClosing
 from app.services import monthly_closing_v034, monthly_closing_v040
 from app.services.monthly_closing_concurrency import (
     MonthlyClosingCreationConflict,
+    _is_competence_unique_violation,
     create_monthly_closing_or_raise_conflict,
 )
 from test_payment_reversal_contribution_v104 import _db, _setup
@@ -100,6 +104,51 @@ def test_non_unique_integrity_error_propagates_without_conflict_mapping():
         create_monthly_closing_or_raise_conflict(db, None)
 
     db.rollback()
+
+
+@pytest.mark.parametrize(
+    "constraint_name",
+    ["uq_monthly_closing_competence", "ix_monthly_closings_competence"],
+)
+def test_postgresql_competence_unique_names_are_classified(constraint_name):
+    original = SimpleNamespace(
+        sqlstate="23505",
+        diag=SimpleNamespace(constraint_name=constraint_name),
+    )
+    assert _is_competence_unique_violation(IntegrityError("insert", {}, original))
+
+
+@pytest.mark.parametrize(
+    "sqlstate,constraint_name",
+    [("23505", "other_unique"), ("23503", "ix_monthly_closings_competence")],
+)
+def test_postgresql_other_integrity_diagnostics_are_not_classified(
+    sqlstate, constraint_name
+):
+    original = SimpleNamespace(
+        sqlstate=sqlstate,
+        diag=SimpleNamespace(constraint_name=constraint_name),
+    )
+    assert not _is_competence_unique_violation(IntegrityError("insert", {}, original))
+
+
+def test_postgresql_missing_diagnostics_are_not_classified():
+    original = SimpleNamespace(sqlstate="23505")
+    assert not _is_competence_unique_violation(IntegrityError("insert", {}, original))
+
+
+def test_sqlite_competence_message_is_classified_without_generic_fallback():
+    original = sqlite3.IntegrityError(
+        "UNIQUE constraint failed: monthly_closings.competence"
+    )
+    assert _is_competence_unique_violation(
+        IntegrityError("insert", {}, original)
+    )
+
+
+def test_sqlite_other_unique_message_is_not_classified():
+    original = sqlite3.IntegrityError("UNIQUE constraint failed: users.email")
+    assert not _is_competence_unique_violation(IntegrityError("insert", {}, original))
 
 
 def test_v040_loser_does_not_run_reconciliation_or_overwrite_winner(monkeypatch):
