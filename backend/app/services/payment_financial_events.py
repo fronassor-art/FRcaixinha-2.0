@@ -178,7 +178,10 @@ def payment_financial_events(
         for settlement in by_settlement.values():
             if not _supported(settlement) or not _original_is_consistent(db, settlement):
                 continue
-            if _in_window(settlement.confirmed_at, start, end) or settlement.id in candidate_settlement_ids:
+            if settlement.confirmed_at is not None and (
+                _in_window(settlement.confirmed_at, start, end)
+                or settlement.id in candidate_settlement_ids
+            ):
                 for component, amount in _components(settlement):
                     item = _event(settlement, component, amount, settlement.confirmed_at, "ORIGINAL")
                     if item is not None and _in_window(item.occurred_at, start, end):

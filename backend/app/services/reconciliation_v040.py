@@ -10,6 +10,7 @@ from app.models import (Contribution, Payment, PaymentSettlement, WebhookEvent, 
                         PaymentReversalComponent)
 from app.services.payment_settlement import _canonical_json, _ledger_snapshot, _receipt_snapshot
 from app.services.payment_reversal_evidence import validate_reversal_effect
+from app.services.payment_financial_events import payment_financial_events
 
 CENT=Decimal('0.01')
 ZERO=Decimal('0.00')
@@ -605,15 +606,16 @@ def build_advanced_reconciliation(db: Session, competence: date):
     a,b=bounds(competence); start=dt_start(a); end=dt_end(b)
     findings=[]
     valid_reversed_originals, reversal_findings = _reversal_index(db)
+    financial_events = payment_financial_events(db, start=start, end=end)
     def check(code, expected, observed, details):
         e=Decimal(expected or 0).quantize(CENT); o=Decimal(observed or 0).quantize(CENT)
         ok=e==o; findings.append({'code':code,'status':'PASS' if ok else 'FAIL','details':details,'expected':money(e),'observed':money(o)})
-    contrib=Decimal(db.query(func.coalesce(func.sum(func.coalesce(Contribution.paid_amount,0)),0)).filter(Contribution.competence.between(a,b)).scalar() or 0)
+    contrib=sum((event.amount for event in financial_events if event.component == "CONTRIBUTION"), ZERO)
     contrib_ledger=_sum_ledger(db,'CREDIT',['CONTRIBUTION_PAYMENT'],start,end,reversed_originals=valid_reversed_originals)
     check('CONTRIBUTIONS',contrib,contrib_ledger,'Contribuições pagas devem bater com créditos no Ledger no período.')
     loan_pay=_sum_ledger(db,'CREDIT',['LOAN_INSTALLMENT_PAYMENT'],start,end,reversed_originals=valid_reversed_originals)
     agr_pay=_sum_ledger(db,'CREDIT',['AGREEMENT_INSTALLMENT_PAYMENT'],start,end,reversed_originals=valid_reversed_originals)
-    interest_received=_sum_ledger(db,'CREDIT',['LOAN_INTEREST_PAYMENT'],start,end,reversed_originals=valid_reversed_originals)
+    interest_received=sum((event.amount for event in financial_events if event.component == "LOAN_INTEREST"), ZERO)
     disb=_sum_ledger(db,'DEBIT',['LOAN_DISBURSEMENT'],start,end)
     exp=Decimal(db.query(func.coalesce(func.sum(Expense.amount),0)).filter(Expense.status=='POSTED',Expense.expense_date.between(a,b)).scalar() or 0)
     exp_ledger=_sum_ledger(db,'DEBIT',['EXPENSE'],start,end)

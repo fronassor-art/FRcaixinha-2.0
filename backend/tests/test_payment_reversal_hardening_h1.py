@@ -35,8 +35,10 @@ def test_contribution_reversal_neutralizes_only_with_complete_chain():
     db.delete(component)
     db.commit()
     findings = _findings(db)
-    assert findings["CONTRIBUTIONS"]["status"] == "FAIL"
+    result = build_advanced_reconciliation(db, date(2026, 9, 1))
+    assert findings["CONTRIBUTIONS"]["status"] == "PASS"
     assert findings["CONTRIBUTION_PAYMENT_REVERSAL_INVALID"]["status"] == "FAIL"
+    assert result["status"] == "FAIL"
 
 
 def test_loan_reversal_neutralizes_ledger_components_without_double_counting_mfe():

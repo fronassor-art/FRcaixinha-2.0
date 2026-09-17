@@ -1,18 +1,23 @@
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-
-from app.db.base import Base
+from test_payment_settlement_v103 import _db, _installment, _member, _payment, _settle
 from app.models import LedgerEntry
 from app.services.reconciliation_v040 import build_advanced_reconciliation
 
 
 def test_interest_received_counts_only_loan_interest_credit_in_competence():
-    engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    db = sessionmaker(bind=engine)()
+    db = _db()
+
+    member = _member(db, "interest-source")
+    _loan, installment = _installment(db, member, amount="120.00", interest="20.00", penalty="0.00")
+    payment = _payment(
+        db,
+        suffix="interest-source",
+        amount="120.00",
+        reference_type="LOAN_INSTALLMENT",
+        reference_id=str(installment.id),
+    )
 
     def add(amount, reference_type, created_at, direction="CREDIT"):
         db.add(
@@ -29,7 +34,9 @@ def test_interest_received_counts_only_loan_interest_credit_in_competence():
     inside = datetime(2026, 9, 15, 12, 0, tzinfo=timezone.utc)
     outside = datetime(2026, 8, 31, 23, 59, tzinfo=timezone.utc)
 
-    add("20.00", "LOAN_INTEREST_PAYMENT", inside)
+    _settle(db, payment, when=inside)
+
+    add("777.00", "LOAN_INTEREST_PAYMENT", inside)
     add("10.00", "LOAN_PENALTY_PAYMENT", inside)
     add("50.00", "LOAN_INSTALLMENT_PAYMENT", inside)
     add("30.00", "AGREEMENT_INSTALLMENT_PAYMENT", inside)
