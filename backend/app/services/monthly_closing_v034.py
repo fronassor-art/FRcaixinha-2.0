@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.models import Contribution, Expense, LoanInstallment, LedgerEntry, MonthlyClosing
 from app.services.reconciliation_v032 import reconcile
 from app.services.monthly_closing_guard import ensure_monthly_closing_open
+from app.services.monthly_closing_concurrency import create_monthly_closing_or_raise_conflict
 
 CENT = Decimal('0.01')
 def money(v): return str(Decimal(v or 0).quantize(CENT, rounding=ROUND_HALF_UP))
@@ -31,9 +32,10 @@ def close_month(db: Session, competence: date, admin_id: int):
     competence=competence.replace(day=1)
     existing=db.query(MonthlyClosing).filter(MonthlyClosing.competence==competence).with_for_update().first()
     ensure_monthly_closing_open(existing)
+    if not existing:
+        existing = create_monthly_closing_or_raise_conflict(db, competence)
     recon=reconcile(db)
     if recon['status']!='PASS': raise ValueError('Reconciliação financeira deve estar PASS antes do fechamento.')
     snap,h=build_snapshot(db,competence)
-    if not existing: existing=MonthlyClosing(competence=competence); db.add(existing); db.flush()
     existing.status='CLOSED'; existing.total_contributions=Decimal(snap['contributions_paid']); existing.total_expenses=Decimal(snap['expenses_posted']); existing.total_interest_received=Decimal(snap['interest_received']); existing.ledger_balance=Decimal(snap['ledger_balance_at_close']); existing.closed_by=admin_id; existing.closed_at=datetime.now(timezone.utc); existing.snapshot_json=json.dumps(snap,sort_keys=True,separators=(',',':')); existing.snapshot_hash=h
     return existing, snap, h

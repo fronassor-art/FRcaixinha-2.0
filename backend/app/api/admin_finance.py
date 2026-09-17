@@ -11,6 +11,7 @@ from app.db.session import get_db
 from app.models import Contribution, LoanInstallment, LedgerEntry, Expense, MonthlyClosing, AuditLog
 from app.services.ledger import post_entry
 from app.services.monthly_closing_v040 import snapshot_digest
+from app.services.monthly_closing_concurrency import MonthlyClosingCreationConflict
 router=APIRouter(prefix="/admin/finance",tags=["admin-finance"])
 def money(v): return str(Decimal(v or 0).quantize(Decimal("0.01")))
 def _is_sha256(value):
@@ -63,7 +64,7 @@ def close_month(competence:date,admin=Depends(require_admin),db:Session=Depends(
         db.add(AuditLog(actor_user_id=admin.id,action="MONTH_CLOSED_V040",entity_type="MONTHLY_CLOSING",entity_id=str(existing.id),details=h))
         db.commit(); db.refresh(existing)
         return {"id":existing.id,"competence":existing.competence.isoformat(),"status":existing.status,"ledger_balance":money(existing.ledger_balance),"snapshot_hash":existing.snapshot_hash,"snapshot":snap}
-    except ValueError as e:
+    except (ValueError, MonthlyClosingCreationConflict) as e:
         db.rollback(); raise HTTPException(409,str(e))
 
 @router.get("/closings/{competence}/verify")
