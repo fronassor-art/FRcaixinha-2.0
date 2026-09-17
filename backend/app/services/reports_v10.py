@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.models import User, Member, Contribution, Loan, LoanInstallment, LedgerEntry, Expense, Payment, PaymentSettlement, PaymentReversal, PaymentReversalComponent, MemberFinancialAccount, MemberFinancialEntry, CollectionAgreement, AgreementInstallment
 from app.services.loan_engine_v17 import installment_due
 from app.services.payment_settlement import contribution_financial_status, installment_financial_status
+from app.services.payment_financial_events import payment_financial_events
 from app.services.payment_reversal_evidence import validate_reversal_effect
 ZERO=Decimal('0.00'); CENT=Decimal('0.01')
 def money(v): return str(Decimal(v or 0).quantize(CENT,rounding=ROUND_HALF_UP))
@@ -16,7 +17,10 @@ def _cp(c): return Decimal(c.paid_amount if c.paid_amount is not None else (c.am
 def _payment(db,t,i,legacy=None): return db.query(Payment).filter(Payment.reference_type==t,Payment.reference_id==str(i)).order_by(Payment.id.desc()).first() or (db.get(Payment,legacy) if legacy else None)
 def _receipt(db,p): return bool(p and db.query(PaymentSettlement).filter(PaymentSettlement.payment_id==p.id).first())
 def monthly_report(db,competence):
- a,b=month_bounds(competence);start,end=_range(a,b); contrib=_ledger(db,['CONTRIBUTION_PAYMENT'],start,end); interest=_ledger(db,['LOAN_INTEREST_PAYMENT'],start,end); penalty=_ledger(db,['LOAN_PENALTY_PAYMENT'],start,end); expenses=Decimal(db.query(func.coalesce(func.sum(Expense.amount),0)).filter(Expense.status=='POSTED',Expense.expense_date.between(a,b)).scalar() or 0); credits=Decimal(db.query(func.coalesce(func.sum(LedgerEntry.amount),0)).filter(LedgerEntry.direction=='CREDIT',LedgerEntry.created_at>=start,LedgerEntry.created_at<end).scalar() or 0); debits=Decimal(db.query(func.coalesce(func.sum(LedgerEntry.amount),0)).filter(LedgerEntry.direction=='DEBIT',LedgerEntry.created_at>=start,LedgerEntry.created_at<end).scalar() or 0)
+ a,b=month_bounds(competence);start,end=_range(a,b); events=payment_financial_events(db,start=start,end=end); totals={"CONTRIBUTION":ZERO,"LOAN_INTEREST":ZERO,"LOAN_PENALTY":ZERO}
+ for event in events:
+  if event.component in totals: totals[event.component]+=Decimal(event.amount)
+ contrib=totals["CONTRIBUTION"]; interest=totals["LOAN_INTEREST"]; penalty=totals["LOAN_PENALTY"]; expenses=Decimal(db.query(func.coalesce(func.sum(Expense.amount),0)).filter(Expense.status=='POSTED',Expense.expense_date.between(a,b)).scalar() or 0); credits=Decimal(db.query(func.coalesce(func.sum(LedgerEntry.amount),0)).filter(LedgerEntry.direction=='CREDIT',LedgerEntry.created_at>=start,LedgerEntry.created_at<end).scalar() or 0); debits=Decimal(db.query(func.coalesce(func.sum(LedgerEntry.amount),0)).filter(LedgerEntry.direction=='DEBIT',LedgerEntry.created_at>=start,LedgerEntry.created_at<end).scalar() or 0)
  return {'competence':a.isoformat(),'period_end':b.isoformat(),'contributions_paid':money(contrib),'expenses':money(expenses),'interest_received':money(interest),'penalties_received':money(penalty),'operating_result':money(contrib+interest+penalty-expenses),'ledger_credits_in_period':money(credits),'ledger_debits_in_period':money(debits)}
 def _legacy_member_statement(db,member_id):
  m=db.get(Member,member_id)
