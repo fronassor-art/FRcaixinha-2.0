@@ -84,6 +84,8 @@ def verify_month(competence:date,admin=Depends(require_admin),db:Session=Depends
             raise ValueError('snapshot hash mismatch')
         if stored_snapshot.get('closing_schema') != 'v0.40':
             raise ValueError('unsupported or missing closing schema')
+        if date.fromisoformat(stored_snapshot['competence']) != c.competence:
+            raise ValueError('competence mismatch')
         reconciliation_hash = stored_snapshot.get('reconciliation_hash')
         if not _is_sha256(reconciliation_hash):
             raise ValueError('reconciliation hash missing or malformed')
