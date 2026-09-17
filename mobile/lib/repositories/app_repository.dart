@@ -6,20 +6,29 @@ class AppRepository {
   AppRepository(this.api);
 
   Future<Map<String, dynamic>> profile() => api.get('/members/me');
-  Future<Map<String, dynamic>> contributionSummary() => api.get('/contributions/summary');
+  Future<Map<String, dynamic>> contributionSummary() =>
+      api.get('/contributions/summary');
   Future<Map<String, dynamic>> contributions() => api.get('/contributions');
   Future<Map<String, dynamic>> notifications() => api.get('/notifications');
   Future<Map<String, dynamic>> loans() => api.get('/loans');
   Future<Map<String, dynamic>> loan(int id) => api.get('/loans/$id');
-  Future<Map<String, dynamic>> createInstallmentPix(int installmentId) => api.post('/loan-installments/$installmentId/pix', {});
-  Future<Map<String, dynamic>> installmentPayment(int installmentId) => api.get('/loan-installments/$installmentId/payment');
+  Future<Map<String, dynamic>> createInstallmentPix(int installmentId) =>
+      api.post('/loan-installments/$installmentId/pix', {});
+  Future<Map<String, dynamic>> installmentPayment(int installmentId) =>
+      api.get('/loan-installments/$installmentId/payment');
   Future<MemberStatement> statement() async =>
       MemberStatement.fromJson(await api.get('/members/me/statement'));
 
   Future<List<FinancialObligation>> financialObligations() async {
     final response = await api.get('/members/me/obligations');
     final items = response['items'] as List<dynamic>? ?? const [];
-    return items.map((item) => FinancialObligation.fromJson(Map<String, dynamic>.from(item as Map))).toList();
+    return items
+        .map(
+          (item) => FinancialObligation.fromJson(
+            Map<String, dynamic>.from(item as Map),
+          ),
+        )
+        .toList();
   }
 
   Future<List<AdminDelinquencyItem>> adminDelinquency({
@@ -30,10 +39,17 @@ class AppRepository {
     DateTime? dueFrom,
     DateTime? dueTo,
   }) async {
-    String typeValue(FinancialObligationType value) =>
-        value == FinancialObligationType.loanInstallment ? 'LOAN_INSTALLMENT' : 'CONTRIBUTION';
-    String statusValue(FinancialObligationStatus value) => value.name.toUpperCase();
-    String dateValue(DateTime value) => value.toIso8601String().split('T').first;
+    String typeValue(FinancialObligationType value) => switch (value) {
+      FinancialObligationType.contribution => 'CONTRIBUTION',
+      FinancialObligationType.loanInstallment => 'LOAN_INSTALLMENT',
+      FinancialObligationType.agreementInstallment => 'AGREEMENT_INSTALLMENT',
+      FinancialObligationType.unknown =>
+        throw ArgumentError('Unknown obligation type'),
+    };
+    String statusValue(FinancialObligationStatus value) =>
+        value.name.toUpperCase();
+    String dateValue(DateTime value) =>
+        value.toIso8601String().split('T').first;
     final queryParameters = <String, String>{
       if (obligationType != null) 'obligation_type': typeValue(obligationType),
       if (status != null) 'status': statusValue(status),
@@ -42,24 +58,37 @@ class AppRepository {
       if (dueFrom != null) 'due_from': dateValue(dueFrom),
       if (dueTo != null) 'due_to': dateValue(dueTo),
     };
-    final path = Uri(
-      path: '/admin/delinquency',
-      queryParameters: queryParameters.isEmpty ? null : queryParameters,
-    ).toString();
+    final path =
+        Uri(
+          path: '/admin/delinquency',
+          queryParameters: queryParameters.isEmpty ? null : queryParameters,
+        ).toString();
     final response = await api.get(path);
     final items = response['items'] as List<dynamic>? ?? const [];
     return items
-        .map((item) => AdminDelinquencyItem.fromJson(Map<String, dynamic>.from(item as Map)))
+        .map(
+          (item) => AdminDelinquencyItem.fromJson(
+            Map<String, dynamic>.from(item as Map),
+          ),
+        )
         .toList();
   }
 
   Future<AdminDelinquencySummary> adminDelinquencySummary() async =>
-      AdminDelinquencySummary.fromJson(await api.get('/admin/delinquency/summary'));
+      AdminDelinquencySummary.fromJson(
+        await api.get('/admin/delinquency/summary'),
+      );
 
-  Future<PixPaymentStatusDetails> paymentStatus(int paymentId) async => PixPaymentStatusDetails.fromJson(await api.get('/payments/$paymentId'));
-  Future<PixReceipt> paymentReceipt(int paymentId) async => PixReceipt.fromJson(await api.get('/payments/$paymentId/receipt'));
-  Future<PixPayment> createContributionPix(int contributionId) async => PixPayment.fromJson(await api.postEmpty('/payments/pix/$contributionId'));
-  Future<PixPayment> createLoanInstallmentPix(int installmentId) async => PixPayment.fromJson(await api.post('/loan-installments/$installmentId/pix', {}));
+  Future<PixPaymentStatusDetails> paymentStatus(int paymentId) async =>
+      PixPaymentStatusDetails.fromJson(await api.get('/payments/$paymentId'));
+  Future<PixReceipt> paymentReceipt(int paymentId) async =>
+      PixReceipt.fromJson(await api.get('/payments/$paymentId/receipt'));
+  Future<PixPayment> createContributionPix(int contributionId) async =>
+      PixPayment.fromJson(await api.postEmpty('/payments/pix/$contributionId'));
+  Future<PixPayment> createLoanInstallmentPix(int installmentId) async =>
+      PixPayment.fromJson(
+        await api.post('/loan-installments/$installmentId/pix', {}),
+      );
 
   Future<LoanSimulation> simulateLoan({
     required String principal,
@@ -73,7 +102,9 @@ class AppRepository {
   }
 
   Future<void> confirmLoanSimulation(String simulationToken) async {
-    await api.post('/loans/simulations/confirm', {'simulation_token': simulationToken});
+    await api.post('/loans/simulations/confirm', {
+      'simulation_token': simulationToken,
+    });
   }
 
   Future<Map<String, dynamic>> requestLoan({
