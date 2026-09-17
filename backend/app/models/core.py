@@ -467,6 +467,8 @@ class MonthlyClosing(Base):
     closed_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    snapshot_json: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    snapshot_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True)
 
 class FinancialReconciliation(Base):
     __tablename__ = "financial_reconciliations"
