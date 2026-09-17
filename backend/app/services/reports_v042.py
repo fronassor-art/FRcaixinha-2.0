@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.models import (User, Member, Contribution, Loan, LoanInstallment, LedgerEntry,
                         Expense, CollectionAgreement, AgreementInstallment, ReportSnapshot)
 from app.services.collections_v038 import collections_summary
+from app.services.payment_financial_events import payment_financial_events
 
 ZERO=Decimal('0.00')
 def money(v): return str(Decimal(v or 0).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
@@ -19,15 +20,31 @@ def _period_ledger(db,start,end):
     return c,de
 
 def monthly_accountability(db:Session, competence:date):
+    with db.no_autoflush:
+        return _monthly_accountability(db, competence)
+
+
+def _monthly_accountability(db:Session, competence:date):
     start,end=bounds(competence)
-    contrib=Decimal(db.query(func.coalesce(func.sum(Contribution.amount),0)).filter(Contribution.status=='PAID',Contribution.competence.between(start,end)).scalar() or 0)
+    start_utc = datetime.combine(start, datetime.min.time(), tzinfo=timezone.utc)
+    end_utc = datetime.combine(next_day(end), datetime.min.time(), tzinfo=timezone.utc)
+    events = payment_financial_events(db, start=start_utc, end=end_utc)
+    totals = {
+        "CONTRIBUTION": ZERO,
+        "LOAN_PRINCIPAL": ZERO,
+        "LOAN_INTEREST": ZERO,
+        "LOAN_PENALTY": ZERO,
+        "AGREEMENT": ZERO,
+    }
+    for item in events:
+        if item.component in totals:
+            totals[item.component] += Decimal(item.amount)
+    contrib = totals["CONTRIBUTION"]
     expenses=Decimal(db.query(func.coalesce(func.sum(Expense.amount),0)).filter(Expense.status=='POSTED',Expense.expense_date.between(start,end)).scalar() or 0)
-    inst=db.query(LoanInstallment).filter(LoanInstallment.paid_at!=None,LoanInstallment.paid_at>=datetime.combine(start,datetime.min.time(),tzinfo=timezone.utc),LoanInstallment.paid_at<datetime.combine(next_day(end),datetime.min.time(),tzinfo=timezone.utc)).all()  # noqa
-    loan_principal=sum((Decimal(i.principal or 0) for i in inst),ZERO)
-    interest=sum((Decimal(i.interest or 0) for i in inst),ZERO)
-    penalties=sum((Decimal(i.paid_penalty_amount or 0) for i in inst),ZERO)
-    acinst=db.query(AgreementInstallment).filter(AgreementInstallment.paid_at!=None,AgreementInstallment.paid_at>=datetime.combine(start,datetime.min.time(),tzinfo=timezone.utc),AgreementInstallment.paid_at<datetime.combine(next_day(end),datetime.min.time(),tzinfo=timezone.utc)).all()  # noqa
-    agreement_paid=sum((Decimal(i.paid_amount or 0) for i in acinst),ZERO)
+    loan_principal = totals["LOAN_PRINCIPAL"]
+    interest = totals["LOAN_INTEREST"]
+    penalties = totals["LOAN_PENALTY"]
+    agreement_paid = totals["AGREEMENT"]
     credits,debits=_period_ledger(db,start,end)
     coll=collections_summary(db,end)
     return {'schema':'v0.42','report_type':'MONTHLY','competence':start.isoformat(),'period_end':end.isoformat(),
