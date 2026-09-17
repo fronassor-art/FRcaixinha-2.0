@@ -1,5 +1,5 @@
 from decimal import Decimal, ROUND_HALF_UP
-from sqlalchemy import func
+from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 from app.models import Group, Loan, LedgerEntry, AgreementInstallment, CollectionAgreement
 
@@ -18,7 +18,17 @@ def exposure(db: Session, member_id: int | None = None) -> Decimal:
     if member_id is not None:
         q = q.filter(Loan.member_id == member_id)
     total = money(q.scalar() or 0)
-    aq = db.query(func.coalesce(func.sum(AgreementInstallment.principal + AgreementInstallment.penalty_amount - AgreementInstallment.paid_amount - AgreementInstallment.paid_penalty_amount), 0)).join(CollectionAgreement, CollectionAgreement.id == AgreementInstallment.agreement_id).filter(CollectionAgreement.status == 'APPROVED', AgreementInstallment.status != 'PAID')
+    principal_remaining = AgreementInstallment.principal - AgreementInstallment.paid_amount
+    penalty_remaining = AgreementInstallment.penalty_amount - AgreementInstallment.paid_penalty_amount
+    principal_open = case(
+        (principal_remaining > 0, principal_remaining),
+        else_=Decimal('0.00'),
+    )
+    penalty_open = case(
+        (penalty_remaining > 0, penalty_remaining),
+        else_=Decimal('0.00'),
+    )
+    aq = db.query(func.coalesce(func.sum(principal_open + penalty_open), 0)).join(CollectionAgreement, CollectionAgreement.id == AgreementInstallment.agreement_id).filter(CollectionAgreement.status == 'APPROVED', AgreementInstallment.status != 'PAID')
     if member_id is not None:
         aq = aq.filter(CollectionAgreement.member_id == member_id)
     return money(total + Decimal(aq.scalar() or 0))

@@ -1,12 +1,22 @@
 import hashlib
 import json
 import secrets
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.db.session import get_db
-from app.models import User, Member, Loan, LoanSimulation, LoanInstallment, AuditLog
+from app.models import (
+    User,
+    Member,
+    Loan,
+    LoanSimulation,
+    LoanInstallment,
+    AuditLog,
+    CollectionAgreement,
+    AgreementInstallment,
+)
 from app.schemas.finance import LoanRequestIn, LoanDecisionIn, LoanSimulationIn, LoanSimulationConfirmationIn
 from app.api.deps import current_user, require_admin
 from app.services.notifications_v12 import create_notification
@@ -141,6 +151,24 @@ def _loan_eligibility(member, loan, db):
             Decimal(existing.principal or 0) - settled,
         )
 
+    agreement_rows = (
+        db.query(AgreementInstallment)
+        .join(CollectionAgreement, CollectionAgreement.id == AgreementInstallment.agreement_id)
+        .filter(
+            CollectionAgreement.member_id == member.id,
+            CollectionAgreement.status == "APPROVED",
+        )
+        .all()
+    )
+    agreement_open_balance = sum(
+        (
+            max(Decimal("0.00"), Decimal(row.principal or 0) - Decimal(row.paid_amount or 0))
+            + max(Decimal("0.00"), Decimal(row.penalty_amount or 0) - Decimal(row.paid_penalty_amount or 0))
+            for row in agreement_rows
+        ),
+        Decimal("0.00"),
+    )
+
     if quota and group.max_quota_multiple is not None:
         normal_limit = money(
             Decimal(quota.units) * Decimal(group.max_quota_multiple)
@@ -150,7 +178,7 @@ def _loan_eligibility(member, loan, db):
 
     liquidity = cash_balance(db)
 
-    return evaluate_loan_eligibility(
+    result = evaluate_loan_eligibility(
         own_balance=position["own_balance"],
         committed_balance=position["committed_balance"],
         outstanding_principal=money(outstanding),
@@ -158,6 +186,14 @@ def _loan_eligibility(member, loan, db):
         requested_amount=money(loan.principal),
         liquidity_available=liquidity,
     )
+    if agreement_open_balance > Decimal("0.00") and result.eligible:
+        return replace(
+            result,
+            eligible=False,
+            decision="RENEGOCIACAO",
+            reason="Existe dívida aberta; operação deve passar por renegociação.",
+        )
+    return result
 
 def _serialize(loan, db):
     installments = db.query(LoanInstallment).filter(LoanInstallment.loan_id == loan.id).order_by(LoanInstallment.number).all()

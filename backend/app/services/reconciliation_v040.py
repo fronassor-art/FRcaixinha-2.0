@@ -648,7 +648,9 @@ def build_advanced_reconciliation(db: Session, competence: date):
             'expected': '0',
             'observed': str(len(issues)),
         })
-    open_installments = db.query(LoanInstallment).filter(LoanInstallment.status!='PAID').all()
+    open_installments = db.query(LoanInstallment).filter(
+        LoanInstallment.status.notin_(['PAID', 'AGREED'])
+    ).all()
     negative = sum(
         1 for i in open_installments
         if (
