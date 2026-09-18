@@ -40,8 +40,23 @@ def upgrade() -> None:
     op.drop_index(op.f('ix_consent_records_type_created'), table_name='consent_records')
     op.drop_index(op.f('ix_consent_records_user'), table_name='consent_records')
     op.create_index(op.f('ix_consent_records_user_id'), 'consent_records', ['user_id'], unique=False)
-    op.drop_constraint(op.f('continuous_improvement_action_queue_snapshots_snapshot_date_key'), 'continuous_improvement_action_queue_snapshots', type_='unique')
-    op.drop_constraint(op.f('continuous_improvement_action_queue_snapshots_snapshot_hash_key'), 'continuous_improvement_action_queue_snapshots', type_='unique')
+    bind = op.get_bind()
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table(
+            'continuous_improvement_action_queue_snapshots',
+            naming_convention={'uq': '%(table_name)s_%(column_0_name)s_key'},
+        ) as batch_op:
+            batch_op.drop_constraint(op.f('continuous_improvement_action_queue_snapshots_snapshot_date_key'), type_='unique')
+    else:
+        op.drop_constraint(op.f('continuous_improvement_action_queue_snapshots_snapshot_date_key'), 'continuous_improvement_action_queue_snapshots', type_='unique')
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table(
+            'continuous_improvement_action_queue_snapshots',
+            naming_convention={'uq': '%(table_name)s_%(column_0_name)s_key'},
+        ) as batch_op:
+            batch_op.drop_constraint(op.f('continuous_improvement_action_queue_snapshots_snapshot_hash_key'), type_='unique')
+    else:
+        op.drop_constraint(op.f('continuous_improvement_action_queue_snapshots_snapshot_hash_key'), 'continuous_improvement_action_queue_snapshots', type_='unique')
     op.drop_index(op.f('ix_0071_date'), table_name='continuous_improvement_action_queue_snapshots')
     op.drop_index(op.f('ix_0071_hash'), table_name='continuous_improvement_action_queue_snapshots')
     op.drop_index(op.f('ix_0071_status'), table_name='continuous_improvement_action_queue_snapshots')
@@ -92,16 +107,44 @@ def upgrade() -> None:
     op.create_index(op.f('ix_continuous_improvement_certifications_execution_id'), 'continuous_improvement_certifications', ['execution_id'], unique=True)
     op.create_index(op.f('ix_continuous_improvement_certifications_package_hash'), 'continuous_improvement_certifications', ['package_hash'], unique=True)
     op.create_index(op.f('ix_continuous_improvement_certifications_status'), 'continuous_improvement_certifications', ['status'], unique=False)
-    op.drop_constraint(op.f('continuous_improvement_compliance_snapshots_snapshot_date_key'), 'continuous_improvement_compliance_snapshots', type_='unique')
-    op.drop_constraint(op.f('continuous_improvement_compliance_snapshots_snapshot_hash_key'), 'continuous_improvement_compliance_snapshots', type_='unique')
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table(
+            'continuous_improvement_compliance_snapshots',
+            naming_convention={'uq': '%(table_name)s_%(column_0_name)s_key'},
+        ) as batch_op:
+            batch_op.drop_constraint(op.f('continuous_improvement_compliance_snapshots_snapshot_date_key'), type_='unique')
+    else:
+        op.drop_constraint(op.f('continuous_improvement_compliance_snapshots_snapshot_date_key'), 'continuous_improvement_compliance_snapshots', type_='unique')
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table(
+            'continuous_improvement_compliance_snapshots',
+            naming_convention={'uq': '%(table_name)s_%(column_0_name)s_key'},
+        ) as batch_op:
+            batch_op.drop_constraint(op.f('continuous_improvement_compliance_snapshots_snapshot_hash_key'), type_='unique')
+    else:
+        op.drop_constraint(op.f('continuous_improvement_compliance_snapshots_snapshot_hash_key'), 'continuous_improvement_compliance_snapshots', type_='unique')
     op.drop_index(op.f('ix_0074_date'), table_name='continuous_improvement_compliance_snapshots')
     op.drop_index(op.f('ix_0074_hash'), table_name='continuous_improvement_compliance_snapshots')
     op.drop_index(op.f('ix_0074_status'), table_name='continuous_improvement_compliance_snapshots')
     op.create_index(op.f('ix_continuous_improvement_compliance_snapshots_snapshot_date'), 'continuous_improvement_compliance_snapshots', ['snapshot_date'], unique=True)
     op.create_index(op.f('ix_continuous_improvement_compliance_snapshots_snapshot_hash'), 'continuous_improvement_compliance_snapshots', ['snapshot_hash'], unique=True)
     op.create_index(op.f('ix_continuous_improvement_compliance_snapshots_status'), 'continuous_improvement_compliance_snapshots', ['status'], unique=False)
-    op.drop_constraint(op.f('continuous_improvement_dashboard_executive_sn_snapshot_date_key'), 'continuous_improvement_dashboard_executive_snapshots', type_='unique')
-    op.drop_constraint(op.f('continuous_improvement_dashboard_executive_sn_snapshot_hash_key'), 'continuous_improvement_dashboard_executive_snapshots', type_='unique')
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table(
+            'continuous_improvement_dashboard_executive_snapshots',
+            naming_convention={'uq': 'continuous_improvement_dashboard_executive_sn_%(column_0_name)s_key'},
+        ) as batch_op:
+            batch_op.drop_constraint(op.f('continuous_improvement_dashboard_executive_sn_snapshot_date_key'), type_='unique')
+    else:
+        op.drop_constraint(op.f('continuous_improvement_dashboard_executive_sn_snapshot_date_key'), 'continuous_improvement_dashboard_executive_snapshots', type_='unique')
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table(
+            'continuous_improvement_dashboard_executive_snapshots',
+            naming_convention={'uq': 'continuous_improvement_dashboard_executive_sn_%(column_0_name)s_key'},
+        ) as batch_op:
+            batch_op.drop_constraint(op.f('continuous_improvement_dashboard_executive_sn_snapshot_hash_key'), type_='unique')
+    else:
+        op.drop_constraint(op.f('continuous_improvement_dashboard_executive_sn_snapshot_hash_key'), 'continuous_improvement_dashboard_executive_snapshots', type_='unique')
     op.drop_index(op.f('ix_0070_date'), table_name='continuous_improvement_dashboard_executive_snapshots')
     op.drop_index(op.f('ix_0070_hash'), table_name='continuous_improvement_dashboard_executive_snapshots')
     op.drop_index(op.f('ix_0070_status'), table_name='continuous_improvement_dashboard_executive_snapshots')
@@ -144,7 +187,11 @@ def upgrade() -> None:
     op.drop_index(op.f('ix_ci_exec_status'), table_name='continuous_improvement_executions')
     op.drop_index(op.f('ix_ci_exec_updated'), table_name='continuous_improvement_executions')
     op.drop_index(op.f('ix_ci_exec_verified'), table_name='continuous_improvement_executions')
-    op.drop_constraint(op.f('uq_ci_exec_decision'), 'continuous_improvement_executions', type_='unique')
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table('continuous_improvement_executions') as batch_op:
+            batch_op.drop_constraint(op.f('uq_ci_exec_decision'), type_='unique')
+    else:
+        op.drop_constraint(op.f('uq_ci_exec_decision'), 'continuous_improvement_executions', type_='unique')
     op.create_index(op.f('ix_continuous_improvement_executions_assigned_to'), 'continuous_improvement_executions', ['assigned_to'], unique=False)
     op.create_index(op.f('ix_continuous_improvement_executions_created_at'), 'continuous_improvement_executions', ['created_at'], unique=False)
     op.create_index(op.f('ix_continuous_improvement_executions_decision_id'), 'continuous_improvement_executions', ['decision_id'], unique=True)
@@ -161,16 +208,44 @@ def upgrade() -> None:
     op.create_index(op.f('ix_continuous_improvement_executive_audit_snapshots_created_at'), 'continuous_improvement_executive_audit_snapshots', ['created_at'], unique=False)
     op.create_index(op.f('ix_continuous_improvement_executive_audit_snapshots_snapshot_hash'), 'continuous_improvement_executive_audit_snapshots', ['snapshot_hash'], unique=True)
     op.create_index(op.f('ix_continuous_improvement_executive_audit_snapshots_status'), 'continuous_improvement_executive_audit_snapshots', ['status'], unique=False)
-    op.drop_constraint(op.f('continuous_improvement_export_snapshots_snapshot_date_key'), 'continuous_improvement_export_snapshots', type_='unique')
-    op.drop_constraint(op.f('continuous_improvement_export_snapshots_snapshot_hash_key'), 'continuous_improvement_export_snapshots', type_='unique')
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table(
+            'continuous_improvement_export_snapshots',
+            naming_convention={'uq': '%(table_name)s_%(column_0_name)s_key'},
+        ) as batch_op:
+            batch_op.drop_constraint(op.f('continuous_improvement_export_snapshots_snapshot_date_key'), type_='unique')
+    else:
+        op.drop_constraint(op.f('continuous_improvement_export_snapshots_snapshot_date_key'), 'continuous_improvement_export_snapshots', type_='unique')
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table(
+            'continuous_improvement_export_snapshots',
+            naming_convention={'uq': '%(table_name)s_%(column_0_name)s_key'},
+        ) as batch_op:
+            batch_op.drop_constraint(op.f('continuous_improvement_export_snapshots_snapshot_hash_key'), type_='unique')
+    else:
+        op.drop_constraint(op.f('continuous_improvement_export_snapshots_snapshot_hash_key'), 'continuous_improvement_export_snapshots', type_='unique')
     op.drop_index(op.f('ix_0075_date'), table_name='continuous_improvement_export_snapshots')
     op.drop_index(op.f('ix_0075_hash'), table_name='continuous_improvement_export_snapshots')
     op.drop_index(op.f('ix_0075_status'), table_name='continuous_improvement_export_snapshots')
     op.create_index(op.f('ix_continuous_improvement_export_snapshots_snapshot_date'), 'continuous_improvement_export_snapshots', ['snapshot_date'], unique=True)
     op.create_index(op.f('ix_continuous_improvement_export_snapshots_snapshot_hash'), 'continuous_improvement_export_snapshots', ['snapshot_hash'], unique=True)
     op.create_index(op.f('ix_continuous_improvement_export_snapshots_status'), 'continuous_improvement_export_snapshots', ['status'], unique=False)
-    op.drop_constraint(op.f('continuous_improvement_kpi_snapshots_snapshot_date_key'), 'continuous_improvement_kpi_snapshots', type_='unique')
-    op.drop_constraint(op.f('continuous_improvement_kpi_snapshots_snapshot_hash_key'), 'continuous_improvement_kpi_snapshots', type_='unique')
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table(
+            'continuous_improvement_kpi_snapshots',
+            naming_convention={'uq': '%(table_name)s_%(column_0_name)s_key'},
+        ) as batch_op:
+            batch_op.drop_constraint(op.f('continuous_improvement_kpi_snapshots_snapshot_date_key'), type_='unique')
+    else:
+        op.drop_constraint(op.f('continuous_improvement_kpi_snapshots_snapshot_date_key'), 'continuous_improvement_kpi_snapshots', type_='unique')
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table(
+            'continuous_improvement_kpi_snapshots',
+            naming_convention={'uq': '%(table_name)s_%(column_0_name)s_key'},
+        ) as batch_op:
+            batch_op.drop_constraint(op.f('continuous_improvement_kpi_snapshots_snapshot_hash_key'), type_='unique')
+    else:
+        op.drop_constraint(op.f('continuous_improvement_kpi_snapshots_snapshot_hash_key'), 'continuous_improvement_kpi_snapshots', type_='unique')
     op.drop_index(op.f('ix_0072_date'), table_name='continuous_improvement_kpi_snapshots')
     op.drop_index(op.f('ix_0072_hash'), table_name='continuous_improvement_kpi_snapshots')
     op.drop_index(op.f('ix_0072_status'), table_name='continuous_improvement_kpi_snapshots')
@@ -183,7 +258,14 @@ def upgrade() -> None:
     op.create_index(op.f('ix_continuous_improvement_measurements_created_at'), 'continuous_improvement_measurements', ['created_at'], unique=False)
     op.create_index(op.f('ix_continuous_improvement_measurements_integrity_hash'), 'continuous_improvement_measurements', ['integrity_hash'], unique=True)
     op.create_index(op.f('ix_continuous_improvement_measurements_plan_id'), 'continuous_improvement_measurements', ['plan_id'], unique=False)
-    op.drop_constraint(op.f('continuous_improvement_plans_recommendation_id_key'), 'continuous_improvement_plans', type_='unique')
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table(
+            'continuous_improvement_plans',
+            naming_convention={'uq': '%(table_name)s_%(column_0_name)s_key'},
+        ) as batch_op:
+            batch_op.drop_constraint(op.f('continuous_improvement_plans_recommendation_id_key'), type_='unique')
+    else:
+        op.drop_constraint(op.f('continuous_improvement_plans_recommendation_id_key'), 'continuous_improvement_plans', type_='unique')
     op.drop_index(op.f('ix_ci_plan_assigned'), table_name='continuous_improvement_plans')
     op.drop_index(op.f('ix_ci_plan_created'), table_name='continuous_improvement_plans')
     op.drop_index(op.f('ix_ci_plan_hash'), table_name='continuous_improvement_plans')
@@ -204,15 +286,36 @@ def upgrade() -> None:
     op.create_index(op.f('ix_continuous_improvement_priority_snapshots_snapshot_hash'), 'continuous_improvement_priority_snapshots', ['snapshot_hash'], unique=True)
     op.create_index(op.f('ix_continuous_improvement_priority_snapshots_status'), 'continuous_improvement_priority_snapshots', ['status'], unique=False)
     op.create_index(op.f('ix_continuous_improvement_priority_snapshots_updated_at'), 'continuous_improvement_priority_snapshots', ['updated_at'], unique=False)
-    op.drop_constraint(op.f('continuous_improvement_production_readiness_s_snapshot_date_key'), 'continuous_improvement_production_readiness_snapshots', type_='unique')
-    op.drop_constraint(op.f('continuous_improvement_production_readiness_s_snapshot_hash_key'), 'continuous_improvement_production_readiness_snapshots', type_='unique')
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table(
+            'continuous_improvement_production_readiness_snapshots',
+            naming_convention={'uq': 'continuous_improvement_production_readiness_s_%(column_0_name)s_key'},
+        ) as batch_op:
+            batch_op.drop_constraint(op.f('continuous_improvement_production_readiness_s_snapshot_date_key'), type_='unique')
+    else:
+        op.drop_constraint(op.f('continuous_improvement_production_readiness_s_snapshot_date_key'), 'continuous_improvement_production_readiness_snapshots', type_='unique')
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table(
+            'continuous_improvement_production_readiness_snapshots',
+            naming_convention={'uq': 'continuous_improvement_production_readiness_s_%(column_0_name)s_key'},
+        ) as batch_op:
+            batch_op.drop_constraint(op.f('continuous_improvement_production_readiness_s_snapshot_hash_key'), type_='unique')
+    else:
+        op.drop_constraint(op.f('continuous_improvement_production_readiness_s_snapshot_hash_key'), 'continuous_improvement_production_readiness_snapshots', type_='unique')
     op.drop_index(op.f('ix_0076_date'), table_name='continuous_improvement_production_readiness_snapshots')
     op.drop_index(op.f('ix_0076_hash'), table_name='continuous_improvement_production_readiness_snapshots')
     op.drop_index(op.f('ix_0076_status'), table_name='continuous_improvement_production_readiness_snapshots')
     op.create_index(op.f('ix_continuous_improvement_production_readiness_snapshots_snapshot_hash'), 'continuous_improvement_production_readiness_snapshots', ['snapshot_hash'], unique=True)
     op.create_index(op.f('ix_continuous_improvement_production_readiness_snapshots_snapshot_date'), 'continuous_improvement_production_readiness_snapshots', ['snapshot_date'], unique=True)
     op.create_index(op.f('ix_continuous_improvement_production_readiness_snapshots_status'), 'continuous_improvement_production_readiness_snapshots', ['status'], unique=False)
-    op.drop_constraint(op.f('continuous_improvement_program_release_snapsh_snapshot_hash_key'), 'continuous_improvement_program_release_snapshots', type_='unique')
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table(
+            'continuous_improvement_program_release_snapshots',
+            naming_convention={'uq': 'continuous_improvement_program_release_snapsh_%(column_0_name)s_key'},
+        ) as batch_op:
+            batch_op.drop_constraint(op.f('continuous_improvement_program_release_snapsh_snapshot_hash_key'), type_='unique')
+    else:
+        op.drop_constraint(op.f('continuous_improvement_program_release_snapsh_snapshot_hash_key'), 'continuous_improvement_program_release_snapshots', type_='unique')
     op.drop_index(op.f('ix_0077_hash'), table_name='continuous_improvement_program_release_snapshots')
     op.drop_index(op.f('ix_0077_status'), table_name='continuous_improvement_program_release_snapshots')
     op.drop_index(op.f('ix_0077_version'), table_name='continuous_improvement_program_release_snapshots')
@@ -230,8 +333,22 @@ def upgrade() -> None:
     op.create_index(op.f('ix_continuous_improvement_recommendations_pattern_code'), 'continuous_improvement_recommendations', ['pattern_code'], unique=False)
     op.create_index(op.f('ix_continuous_improvement_recommendations_status'), 'continuous_improvement_recommendations', ['status'], unique=False)
     op.create_index(op.f('ix_continuous_improvement_recommendations_updated_at'), 'continuous_improvement_recommendations', ['updated_at'], unique=False)
-    op.drop_constraint(op.f('continuous_improvement_sla_snapshots_snapshot_date_key'), 'continuous_improvement_sla_snapshots', type_='unique')
-    op.drop_constraint(op.f('continuous_improvement_sla_snapshots_snapshot_hash_key'), 'continuous_improvement_sla_snapshots', type_='unique')
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table(
+            'continuous_improvement_sla_snapshots',
+            naming_convention={'uq': '%(table_name)s_%(column_0_name)s_key'},
+        ) as batch_op:
+            batch_op.drop_constraint(op.f('continuous_improvement_sla_snapshots_snapshot_date_key'), type_='unique')
+    else:
+        op.drop_constraint(op.f('continuous_improvement_sla_snapshots_snapshot_date_key'), 'continuous_improvement_sla_snapshots', type_='unique')
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table(
+            'continuous_improvement_sla_snapshots',
+            naming_convention={'uq': '%(table_name)s_%(column_0_name)s_key'},
+        ) as batch_op:
+            batch_op.drop_constraint(op.f('continuous_improvement_sla_snapshots_snapshot_hash_key'), type_='unique')
+    else:
+        op.drop_constraint(op.f('continuous_improvement_sla_snapshots_snapshot_hash_key'), 'continuous_improvement_sla_snapshots', type_='unique')
     op.drop_index(op.f('ix_0073_date'), table_name='continuous_improvement_sla_snapshots')
     op.drop_index(op.f('ix_0073_hash'), table_name='continuous_improvement_sla_snapshots')
     op.drop_index(op.f('ix_0073_status'), table_name='continuous_improvement_sla_snapshots')
@@ -239,18 +356,43 @@ def upgrade() -> None:
     op.create_index(op.f('ix_continuous_improvement_sla_snapshots_snapshot_hash'), 'continuous_improvement_sla_snapshots', ['snapshot_hash'], unique=True)
     op.create_index(op.f('ix_continuous_improvement_sla_snapshots_status'), 'continuous_improvement_sla_snapshots', ['status'], unique=False)
     op.add_column('contributions', sa.Column('pix_idempotency_key', sa.String(length=64), nullable=True))
-    op.drop_constraint(op.f('contributions_member_id_competence_key'), 'contributions', type_='unique')
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table(
+            'contributions',
+            naming_convention={'uq': '%(table_name)s_%(column_0_name)s_%(column_1_name)s_key'},
+        ) as batch_op:
+            batch_op.drop_constraint(op.f('contributions_member_id_competence_key'), type_='unique')
+    else:
+        op.drop_constraint(op.f('contributions_member_id_competence_key'), 'contributions', type_='unique')
     op.drop_index(op.f('ix_contributions_competence'), table_name='contributions')
     op.drop_index(op.f('ix_contributions_status'), table_name='contributions')
-    op.create_unique_constraint('uq_contribution_member_competence', 'contributions', ['member_id', 'competence'])
-    op.create_unique_constraint(None, 'contributions', ['pix_idempotency_key'])
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table('contributions') as batch_op:
+            batch_op.create_unique_constraint('uq_contribution_member_competence', ['member_id', 'competence'])
+    else:
+        op.create_unique_constraint('uq_contribution_member_competence', 'contributions', ['member_id', 'competence'])
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table(
+            'contributions',
+            naming_convention={'uq': '%(table_name)s_%(column_0_name)s_key'},
+        ) as batch_op:
+            batch_op.create_unique_constraint(
+                'contributions_pix_idempotency_key_key',
+                ['pix_idempotency_key'],
+            )
+    else:
+        op.create_unique_constraint(None, 'contributions', ['pix_idempotency_key'])
     op.drop_index(op.f('ix_capa_due'), table_name='corrective_action_plans')
     op.drop_index(op.f('ix_capa_incident'), table_name='corrective_action_plans')
     op.drop_index(op.f('ix_capa_owner'), table_name='corrective_action_plans')
     op.drop_index(op.f('ix_capa_priority'), table_name='corrective_action_plans')
     op.drop_index(op.f('ix_capa_status'), table_name='corrective_action_plans')
     op.drop_index(op.f('ix_capa_updated'), table_name='corrective_action_plans')
-    op.drop_constraint(op.f('uq_capa_incident'), 'corrective_action_plans', type_='unique')
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table('corrective_action_plans') as batch_op:
+            batch_op.drop_constraint('uq_capa_incident', type_='unique')
+    else:
+        op.drop_constraint(op.f('uq_capa_incident'), 'corrective_action_plans', type_='unique')
     op.create_index(op.f('ix_corrective_action_plans_due_at'), 'corrective_action_plans', ['due_at'], unique=False)
     op.create_index(op.f('ix_corrective_action_plans_incident_id'), 'corrective_action_plans', ['incident_id'], unique=True)
     op.create_index(op.f('ix_corrective_action_plans_owner_id'), 'corrective_action_plans', ['owner_id'], unique=False)
@@ -274,7 +416,11 @@ def upgrade() -> None:
     op.drop_index(op.f('ix_exec_risk_exec_created'), table_name='executive_risk_decision_executions')
     op.drop_index(op.f('ix_exec_risk_exec_hash'), table_name='executive_risk_decision_executions')
     op.drop_index(op.f('ix_exec_risk_exec_status'), table_name='executive_risk_decision_executions')
-    op.drop_constraint(op.f('uq_exec_risk_execution_governance'), 'executive_risk_decision_executions', type_='unique')
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table('executive_risk_decision_executions') as batch_op:
+            batch_op.drop_constraint('uq_exec_risk_execution_governance', type_='unique')
+    else:
+        op.drop_constraint(op.f('uq_exec_risk_execution_governance'), 'executive_risk_decision_executions', type_='unique')
     op.create_index(op.f('ix_executive_risk_decision_executions_assigned_to'), 'executive_risk_decision_executions', ['assigned_to'], unique=False)
     op.create_index(op.f('ix_executive_risk_decision_executions_created_at'), 'executive_risk_decision_executions', ['created_at'], unique=False)
     op.create_index(op.f('ix_executive_risk_decision_executions_evidence_manifest_hash'), 'executive_risk_decision_executions', ['evidence_manifest_hash'], unique=False)
@@ -285,7 +431,11 @@ def upgrade() -> None:
     op.drop_index(op.f('ix_exec_risk_gov_hash'), table_name='executive_risk_decision_governance')
     op.drop_index(op.f('ix_exec_risk_gov_status'), table_name='executive_risk_decision_governance')
     op.drop_index(op.f('ix_exec_risk_gov_validation'), table_name='executive_risk_decision_governance')
-    op.drop_constraint(op.f('uq_exec_risk_gov_decision'), 'executive_risk_decision_governance', type_='unique')
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table('executive_risk_decision_governance') as batch_op:
+            batch_op.drop_constraint('uq_exec_risk_gov_decision', type_='unique')
+    else:
+        op.drop_constraint(op.f('uq_exec_risk_gov_decision'), 'executive_risk_decision_governance', type_='unique')
     op.create_index(op.f('ix_executive_risk_decision_governance_decision_id'), 'executive_risk_decision_governance', ['decision_id'], unique=True)
     op.create_index(op.f('ix_executive_risk_decision_governance_integrity_hash'), 'executive_risk_decision_governance', ['integrity_hash'], unique=True)
     op.create_index(op.f('ix_executive_risk_decision_governance_status'), 'executive_risk_decision_governance', ['status'], unique=False)
@@ -309,7 +459,11 @@ def upgrade() -> None:
     op.drop_index(op.f('ix_exec_risk_eff_created'), table_name='executive_risk_effectiveness')
     op.drop_index(op.f('ix_exec_risk_eff_hash'), table_name='executive_risk_effectiveness')
     op.drop_index(op.f('ix_exec_risk_eff_status'), table_name='executive_risk_effectiveness')
-    op.drop_constraint(op.f('uq_exec_risk_effectiveness_execution'), 'executive_risk_effectiveness', type_='unique')
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table('executive_risk_effectiveness') as batch_op:
+            batch_op.drop_constraint('uq_exec_risk_effectiveness_execution', type_='unique')
+    else:
+        op.drop_constraint(op.f('uq_exec_risk_effectiveness_execution'), 'executive_risk_effectiveness', type_='unique')
     op.create_index(op.f('ix_executive_risk_effectiveness_created_at'), 'executive_risk_effectiveness', ['created_at'], unique=False)
     op.create_index(op.f('ix_executive_risk_effectiveness_execution_id'), 'executive_risk_effectiveness', ['execution_id'], unique=True)
     op.create_index(op.f('ix_executive_risk_effectiveness_integrity_hash'), 'executive_risk_effectiveness', ['integrity_hash'], unique=True)
@@ -317,8 +471,16 @@ def upgrade() -> None:
     op.create_index(op.f('ix_executive_risk_effectiveness_updated_at'), 'executive_risk_effectiveness', ['updated_at'], unique=False)
     op.drop_index(op.f('ix_exec_risk_response_created'), table_name='executive_risk_response_snapshots')
     op.drop_index(op.f('ix_exec_risk_response_status'), table_name='executive_risk_response_snapshots')
-    op.drop_constraint(op.f('uq_executive_risk_response_snapshot_date'), 'executive_risk_response_snapshots', type_='unique')
-    op.drop_constraint(op.f('uq_executive_risk_response_snapshot_hash'), 'executive_risk_response_snapshots', type_='unique')
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table('executive_risk_response_snapshots') as batch_op:
+            batch_op.drop_constraint('uq_executive_risk_response_snapshot_date', type_='unique')
+    else:
+        op.drop_constraint(op.f('uq_executive_risk_response_snapshot_date'), 'executive_risk_response_snapshots', type_='unique')
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table('executive_risk_response_snapshots') as batch_op:
+            batch_op.drop_constraint('uq_executive_risk_response_snapshot_hash', type_='unique')
+    else:
+        op.drop_constraint(op.f('uq_executive_risk_response_snapshot_hash'), 'executive_risk_response_snapshots', type_='unique')
     op.create_index(op.f('ix_executive_risk_response_snapshots_created_at'), 'executive_risk_response_snapshots', ['created_at'], unique=False)
     op.create_index(op.f('ix_executive_risk_response_snapshots_snapshot_date'), 'executive_risk_response_snapshots', ['snapshot_date'], unique=True)
     op.create_index(op.f('ix_executive_risk_response_snapshots_snapshot_hash'), 'executive_risk_response_snapshots', ['snapshot_hash'], unique=True)
@@ -341,24 +503,76 @@ def upgrade() -> None:
     op.create_index(op.f('ix_financial_risk_assessments_status'), 'financial_risk_assessments', ['status'], unique=False)
     op.create_index(op.f('ix_financial_risk_assessments_subject_id'), 'financial_risk_assessments', ['subject_id'], unique=False)
     op.create_index(op.f('ix_financial_risk_assessments_subject_type'), 'financial_risk_assessments', ['subject_type'], unique=False)
-    op.drop_constraint(op.f('uq_governance_snapshot_date'), 'governance_snapshots', type_='unique')
-    op.drop_constraint(op.f('uq_governance_snapshot_hash'), 'governance_snapshots', type_='unique')
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table('governance_snapshots') as batch_op:
+            batch_op.drop_constraint('uq_governance_snapshot_date', type_='unique')
+    else:
+        op.drop_constraint(op.f('uq_governance_snapshot_date'), 'governance_snapshots', type_='unique')
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table('governance_snapshots') as batch_op:
+            batch_op.drop_constraint('uq_governance_snapshot_hash', type_='unique')
+    else:
+        op.drop_constraint(op.f('uq_governance_snapshot_hash'), 'governance_snapshots', type_='unique')
     op.drop_index(op.f('ix_governance_snapshots_snapshot_date'), table_name='governance_snapshots')
     op.create_index(op.f('ix_governance_snapshots_snapshot_date'), 'governance_snapshots', ['snapshot_date'], unique=True)
-    op.drop_constraint(op.f('uq_ledger_entries_entry_hash'), 'ledger_entries', type_='unique')
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table('ledger_entries') as batch_op:
+            batch_op.drop_constraint('uq_ledger_entries_entry_hash', type_='unique')
+    else:
+        op.drop_constraint(op.f('uq_ledger_entries_entry_hash'), 'ledger_entries', type_='unique')
     op.drop_index(op.f('uq_ledger_entries_one_reversal'), table_name='ledger_entries', postgresql_where='(reversal_of_id IS NOT NULL)')
     op.create_index(op.f('ix_ledger_entries_entry_hash'), 'ledger_entries', ['entry_hash'], unique=True)
     op.drop_index(op.f('ix_loan_capacity_snapshots_hash'), table_name='loan_capacity_snapshots')
     op.create_index(op.f('ix_loan_capacity_snapshots_snapshot_hash'), 'loan_capacity_snapshots', ['snapshot_hash'], unique=True)
     op.drop_index(op.f('ix_installments_collection_stage'), table_name='loan_installments')
     op.drop_index(op.f('ix_installments_status_due'), table_name='loan_installments')
-    op.drop_constraint(op.f('loan_installments_loan_id_number_key'), 'loan_installments', type_='unique')
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table(
+            'loan_installments',
+            naming_convention={'uq': '%(table_name)s_%(column_0_name)s_%(column_1_name)s_key'},
+        ) as batch_op:
+            batch_op.drop_constraint(op.f('loan_installments_loan_id_number_key'), type_='unique')
+    else:
+        op.drop_constraint(op.f('loan_installments_loan_id_number_key'), 'loan_installments', type_='unique')
     op.create_index(op.f('ix_loan_installments_collection_stage'), 'loan_installments', ['collection_stage'], unique=False)
-    op.create_unique_constraint('uq_loan_installment_number', 'loan_installments', ['loan_id', 'number'])
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table('loan_installments') as batch_op:
+            batch_op.create_unique_constraint(
+                'uq_loan_installment_number',
+                ['loan_id', 'number'],
+            )
+    else:
+        op.create_unique_constraint(
+            'uq_loan_installment_number',
+            'loan_installments',
+            ['loan_id', 'number'],
+        )
     op.drop_index(op.f('ix_loans_status'), table_name='loans')
     op.drop_index(op.f('ix_members_status'), table_name='members')
-    op.drop_constraint(op.f('uq_monthly_closing_competence'), 'monthly_closings', type_='unique')
-    op.drop_constraint(op.f('uq_monthly_closing_snapshot_hash'), 'monthly_closings', type_='unique')
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table('monthly_closings') as batch_op:
+            batch_op.drop_constraint(
+                'uq_monthly_closing_competence',
+                type_='unique',
+            )
+    else:
+        op.drop_constraint(
+            op.f('uq_monthly_closing_competence'),
+            'monthly_closings',
+            type_='unique',
+        )
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table('monthly_closings') as batch_op:
+            batch_op.drop_constraint(
+                'uq_monthly_closing_snapshot_hash',
+                type_='unique',
+            )
+    else:
+        op.drop_constraint(
+            op.f('uq_monthly_closing_snapshot_hash'),
+            'monthly_closings',
+            type_='unique',
+        )
     op.drop_index(op.f('ix_monthly_closings_competence'), table_name='monthly_closings')
     op.create_index(op.f('ix_monthly_closings_competence'), 'monthly_closings', ['competence'], unique=True)
     op.drop_column('monthly_closings', 'snapshot_json')
@@ -366,7 +580,18 @@ def upgrade() -> None:
     op.drop_index(op.f('ix_notification_deliveries_notification'), table_name='notification_deliveries')
     op.create_index(op.f('ix_notification_deliveries_notification_id'), 'notification_deliveries', ['notification_id'], unique=False)
     op.drop_index(op.f('ix_notification_preferences_user'), table_name='notification_preferences')
-    op.drop_constraint(op.f('uq_notification_preferences_user'), 'notification_preferences', type_='unique')
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table('notification_preferences') as batch_op:
+            batch_op.drop_constraint(
+                'uq_notification_preferences_user',
+                type_='unique',
+            )
+    else:
+        op.drop_constraint(
+            op.f('uq_notification_preferences_user'),
+            'notification_preferences',
+            type_='unique',
+        )
     op.create_index(op.f('ix_notification_preferences_user_id'), 'notification_preferences', ['user_id'], unique=True)
     op.drop_index(op.f('ix_operational_risk_alert_created'), table_name='operational_risk_alerts')
     op.drop_index(op.f('ix_operational_risk_alert_severity'), table_name='operational_risk_alerts')
@@ -374,7 +599,18 @@ def upgrade() -> None:
     op.drop_index(op.f('ix_operational_risk_alert_status'), table_name='operational_risk_alerts')
     op.drop_index(op.f('ix_operational_risk_alert_type'), table_name='operational_risk_alerts')
     op.drop_index(op.f('ix_operational_risk_alert_updated'), table_name='operational_risk_alerts')
-    op.drop_constraint(op.f('uq_operational_risk_alert_fingerprint'), 'operational_risk_alerts', type_='unique')
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table('operational_risk_alerts') as batch_op:
+            batch_op.drop_constraint(
+                'uq_operational_risk_alert_fingerprint',
+                type_='unique',
+            )
+    else:
+        op.drop_constraint(
+            op.f('uq_operational_risk_alert_fingerprint'),
+            'operational_risk_alerts',
+            type_='unique',
+        )
     op.create_index(op.f('ix_operational_risk_alerts_alert_type'), 'operational_risk_alerts', ['alert_type'], unique=False)
     op.create_index(op.f('ix_operational_risk_alerts_created_at'), 'operational_risk_alerts', ['created_at'], unique=False)
     op.create_index(op.f('ix_operational_risk_alerts_fingerprint'), 'operational_risk_alerts', ['fingerprint'], unique=True)
@@ -388,7 +624,18 @@ def upgrade() -> None:
     op.drop_index(op.f('ix_risk_response_status'), table_name='operational_risk_response_plans')
     op.drop_index(op.f('ix_risk_response_task'), table_name='operational_risk_response_plans')
     op.drop_index(op.f('ix_risk_response_updated'), table_name='operational_risk_response_plans')
-    op.drop_constraint(op.f('uq_risk_response_alert'), 'operational_risk_response_plans', type_='unique')
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table('operational_risk_response_plans') as batch_op:
+            batch_op.drop_constraint(
+                'uq_risk_response_alert',
+                type_='unique',
+            )
+    else:
+        op.drop_constraint(
+            op.f('uq_risk_response_alert'),
+            'operational_risk_response_plans',
+            type_='unique',
+        )
     op.create_index(op.f('ix_operational_risk_response_plans_alert_id'), 'operational_risk_response_plans', ['alert_id'], unique=True)
     op.create_index(op.f('ix_operational_risk_response_plans_assigned_to'), 'operational_risk_response_plans', ['assigned_to'], unique=False)
     op.create_index(op.f('ix_operational_risk_response_plans_priority'), 'operational_risk_response_plans', ['priority'], unique=False)
@@ -398,8 +645,30 @@ def upgrade() -> None:
     op.drop_index(op.f('ix_operational_risk_snapshot_created'), table_name='operational_risk_trend_snapshots')
     op.drop_index(op.f('ix_operational_risk_snapshot_score'), table_name='operational_risk_trend_snapshots')
     op.drop_index(op.f('ix_operational_risk_snapshot_status'), table_name='operational_risk_trend_snapshots')
-    op.drop_constraint(op.f('uq_operational_risk_snapshot_date'), 'operational_risk_trend_snapshots', type_='unique')
-    op.drop_constraint(op.f('uq_operational_risk_snapshot_hash'), 'operational_risk_trend_snapshots', type_='unique')
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table('operational_risk_trend_snapshots') as batch_op:
+            batch_op.drop_constraint(
+                'uq_operational_risk_snapshot_date',
+                type_='unique',
+            )
+    else:
+        op.drop_constraint(
+            op.f('uq_operational_risk_snapshot_date'),
+            'operational_risk_trend_snapshots',
+            type_='unique',
+        )
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table('operational_risk_trend_snapshots') as batch_op:
+            batch_op.drop_constraint(
+                'uq_operational_risk_snapshot_hash',
+                type_='unique',
+            )
+    else:
+        op.drop_constraint(
+            op.f('uq_operational_risk_snapshot_hash'),
+            'operational_risk_trend_snapshots',
+            type_='unique',
+        )
     op.create_index(op.f('ix_operational_risk_trend_snapshots_created_at'), 'operational_risk_trend_snapshots', ['created_at'], unique=False)
     op.create_index(op.f('ix_operational_risk_trend_snapshots_risk_score'), 'operational_risk_trend_snapshots', ['risk_score'], unique=False)
     op.create_index(op.f('ix_operational_risk_trend_snapshots_snapshot_date'), 'operational_risk_trend_snapshots', ['snapshot_date'], unique=True)
@@ -412,7 +681,20 @@ def upgrade() -> None:
     op.create_index(op.f('ix_operational_workflow_events_event_hash'), 'operational_workflow_events', ['event_hash'], unique=False)
     op.create_index(op.f('ix_operational_workflow_events_task_id'), 'operational_workflow_events', ['task_id'], unique=False)
     op.drop_index(op.f('ix_workflow_orch_execution_state'), table_name='operational_workflow_orchestrations')
-    op.drop_constraint(op.f('uq_operational_workflow_orchestrations_task'), 'operational_workflow_orchestrations', type_='unique')
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table(
+            'operational_workflow_orchestrations'
+        ) as batch_op:
+            batch_op.drop_constraint(
+                'uq_operational_workflow_orchestrations_task',
+                type_='unique',
+            )
+    else:
+        op.drop_constraint(
+            op.f('uq_operational_workflow_orchestrations_task'),
+            'operational_workflow_orchestrations',
+            type_='unique',
+        )
     op.create_index(op.f('ix_operational_workflow_orchestrations_execution_state'), 'operational_workflow_orchestrations', ['execution_state'], unique=False)
     op.create_index(op.f('ix_operational_workflow_orchestrations_task_id'), 'operational_workflow_orchestrations', ['task_id'], unique=True)
     op.drop_index(op.f('ix_owt_action'), table_name='operational_workflow_tasks')
@@ -437,11 +719,54 @@ def upgrade() -> None:
     op.create_index(op.f('ix_payment_promises_case_id'), 'payment_promises', ['case_id'], unique=False)
     op.create_index(op.f('ix_payment_promises_member_id'), 'payment_promises', ['member_id'], unique=False)
     op.create_index(op.f('ix_payment_promises_status'), 'payment_promises', ['status'], unique=False)
-    op.drop_constraint(op.f('payments_idempotency_key_key'), 'payments', type_='unique')
-    op.drop_constraint(op.f('payments_provider_provider_payment_id_key'), 'payments', type_='unique')
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table(
+            'payments',
+            naming_convention={
+                'uq': '%(table_name)s_%(column_0_name)s_key'
+            },
+        ) as batch_op:
+            batch_op.drop_constraint(
+                op.f('payments_idempotency_key_key'),
+                type_='unique',
+            )
+    else:
+        op.drop_constraint(
+            op.f('payments_idempotency_key_key'),
+            'payments',
+            type_='unique',
+        )
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table(
+            'payments',
+            naming_convention={
+                'uq': '%(table_name)s_%(column_0_name)s_key'
+            },
+        ) as batch_op:
+            batch_op.drop_constraint(
+                'payments_provider_key',
+                type_='unique',
+            )
+    else:
+        op.drop_constraint(
+            op.f('payments_provider_provider_payment_id_key'),
+            'payments',
+            type_='unique',
+        )
     op.drop_index(op.f('ix_payments_idempotency_key'), table_name='payments')
     op.create_index(op.f('ix_payments_idempotency_key'), 'payments', ['idempotency_key'], unique=True)
-    op.create_unique_constraint('uq_provider_payment', 'payments', ['provider', 'provider_payment_id'])
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table('payments') as batch_op:
+            batch_op.create_unique_constraint(
+                'uq_provider_payment',
+                ['provider', 'provider_payment_id'],
+            )
+    else:
+        op.create_unique_constraint(
+            'uq_provider_payment',
+            'payments',
+            ['provider', 'provider_payment_id'],
+        )
     op.drop_index(op.f('ix_privacy_requests_user_status'), table_name='privacy_requests')
     op.create_index(op.f('ix_privacy_requests_status'), 'privacy_requests', ['status'], unique=False)
     op.create_index(op.f('ix_privacy_requests_user_id'), 'privacy_requests', ['user_id'], unique=False)
@@ -465,14 +790,78 @@ def upgrade() -> None:
     op.create_index(op.f('ix_security_events_event_type'), 'security_events', ['event_type'], unique=False)
     op.create_index(op.f('ix_security_events_user_id'), 'security_events', ['user_id'], unique=False)
     op.drop_index(op.f('ix_trusted_devices_user'), table_name='trusted_devices')
-    op.drop_constraint(op.f('trusted_devices_device_token_hash_key'), 'trusted_devices', type_='unique')
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table(
+            'trusted_devices',
+            naming_convention={
+                'uq': '%(table_name)s_%(column_0_name)s_key'
+            },
+        ) as batch_op:
+            batch_op.drop_constraint(
+                op.f('trusted_devices_device_token_hash_key'),
+                type_='unique',
+            )
+    else:
+        op.drop_constraint(
+            op.f('trusted_devices_device_token_hash_key'),
+            'trusted_devices',
+            type_='unique',
+        )
     op.create_index(op.f('ix_trusted_devices_device_token_hash'), 'trusted_devices', ['device_token_hash'], unique=True)
     op.create_index(op.f('ix_trusted_devices_user_id'), 'trusted_devices', ['user_id'], unique=False)
     op.drop_index(op.f('ix_user_security_user'), table_name='user_security')
-    op.drop_constraint(op.f('user_security_user_id_key'), 'user_security', type_='unique')
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table(
+            'user_security',
+            naming_convention={
+                'uq': '%(table_name)s_%(column_0_name)s_key'
+            },
+        ) as batch_op:
+            batch_op.drop_constraint(
+                op.f('user_security_user_id_key'),
+                type_='unique',
+            )
+    else:
+        op.drop_constraint(
+            op.f('user_security_user_id_key'),
+            'user_security',
+            type_='unique',
+        )
     op.create_index(op.f('ix_user_security_user_id'), 'user_security', ['user_id'], unique=True)
-    op.drop_constraint(op.f('users_cpf_key'), 'users', type_='unique')
-    op.drop_constraint(op.f('users_email_key'), 'users', type_='unique')
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table(
+            'users',
+            naming_convention={
+                'uq': '%(table_name)s_%(column_0_name)s_key'
+            },
+        ) as batch_op:
+            batch_op.drop_constraint(
+                op.f('users_cpf_key'),
+                type_='unique',
+            )
+    else:
+        op.drop_constraint(
+            op.f('users_cpf_key'),
+            'users',
+            type_='unique',
+        )
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table(
+            'users',
+            naming_convention={
+                'uq': '%(table_name)s_%(column_0_name)s_key'
+            },
+        ) as batch_op:
+            batch_op.drop_constraint(
+                op.f('users_email_key'),
+                type_='unique',
+            )
+    else:
+        op.drop_constraint(
+            op.f('users_email_key'),
+            'users',
+            type_='unique',
+        )
     op.drop_index(op.f('ix_users_cpf'), table_name='users')
     op.create_index(op.f('ix_users_cpf'), 'users', ['cpf'], unique=True)
     op.drop_index(op.f('ix_users_email'), table_name='users')
@@ -481,8 +870,34 @@ def upgrade() -> None:
     op.drop_index(op.f('ix_workflow_compliance_snapshot_date'), table_name='workflow_compliance_snapshots')
     op.drop_index(op.f('ix_workflow_compliance_snapshot_hash'), table_name='workflow_compliance_snapshots')
     op.drop_index(op.f('ix_workflow_compliance_snapshot_status'), table_name='workflow_compliance_snapshots')
-    op.drop_constraint(op.f('uq_workflow_compliance_snapshot_date'), 'workflow_compliance_snapshots', type_='unique')
-    op.drop_constraint(op.f('uq_workflow_compliance_snapshot_hash'), 'workflow_compliance_snapshots', type_='unique')
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table(
+            'workflow_compliance_snapshots'
+        ) as batch_op:
+            batch_op.drop_constraint(
+                op.f('uq_workflow_compliance_snapshot_date'),
+                type_='unique',
+            )
+    else:
+        op.drop_constraint(
+            op.f('uq_workflow_compliance_snapshot_date'),
+            'workflow_compliance_snapshots',
+            type_='unique',
+        )
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table(
+            'workflow_compliance_snapshots'
+        ) as batch_op:
+            batch_op.drop_constraint(
+                op.f('uq_workflow_compliance_snapshot_hash'),
+                type_='unique',
+            )
+    else:
+        op.drop_constraint(
+            op.f('uq_workflow_compliance_snapshot_hash'),
+            'workflow_compliance_snapshots',
+            type_='unique',
+        )
     op.create_index(op.f('ix_workflow_compliance_snapshots_created_at'), 'workflow_compliance_snapshots', ['created_at'], unique=False)
     op.create_index(op.f('ix_workflow_compliance_snapshots_snapshot_date'), 'workflow_compliance_snapshots', ['snapshot_date'], unique=True)
     op.create_index(op.f('ix_workflow_compliance_snapshots_snapshot_hash'), 'workflow_compliance_snapshots', ['snapshot_hash'], unique=True)
@@ -515,8 +930,11 @@ def upgrade() -> None:
     op.drop_index(op.f('ix_workflow_evidence_files_evidence_id'), table_name='workflow_execution_evidence_files')
     op.drop_index(op.f('ix_workflow_evidence_files_sha256'), table_name='workflow_execution_evidence_files')
     op.drop_index(op.f('ix_workflow_evidence_files_uploaded_by'), table_name='workflow_execution_evidence_files')
-    op.drop_constraint(op.f('uq_workflow_evidence_file_storage_key'), 'workflow_execution_evidence_files', type_='unique')
-    op.drop_constraint(op.f('uq_workflow_evidence_file_version'), 'workflow_execution_evidence_files', type_='unique')
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table('workflow_execution_evidence_files') as batch_op:
+            batch_op.drop_constraint(op.f('uq_workflow_evidence_file_storage_key'), type_='unique')
+    else:
+        op.drop_constraint(op.f('uq_workflow_evidence_file_storage_key'), 'workflow_execution_evidence_files', type_='unique')
     op.create_index(op.f('ix_workflow_execution_evidence_files_created_at'), 'workflow_execution_evidence_files', ['created_at'], unique=False)
     op.create_index(op.f('ix_workflow_execution_evidence_files_evidence_id'), 'workflow_execution_evidence_files', ['evidence_id'], unique=False)
     op.create_index(op.f('ix_workflow_execution_evidence_files_sha256'), 'workflow_execution_evidence_files', ['sha256'], unique=False)
