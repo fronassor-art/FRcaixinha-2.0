@@ -22,6 +22,7 @@ from app.models import (
     Loan,
     MemberFinancialEntry,
     PaymentSettlement,
+    User,
 )
 from app.services.ledger import reverse_entry
 from app.services.payment_settlement import settle_confirmed_pix_payment
@@ -49,6 +50,21 @@ def _admin_stub(user_id=9001, *, is_master=False):
     return type("Admin", (), {"id": user_id, "role": "ADMIN", "is_active": True, "is_master": is_master})()
 
 
+def _persisted_admin(db, suffix):
+    admin = User(
+        name=f"Master {suffix}",
+        email=f"master-contract-{suffix}@test",
+        cpf=f"master-contract-{suffix}",
+        password_hash="x",
+        role="ADMIN",
+        is_active=True,
+        is_master=True,
+    )
+    db.add(admin)
+    db.flush()
+    return admin
+
+
 def test_contribution_reversal_restores_obligation_and_keeps_payment_provider_status():
     db = _db()
     member = _member(db, "reversal-contribution")
@@ -63,7 +79,7 @@ def test_contribution_reversal_restores_obligation_and_keeps_payment_provider_st
     settlement = _settle(db, payment)
     before = (contribution.paid_amount, contribution.status, contribution.paid_at)
 
-    _reverse_payment(db, payment, _admin_stub())
+    _reverse_payment(db, payment, _persisted_admin(db, "contribution"))
 
     db.refresh(contribution)
     db.refresh(payment)
@@ -96,7 +112,7 @@ def test_loan_reversal_restores_principal_interest_penalty_and_member_balance():
         entry_type="LOAN_PRINCIPAL_PAYMENT", reference_id=str(payment.id)
     ).one()
 
-    _reverse_payment(db, payment, _admin_stub())
+    _reverse_payment(db, payment, _persisted_admin(db, "loan"))
 
     db.refresh(installment)
     db.refresh(loan)
@@ -156,7 +172,7 @@ def test_original_settlement_and_receipt_are_immutable_after_reversal():
         "receipt_hash": settlement.receipt_hash,
     }
 
-    _reverse_payment(db, payment, _admin_stub())
+    _reverse_payment(db, payment, _persisted_admin(db, "immutable"))
 
     db.refresh(settlement)
     assert {
@@ -186,7 +202,7 @@ def test_reversal_must_compensate_member_financial_entry_for_loan_principal():
     _settle(db, payment)
     before = db.query(MemberFinancialEntry).filter_by(reference_id=str(payment.id)).count()
 
-    _reverse_payment(db, payment, _admin_stub())
+    _reverse_payment(db, payment, _persisted_admin(db, "compensation"))
 
     compensation = db.query(MemberFinancialEntry).filter_by(
         reference_type="PAYMENT_REVERSAL", direction="DEBIT"
@@ -210,8 +226,9 @@ def test_payment_reversal_is_idempotent_and_unique_per_payment():
     )
     _settle(db, payment)
 
-    first = _reverse_payment(db, payment, _admin_stub())
-    second = _reverse_payment(db, payment, _admin_stub(), reason="Mesmo estorno repetido")
+    admin = _persisted_admin(db, "idempotent")
+    first = _reverse_payment(db, payment, admin)
+    second = _reverse_payment(db, payment, admin, reason="Mesmo estorno repetido")
 
     assert first.id == second.id
     db.close()
@@ -256,8 +273,8 @@ def test_legacy_agreement_without_historical_allocation_is_blocked():
     db.add(LedgerEntry(account="CAIXINHA", direction="CREDIT", amount=Decimal("100.00"), reference_type="AGREEMENT_INSTALLMENT_PAYMENT", reference_id=str(payment.id)))
     db.commit()
 
-    with pytest.raises(ValueError, match="evidência|alocação|histórica"):
-        _reverse_payment(db, payment, _admin_stub())
+    with pytest.raises(ValueError, match="^PaymentSettlement obrigatório não encontrado\\.$"):
+        _reverse_payment(db, payment, _persisted_admin(db, "legacy-agreement"))
 
     db.close()
 
