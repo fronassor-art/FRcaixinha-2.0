@@ -14,7 +14,12 @@ def upgrade():
         sa.Column('validation_status',sa.String(20),nullable=False), sa.Column('validated_by',sa.Integer(),sa.ForeignKey('users.id'),nullable=True),
         sa.Column('validated_at',sa.DateTime(timezone=True),nullable=True), sa.Column('integrity_hash',sa.String(64),nullable=False),
         sa.Column('created_at',sa.DateTime(timezone=True),nullable=False), sa.Column('updated_at',sa.DateTime(timezone=True),nullable=False))
-    op.create_unique_constraint('uq_exec_risk_gov_decision','executive_risk_decision_governance',['decision_id'])
+    bind = op.get_bind()
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table('executive_risk_decision_governance') as batch_op:
+            batch_op.create_unique_constraint('uq_exec_risk_gov_decision',['decision_id'])
+    else:
+        op.create_unique_constraint('uq_exec_risk_gov_decision','executive_risk_decision_governance',['decision_id'])
     op.create_index('ix_exec_risk_gov_status','executive_risk_decision_governance',['status'])
     op.create_index('ix_exec_risk_gov_validation','executive_risk_decision_governance',['validation_status'])
     op.create_index('ix_exec_risk_gov_hash','executive_risk_decision_governance',['integrity_hash'],unique=True)

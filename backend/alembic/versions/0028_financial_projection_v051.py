@@ -13,7 +13,15 @@ def upgrade():
         sa.Column('snapshot_hash',sa.String(64),nullable=False),
         sa.Column('generated_by',sa.Integer(),sa.ForeignKey('users.id'),nullable=True),
         sa.Column('created_at',sa.DateTime(timezone=True),nullable=False))
-    op.create_unique_constraint('uq_fin_projection_scope','financial_projection_snapshots',['as_of_date','horizon_months','scenario'])
+    bind = op.get_bind()
+    if bind.dialect.name == "sqlite":
+        with op.batch_alter_table("financial_projection_snapshots") as batch_op:
+            batch_op.create_unique_constraint(
+                "uq_fin_projection_scope",
+                ["as_of_date", "horizon_months", "scenario"],
+            )
+    else:
+        op.create_unique_constraint('uq_fin_projection_scope','financial_projection_snapshots',['as_of_date','horizon_months','scenario'])
     op.create_index('ix_fin_projection_as_of_date','financial_projection_snapshots',['as_of_date'])
     op.create_index('ix_fin_projection_scenario','financial_projection_snapshots',['scenario'])
     op.create_index('ix_fin_projection_status','financial_projection_snapshots',['status'])

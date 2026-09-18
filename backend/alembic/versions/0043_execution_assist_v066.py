@@ -14,9 +14,37 @@ def upgrade():
     op.add_column('operational_workflow_orchestrations', sa.Column('started_at', sa.DateTime(timezone=True), nullable=True))
     op.add_column('operational_workflow_orchestrations', sa.Column('completed_by', sa.Integer(), nullable=True))
     op.add_column('operational_workflow_orchestrations', sa.Column('completed_at', sa.DateTime(timezone=True), nullable=True))
-    op.create_foreign_key('fk_workflow_orch_accepted_by_users','operational_workflow_orchestrations','users',['accepted_by'],['id'])
-    op.create_foreign_key('fk_workflow_orch_started_by_users','operational_workflow_orchestrations','users',['started_by'],['id'])
-    op.create_foreign_key('fk_workflow_orch_completed_by_users','operational_workflow_orchestrations','users',['completed_by'],['id'])
+    bind = op.get_bind()
+    if bind.dialect.name == "sqlite":
+        with op.batch_alter_table("operational_workflow_orchestrations") as batch_op:
+            batch_op.create_foreign_key(
+                "fk_workflow_orch_accepted_by_users",
+                "users",
+                ["accepted_by"],
+                ["id"],
+            )
+    else:
+        op.create_foreign_key('fk_workflow_orch_accepted_by_users','operational_workflow_orchestrations','users',['accepted_by'],['id'])
+    if bind.dialect.name == "sqlite":
+        with op.batch_alter_table("operational_workflow_orchestrations") as batch_op:
+            batch_op.create_foreign_key(
+                "fk_workflow_orch_started_by_users",
+                "users",
+                ["started_by"],
+                ["id"],
+            )
+    else:
+        op.create_foreign_key('fk_workflow_orch_started_by_users','operational_workflow_orchestrations','users',['started_by'],['id'])
+    if bind.dialect.name == "sqlite":
+        with op.batch_alter_table("operational_workflow_orchestrations") as batch_op:
+            batch_op.create_foreign_key(
+                "fk_workflow_orch_completed_by_users",
+                "users",
+                ["completed_by"],
+                ["id"],
+            )
+    else:
+        op.create_foreign_key('fk_workflow_orch_completed_by_users','operational_workflow_orchestrations','users',['completed_by'],['id'])
     op.create_index('ix_workflow_orch_execution_state','operational_workflow_orchestrations',['execution_state'])
 
 def downgrade():

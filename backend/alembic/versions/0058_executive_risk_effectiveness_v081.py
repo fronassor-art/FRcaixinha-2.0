@@ -18,7 +18,12 @@ def upgrade():
         sa.Column('integrity_hash',sa.String(64),nullable=False),
         sa.Column('created_at',sa.DateTime(timezone=True),nullable=False),
         sa.Column('updated_at',sa.DateTime(timezone=True),nullable=False))
-    op.create_unique_constraint('uq_exec_risk_effectiveness_execution','executive_risk_effectiveness',['execution_id'])
+    bind = op.get_bind()
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table('executive_risk_effectiveness') as batch_op:
+            batch_op.create_unique_constraint('uq_exec_risk_effectiveness_execution',['execution_id'])
+    else:
+        op.create_unique_constraint('uq_exec_risk_effectiveness_execution','executive_risk_effectiveness',['execution_id'])
     op.create_index('ix_exec_risk_eff_status','executive_risk_effectiveness',['status'])
     op.create_index('ix_exec_risk_eff_hash','executive_risk_effectiveness',['integrity_hash'],unique=True)
     op.create_index('ix_exec_risk_eff_created','executive_risk_effectiveness',['created_at'])

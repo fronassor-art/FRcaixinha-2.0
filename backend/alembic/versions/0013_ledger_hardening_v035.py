@@ -26,7 +26,11 @@ def upgrade():
         bind.execute(sa.text("UPDATE ledger_entries SET previous_hash=:p, entry_hash=:h WHERE id=:id"), {"p":previous,"h":h,"id":r[0]})
         previous = h
     op.create_index("ix_ledger_entries_previous_hash", "ledger_entries", ["previous_hash"])
-    op.create_unique_constraint("uq_ledger_entries_entry_hash", "ledger_entries", ["entry_hash"])
+    if bind.dialect.name == "sqlite":
+        with op.batch_alter_table("ledger_entries") as batch_op:
+            batch_op.create_unique_constraint("uq_ledger_entries_entry_hash", ["entry_hash"])
+    else:
+        op.create_unique_constraint("uq_ledger_entries_entry_hash", "ledger_entries", ["entry_hash"])
     # At most one reversal per original entry.
     op.create_index("uq_ledger_entries_one_reversal", "ledger_entries", ["reversal_of_id"], unique=True, postgresql_where=sa.text("reversal_of_id IS NOT NULL"), sqlite_where=sa.text("reversal_of_id IS NOT NULL"))
     if bind.dialect.name == "postgresql":
@@ -39,7 +43,11 @@ def downgrade():
         op.execute(sa.text("DROP TRIGGER IF EXISTS trg_ledger_append_only ON ledger_entries"))
         op.execute(sa.text("DROP FUNCTION IF EXISTS frcaixinha_prevent_ledger_mutation()"))
     op.drop_index("uq_ledger_entries_one_reversal", table_name="ledger_entries")
-    op.drop_constraint("uq_ledger_entries_entry_hash", "ledger_entries", type_="unique")
+    if bind.dialect.name == "sqlite":
+        with op.batch_alter_table("ledger_entries") as batch_op:
+            batch_op.drop_constraint("uq_ledger_entries_entry_hash", type_="unique")
+    else:
+        op.drop_constraint("uq_ledger_entries_entry_hash", "ledger_entries", type_="unique")
     op.drop_index("ix_ledger_entries_previous_hash", table_name="ledger_entries")
     op.drop_column("ledger_entries", "entry_hash")
     op.drop_column("ledger_entries", "previous_hash")

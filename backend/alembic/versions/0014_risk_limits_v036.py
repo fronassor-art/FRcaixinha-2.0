@@ -13,7 +13,16 @@ def upgrade():
     op.add_column('groups', sa.Column('max_global_exposure', sa.Numeric(14,2), nullable=True))
     op.add_column('groups', sa.Column('max_exposure_ratio', sa.Numeric(8,5), nullable=True))
     op.execute(sa.text("UPDATE groups SET min_cash_reserve = 0.00 WHERE min_cash_reserve IS NULL"))
-    op.alter_column('groups', 'min_cash_reserve', server_default=None)
+    if op.get_bind().dialect.name == 'sqlite':
+        with op.batch_alter_table('groups') as batch_op:
+            batch_op.alter_column(
+                'min_cash_reserve',
+                existing_type=sa.Numeric(14,2),
+                existing_nullable=False,
+                server_default=None,
+            )
+    else:
+        op.alter_column('groups', 'min_cash_reserve', server_default=None)
 
 def downgrade():
     op.drop_column('groups', 'max_exposure_ratio')

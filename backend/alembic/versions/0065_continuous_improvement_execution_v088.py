@@ -20,6 +20,11 @@ def upgrade():
   sa.Column('created_at',sa.DateTime(timezone=True),nullable=False),
   sa.Column('updated_at',sa.DateTime(timezone=True),nullable=False))
  for n,c,u in [('ix_ci_exec_decision','decision_id',False),('ix_ci_exec_rec','recommendation_id',False),('ix_ci_exec_plan','plan_id',False),('ix_ci_exec_status','status',False),('ix_ci_exec_assigned','assigned_to',False),('ix_ci_exec_verified','verified_by',False),('ix_ci_exec_hash','execution_hash',True),('ix_ci_exec_created','created_at',False),('ix_ci_exec_updated','updated_at',False)]: op.create_index(n,'continuous_improvement_executions',[c],unique=u)
- op.create_unique_constraint('uq_ci_exec_decision','continuous_improvement_executions',['decision_id'])
+ bind = op.get_bind()
+ if bind.dialect.name == 'sqlite':
+  with op.batch_alter_table('continuous_improvement_executions') as batch_op:
+   batch_op.create_unique_constraint('uq_ci_exec_decision',['decision_id'])
+ else:
+  op.create_unique_constraint('uq_ci_exec_decision','continuous_improvement_executions',['decision_id'])
 def downgrade():
  op.drop_table('continuous_improvement_executions')

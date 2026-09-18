@@ -22,6 +22,56 @@ def upgrade():
         sa.Column("paid_at",sa.DateTime(timezone=True)), sa.Column("status",sa.String(20),nullable=False,server_default="OPEN"),
         sa.UniqueConstraint("agreement_id","number",name="uq_agreement_installment_number"))
     op.create_index("ix_agreement_installments_agreement_id","agreement_installments",["agreement_id"])
-    op.alter_column("collection_agreements","status",server_default=None); op.alter_column("agreement_installments","penalty_amount",server_default=None); op.alter_column("agreement_installments","paid_amount",server_default=None); op.alter_column("agreement_installments","paid_penalty_amount",server_default=None); op.alter_column("agreement_installments","status",server_default=None)
+    bind = op.get_bind()
+    if bind.dialect.name == "sqlite":
+        with op.batch_alter_table("collection_agreements") as batch_op:
+            batch_op.alter_column(
+                "status",
+                existing_type=sa.String(20),
+                existing_nullable=False,
+                server_default=None,
+            )
+    else:
+        op.alter_column("collection_agreements", "status", server_default=None)
+    if bind.dialect.name == "sqlite":
+        with op.batch_alter_table("agreement_installments") as batch_op:
+            batch_op.alter_column(
+                "penalty_amount",
+                existing_type=sa.Numeric(14, 2),
+                existing_nullable=False,
+                server_default=None,
+            )
+    else:
+        op.alter_column("agreement_installments", "penalty_amount", server_default=None)
+    if bind.dialect.name == "sqlite":
+        with op.batch_alter_table("agreement_installments") as batch_op:
+            batch_op.alter_column(
+                "paid_amount",
+                existing_type=sa.Numeric(14, 2),
+                existing_nullable=False,
+                server_default=None,
+            )
+    else:
+        op.alter_column("agreement_installments", "paid_amount", server_default=None)
+    if bind.dialect.name == "sqlite":
+        with op.batch_alter_table("agreement_installments") as batch_op:
+            batch_op.alter_column(
+                "paid_penalty_amount",
+                existing_type=sa.Numeric(14, 2),
+                existing_nullable=False,
+                server_default=None,
+            )
+    else:
+        op.alter_column("agreement_installments", "paid_penalty_amount", server_default=None)
+    if bind.dialect.name == "sqlite":
+        with op.batch_alter_table("agreement_installments") as batch_op:
+            batch_op.alter_column(
+                "status",
+                existing_type=sa.String(20),
+                existing_nullable=False,
+                server_default=None,
+            )
+    else:
+        op.alter_column("agreement_installments", "status", server_default=None)
 def downgrade():
     op.drop_table("agreement_installments"); op.drop_index("ix_agreements_member_status",table_name="collection_agreements"); op.drop_index("ix_collection_agreements_loan_id",table_name="collection_agreements"); op.drop_table("collection_agreements")

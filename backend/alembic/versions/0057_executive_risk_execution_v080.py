@@ -13,7 +13,12 @@ def upgrade():
         sa.Column('verified_at',sa.DateTime(timezone=True),nullable=True), sa.Column('verification_note',sa.Text(),nullable=True),
         sa.Column('resolution',sa.Text(),nullable=True), sa.Column('execution_hash',sa.String(64),nullable=False),
         sa.Column('created_at',sa.DateTime(timezone=True),nullable=False), sa.Column('updated_at',sa.DateTime(timezone=True),nullable=False))
-    op.create_unique_constraint('uq_exec_risk_execution_governance','executive_risk_decision_executions',['governance_id'])
+    bind = op.get_bind()
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table('executive_risk_decision_executions') as batch_op:
+            batch_op.create_unique_constraint('uq_exec_risk_execution_governance',['governance_id'])
+    else:
+        op.create_unique_constraint('uq_exec_risk_execution_governance','executive_risk_decision_executions',['governance_id'])
     op.create_index('ix_exec_risk_exec_status','executive_risk_decision_executions',['status'])
     op.create_index('ix_exec_risk_exec_assigned','executive_risk_decision_executions',['assigned_to'])
     op.create_index('ix_exec_risk_exec_hash','executive_risk_decision_executions',['execution_hash'],unique=True)

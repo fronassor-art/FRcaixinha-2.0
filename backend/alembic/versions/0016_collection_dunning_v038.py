@@ -24,8 +24,27 @@ def upgrade():
         sa.UniqueConstraint('installment_id','event_type','event_date', name='uq_collection_event_day'),
         sa.Index('ix_collection_events_member_date','member_id','event_date'),
     )
-    op.alter_column('loan_installments','collection_stage',server_default=None)
-    op.alter_column('loan_installments','collection_attempts',server_default=None)
+    bind = op.get_bind()
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table('loan_installments') as batch_op:
+            batch_op.alter_column(
+                'collection_stage',
+                existing_type=sa.String(20),
+                existing_nullable=False,
+                server_default=None,
+            )
+    else:
+        op.alter_column('loan_installments','collection_stage',server_default=None)
+    if bind.dialect.name == 'sqlite':
+        with op.batch_alter_table('loan_installments') as batch_op:
+            batch_op.alter_column(
+                'collection_attempts',
+                existing_type=sa.Integer(),
+                existing_nullable=False,
+                server_default=None,
+            )
+    else:
+        op.alter_column('loan_installments','collection_attempts',server_default=None)
 
 def downgrade():
     op.drop_table('collection_events')
