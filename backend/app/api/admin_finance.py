@@ -116,7 +116,9 @@ def verify_month(competence:date,admin=Depends(require_admin),db:Session=Depends
 def loan_engine_overdue(admin=Depends(require_admin), db: Session = Depends(get_db)):
     from datetime import date
     from decimal import Decimal
-    rows = db.query(LoanInstallment).filter(LoanInstallment.due_date < date.today(), LoanInstallment.status != 'PAID').order_by(LoanInstallment.due_date).all()
+    rows = db.query(LoanInstallment).filter(
+        LoanInstallment.due_date < date.today(), LoanInstallment.status.notin_(('PAID', 'AGREED'))
+    ).order_by(LoanInstallment.due_date).all()
     return {'items': [{
         'id': i.id, 'loan_id': i.loan_id, 'number': i.number, 'due_date': i.due_date.isoformat(),
         'amount': money(i.amount), 'penalty_amount': money(i.penalty_amount),

@@ -34,9 +34,11 @@ def dashboard(admin=Depends(require_admin), db: Session = Depends(get_db)):
         loan_counts[status.lower()] = db.query(Loan).filter(Loan.status == status).count()
 
     overdue = db.query(LoanInstallment).filter(
-        LoanInstallment.due_date < date.today(), LoanInstallment.status != "PAID"
+        LoanInstallment.due_date < date.today(), LoanInstallment.status.notin_(("PAID", "AGREED"))
     ).all()
-    open_installments = db.query(LoanInstallment).filter(LoanInstallment.status != "PAID").all()
+    open_installments = db.query(LoanInstallment).filter(
+        LoanInstallment.status.notin_(("PAID", "AGREED"))
+    ).all()
     outstanding = sum((Decimal(i.amount) - Decimal(i.paid_amount or 0) for i in open_installments), Decimal("0"))
     interest_expected = sum((Decimal(i.interest) for i in db.query(LoanInstallment).all()), Decimal("0"))
     interest_received = sum((Decimal(i.interest) for i in db.query(LoanInstallment).filter(LoanInstallment.status == "PAID").all()), Decimal("0"))
@@ -150,7 +152,9 @@ def admin_loan_detail(loan_id: int, admin=Depends(require_admin), db: Session = 
 
 @router.get("/overdue-installments")
 def overdue_installments(admin=Depends(require_admin), db: Session = Depends(get_db)):
-    rows = db.query(LoanInstallment).filter(LoanInstallment.due_date < date.today(), LoanInstallment.status != "PAID").order_by(LoanInstallment.due_date).all()
+    rows = db.query(LoanInstallment).filter(
+        LoanInstallment.due_date < date.today(), LoanInstallment.status.notin_(("PAID", "AGREED"))
+    ).order_by(LoanInstallment.due_date).all()
     loan_map = {l.id: l for l in db.query(Loan).filter(Loan.id.in_([i.loan_id for i in rows])).all()} if rows else {}
     member_map = {m.id: m for m in db.query(Member).filter(Member.id.in_([loan_map[i.loan_id].member_id for i in rows if i.loan_id in loan_map])).all()} if rows else {}
     user_map = {u.id: u for u in db.query(User).filter(User.id.in_([member_map[loan_map[i.loan_id].member_id].user_id for i in rows if i.loan_id in loan_map])).all()} if rows else {}

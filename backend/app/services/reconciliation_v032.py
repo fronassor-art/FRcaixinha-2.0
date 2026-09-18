@@ -36,7 +36,7 @@ def reconcile(db):
         'Eventos Webhook devem ser únicos por provedor/event_id.')
 
     open_negative = db.query(LoanInstallment).filter(
-        LoanInstallment.status != 'PAID',
+        LoanInstallment.status.notin_(('PAID', 'AGREED')),
         (LoanInstallment.amount + LoanInstallment.penalty_amount - LoanInstallment.paid_amount) < 0
     ).count()
     add('NEGATIVE_INSTALLMENT_BALANCE', open_negative == 0,
