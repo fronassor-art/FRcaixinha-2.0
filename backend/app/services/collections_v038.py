@@ -3,7 +3,7 @@ from decimal import Decimal
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
-from app.models import LoanInstallment, Loan, Member, Group, CollectionEvent
+from app.models import AgreementInstallment, CollectionAgreement, LoanInstallment, Loan, Member, Group, CollectionEvent
 from app.services.notifications_v12 import create_notification
 
 DUE_SOON_DAYS = 3
@@ -41,7 +41,7 @@ def _create_event(db, inst, member, stage, today):
 
 def run_collection_cycle(db: Session, today: date | None = None):
     today = today or date.today()
-    rows = db.query(LoanInstallment, Loan, Member, Group).join(Loan, Loan.id==LoanInstallment.loan_id).join(Member, Member.id==Loan.member_id).join(Group, Group.id==Member.group_id).filter(LoanInstallment.paid_at.is_(None), LoanInstallment.status!='PAID').all()
+    rows = db.query(LoanInstallment, Loan, Member, Group).join(Loan, Loan.id==LoanInstallment.loan_id).join(Member, Member.id==Loan.member_id).join(Group, Group.id==Member.group_id).filter(LoanInstallment.paid_at.is_(None), LoanInstallment.status.notin_(('PAID', 'AGREED'))).all()
     changed=events=0
     for inst, loan, member, group in rows:
         new_stage = stage_for(inst, group, today)
@@ -53,6 +53,11 @@ def run_collection_cycle(db: Session, today: date | None = None):
 def collections_summary(db: Session, today: date | None = None):
     today=today or date.today()
     rows=db.query(LoanInstallment, Loan, Member, Group).join(Loan,Loan.id==LoanInstallment.loan_id).join(Member,Member.id==Loan.member_id).join(Group,Group.id==Member.group_id).filter(LoanInstallment.paid_at.is_(None),LoanInstallment.status.notin_(['PAID','AGREED'])).all()
+    agreement_rows = db.query(AgreementInstallment, CollectionAgreement, Member, Group).join(
+        CollectionAgreement, CollectionAgreement.id == AgreementInstallment.agreement_id
+    ).join(Member, Member.id == CollectionAgreement.member_id).join(Group, Group.id == Member.group_id).filter(
+        CollectionAgreement.status == 'APPROVED'
+    ).all()
     aging={'0-7':Decimal('0'),'8-30':Decimal('0'),'31-60':Decimal('0'),'61+':Decimal('0')}
     overdue_count=0; overdue_balance=Decimal('0'); overdue_amount=Decimal('0')
     for inst,loan,member,group in rows:
@@ -60,6 +65,16 @@ def collections_summary(db: Session, today: date | None = None):
         if days>0:
             overdue_count+=1
             bal=(Decimal(inst.amount or 0)-Decimal(inst.paid_amount or 0)+Decimal(inst.penalty_amount or 0)-Decimal(inst.paid_penalty_amount or 0)).quantize(Decimal('0.01'))
+            overdue_balance+=bal; overdue_amount+=bal
+            key='0-7' if days<=7 else '8-30' if days<=30 else '31-60' if days<=60 else '61+'
+            aging[key]+=bal
+    for inst, agreement, member, group in agreement_rows:
+        days=(today-inst.due_date).days-int(group.grace_days or 0)
+        principal_remaining=max(Decimal('0'), Decimal(inst.principal or 0)-Decimal(inst.paid_amount or 0))
+        penalty_remaining=max(Decimal('0'), Decimal(inst.penalty_amount or 0)-Decimal(inst.paid_penalty_amount or 0))
+        bal=(principal_remaining+penalty_remaining).quantize(Decimal('0.01'))
+        if days>0 and bal>0:
+            overdue_count+=1
             overdue_balance+=bal; overdue_amount+=bal
             key='0-7' if days<=7 else '8-30' if days<=30 else '31-60' if days<=60 else '61+'
             aging[key]+=bal
