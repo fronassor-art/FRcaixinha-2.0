@@ -7,6 +7,10 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: sqlite:///./test.db
+      JWT_SECRET: testsecret
+      APP_ENV: test
     defaults:
       run:
         working-directory: backend
@@ -17,4 +21,4 @@ jobs:
           python-version: '3.13'
       - run: pip install -r requirements.txt
       - run: python -m compileall app alembic
-      - run: pytest -q tests/test_v093_v100_finalization.py
+      - run: pytest -q tests
