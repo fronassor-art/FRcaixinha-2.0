@@ -1,5 +1,6 @@
 from pathlib import Path
 import re
+import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -19,7 +20,7 @@ def test_security_chain_is_present_and_single_head():
     import subprocess
 
     result = subprocess.run(
-        [str(Path(__file__).parents[1] / ".venv-debian" / "bin" / "alembic"), "heads"],
+        [sys.executable, "-m", "alembic", "heads"],
         capture_output=True,
         text=True,
         check=True,

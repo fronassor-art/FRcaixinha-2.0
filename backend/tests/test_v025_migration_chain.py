@@ -1,12 +1,13 @@
 from pathlib import Path
 import re
+import sys
 
 
 def test_single_alembic_head_after_security_reconciliation():
     import subprocess
 
     result = subprocess.run(
-        [str(Path(__file__).parents[1] / ".venv-debian" / "bin" / "alembic"), "heads"],
+        [sys.executable, "-m", "alembic", "heads"],
         capture_output=True,
         text=True,
         check=True,

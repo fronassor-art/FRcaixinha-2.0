@@ -1,5 +1,6 @@
 from pathlib import Path
 import re
+import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 VERSIONS = ROOT / 'backend' / 'alembic' / 'versions'
@@ -20,7 +21,7 @@ def test_alembic_chain_has_single_head():
     import subprocess
 
     result = subprocess.run(
-        [str(ROOT / "backend" / ".venv-debian" / "bin" / "alembic"), "heads"],
+        [sys.executable, "-m", "alembic", "heads"],
         capture_output=True,
         text=True,
         check=True,
