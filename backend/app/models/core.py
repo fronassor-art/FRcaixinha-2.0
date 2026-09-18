@@ -574,14 +574,36 @@ class AgreementInstallment(Base):
 class CollectionEvent(Base):
     __tablename__ = "collection_events"
     id: Mapped[int] = mapped_column(primary_key=True)
-    installment_id: Mapped[int] = mapped_column(ForeignKey("loan_installments.id"))
+    installment_id: Mapped[int | None] = mapped_column(ForeignKey("loan_installments.id"), nullable=True)
+    agreement_installment_id: Mapped[int | None] = mapped_column(ForeignKey("agreement_installments.id"), nullable=True)
     member_id: Mapped[int] = mapped_column(ForeignKey("members.id"))
     event_type: Mapped[str] = mapped_column(String(50))
     event_date: Mapped[date] = mapped_column(Date)
     channel: Mapped[str] = mapped_column(String(20), default="IN_APP")
     notification_id: Mapped[int | None] = mapped_column(ForeignKey("notifications.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
-    __table_args__ = (UniqueConstraint("installment_id", "event_type", "event_date", name="uq_collection_event_day"), Index("ix_collection_events_member_date", "member_id", "event_date"))
+    __table_args__ = (
+        CheckConstraint(
+            "(installment_id IS NOT NULL AND agreement_installment_id IS NULL) "
+            "OR (installment_id IS NULL AND agreement_installment_id IS NOT NULL)",
+            name="ck_collection_events_exactly_one_subject",
+        ),
+        Index(
+            "uq_collection_event_loan_day",
+            "installment_id", "event_type", "event_date",
+            unique=True,
+            postgresql_where=text("installment_id IS NOT NULL"),
+            sqlite_where=text("installment_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_collection_event_agreement_day",
+            "agreement_installment_id", "event_type", "event_date",
+            unique=True,
+            postgresql_where=text("agreement_installment_id IS NOT NULL"),
+            sqlite_where=text("agreement_installment_id IS NOT NULL"),
+        ),
+        Index("ix_collection_events_member_date", "member_id", "event_date"),
+    )
 
 class NotificationPreference(Base):
     __tablename__ = "notification_preferences"
@@ -687,6 +709,7 @@ class CollectionCase(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     member_id: Mapped[int] = mapped_column(ForeignKey('members.id'), index=True)
     loan_id: Mapped[int | None] = mapped_column(ForeignKey('loans.id'), nullable=True, index=True)
+    agreement_id: Mapped[int | None] = mapped_column(ForeignKey('collection_agreements.id'), nullable=True)
     status: Mapped[str] = mapped_column(String(20), default='OPEN', index=True)
     stage: Mapped[str] = mapped_column(String(30), default='SOFT')
     opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
@@ -695,6 +718,27 @@ class CollectionCase(Base):
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     resolved_by: Mapped[int | None] = mapped_column(ForeignKey('users.id'))
     resolution_note: Mapped[str | None] = mapped_column(Text())
+    __table_args__ = (
+        CheckConstraint(
+            "(loan_id IS NOT NULL AND agreement_id IS NULL) "
+            "OR (loan_id IS NULL AND agreement_id IS NOT NULL)",
+            name="ck_collection_cases_exactly_one_subject",
+        ),
+        Index(
+            "uq_collection_case_open_loan_subject",
+            "member_id", "loan_id",
+            unique=True,
+            postgresql_where=text("status = 'OPEN' AND loan_id IS NOT NULL"),
+            sqlite_where=text("status = 'OPEN' AND loan_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_collection_case_open_agreement_subject",
+            "member_id", "agreement_id",
+            unique=True,
+            postgresql_where=text("status = 'OPEN' AND agreement_id IS NOT NULL"),
+            sqlite_where=text("status = 'OPEN' AND agreement_id IS NOT NULL"),
+        ),
+    )
 
 class PaymentPromise(Base):
     __tablename__ = 'payment_promises'

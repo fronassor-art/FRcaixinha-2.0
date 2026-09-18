@@ -25,11 +25,21 @@ def upgrade() -> None:
             server_default=sa.text("0.00"),
         ),
     )
-    op.alter_column(
-        'loans',
-        'principal_settled_with_own_balance',
-        server_default=None,
-    )
+    bind = op.get_bind()
+    if bind.dialect.name == "sqlite":
+        with op.batch_alter_table("loans") as batch_op:
+            batch_op.alter_column(
+                "principal_settled_with_own_balance",
+                existing_type=sa.Numeric(precision=14, scale=2),
+                existing_nullable=False,
+                server_default=None,
+            )
+    else:
+        op.alter_column(
+            "loans",
+            "principal_settled_with_own_balance",
+            server_default=None,
+        )
     # ### end Alembic commands ###
 
 def downgrade() -> None:

@@ -2,7 +2,7 @@ import json
 from datetime import date, datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from sqlalchemy.orm import Session
-from app.models import Loan, LoanInstallment, Member, Group, CollectionAgreement, AgreementInstallment, AuditLog
+from app.models import Loan, LoanInstallment, Member, Group, CollectionAgreement, AgreementInstallment, CollectionCase, AuditLog
 from app.services.loan_engine_v17 import add_months, lock_loan, money, touch_loan
 from app.services.notifications_v12 import create_notification
 
@@ -70,6 +70,19 @@ def decide_agreement(db:Session, agreement_id:int, admin_id:int, approve:bool, n
         create_notification(db,member.user_id,'AGREEMENT_REJECTED','Acordo não aprovado','Sua solicitação de acordo financeiro não foi aprovada.','COLLECTION_AGREEMENT',str(ag.id)); return ag
     base,penalty,rows=outstanding_for_loan(db,loan); total=money(base+penalty)
     if total<=0 or abs(total-ag.total_amount)>CENT: raise ValueError('O saldo do empréstimo mudou desde a solicitação; solicite um novo acordo.')
+    now = datetime.now(timezone.utc)
+    open_cases = db.query(CollectionCase).filter(
+        CollectionCase.member_id == member.id,
+        CollectionCase.loan_id == loan.id,
+        CollectionCase.status == 'OPEN',
+    ).all()
+    for case in open_cases:
+        case.status = 'RESOLVED'
+        case.last_action_at = now
+        case.next_action_at = None
+        case.resolved_at = now
+        case.resolved_by = admin_id
+        case.resolution_note = 'Encerrado: dívida substituída por Agreement aprovado.'
     # Snapshot antigo permanece intacto; as parcelas antigas são preservadas e marcadas como AGREED.
     for i in rows: i.status='AGREED'; i.collection_stage='PAID' if getattr(i,'collection_stage',None)=='PAID' else 'NORMAL'
     principal_parts=_split(base,ag.installments); penalty_parts=[penalty]+[Decimal('0')]*(ag.installments-1)
