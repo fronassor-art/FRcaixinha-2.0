@@ -29,11 +29,28 @@ def portal_dashboard(db: Session, user_id: int):
     today = date.today()
     contrib_paid = sum((Decimal(c.amount) for c in contributions if c.status == 'PAID'), ZERO)
     loan_paid = sum((Decimal(i.paid_amount or 0) + Decimal(i.paid_penalty_amount or 0) for i in installments), ZERO)
-    loan_outstanding = sum((max(ZERO, Decimal(i.amount or 0) - Decimal(i.paid_amount or 0) + Decimal(i.penalty_amount or 0) - Decimal(i.paid_penalty_amount or 0)) for i in installments if i.status != 'PAID'), ZERO)
-    overdue = [i for i in installments if i.status != 'PAID' and i.due_date < today]
+    loan_operational_installments = [i for i in installments if i.status not in ('PAID', 'AGREED')]
+    loan_outstanding = sum((max(ZERO, Decimal(i.amount or 0) - Decimal(i.paid_amount or 0) + Decimal(i.penalty_amount or 0) - Decimal(i.paid_penalty_amount or 0)) for i in loan_operational_installments), ZERO)
+    overdue = [i for i in loan_operational_installments if i.due_date < today]
     overdue_balance = sum((max(ZERO, Decimal(i.amount or 0) - Decimal(i.paid_amount or 0) + Decimal(i.penalty_amount or 0) - Decimal(i.paid_penalty_amount or 0)) for i in overdue), ZERO)
     paid_inst = [i for i in installments if i.status == 'PAID']
     ontime = sum(1 for i in paid_inst if i.paid_at and i.paid_at.date() <= i.due_date)
+    agreement_by_id = {a.id: a for a in agreements}
+    agreement_payments = sum((Decimal(i.paid_amount or 0) + Decimal(i.paid_penalty_amount or 0) for i in agreement_installments), ZERO)
+    agreement_open_installments = [
+        i for i in agreement_installments
+        if agreement_by_id.get(i.agreement_id) is not None
+        and agreement_by_id[i.agreement_id].status == 'APPROVED'
+    ]
+
+    def agreement_outstanding(installment):
+        principal_remaining = max(ZERO, Decimal(installment.principal or 0) - Decimal(installment.paid_amount or 0))
+        penalty_remaining = max(ZERO, Decimal(installment.penalty_amount or 0) - Decimal(installment.paid_penalty_amount or 0))
+        return principal_remaining + penalty_remaining
+
+    agreement_outstanding_total = sum((agreement_outstanding(i) for i in agreement_open_installments), ZERO)
+    agreement_overdue = [i for i in agreement_open_installments if i.due_date < today and agreement_outstanding(i) > ZERO]
+    agreement_overdue_balance = sum((agreement_outstanding(i) for i in agreement_overdue), ZERO)
 
     return {
         'schema': 'v0.43',
@@ -46,6 +63,10 @@ def portal_dashboard(db: Session, user_id: int):
             'overdue_balance': money(overdue_balance),
             'overdue_installments': len(overdue),
             'on_time_ratio': round(ontime / len(paid_inst), 4) if paid_inst else None,
+            'agreement_payments': money(agreement_payments),
+            'agreement_outstanding': money(agreement_outstanding_total),
+            'agreement_overdue_balance': money(agreement_overdue_balance),
+            'agreement_overdue_installments': len(agreement_overdue),
         },
         'contributions': [
             {'id': c.id, 'competence': c.competence.isoformat(), 'amount': money(c.amount), 'status': c.status}
