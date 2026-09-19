@@ -1,6 +1,7 @@
 import json
 from datetime import date, datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
+from sqlalchemy import update
 from sqlalchemy.orm import Session
 from app.models import Loan, LoanInstallment, Member, Group, CollectionAgreement, AgreementInstallment, CollectionCase, AuditLog
 from app.services.loan_engine_v17 import add_months, lock_loan, money, touch_loan
@@ -31,6 +32,33 @@ def lock_collection_agreement(db: Session, agreement_or_id: CollectionAgreement 
 def touch_collection_agreement(agreement: CollectionAgreement) -> None:
     """Increment exactly once; caller must hold a current Agreement lock."""
     agreement.state_revision = int(agreement.state_revision or 0) + 1
+
+
+def _claim_collection_agreement(
+    db: Session,
+    agreement_id: int,
+    expected_revision: int,
+    status: str,
+    decided_by: int,
+    decided_at: datetime,
+) -> int:
+    with db.no_autoflush:
+        result = db.execute(
+            update(CollectionAgreement)
+            .where(
+                CollectionAgreement.id == agreement_id,
+                CollectionAgreement.status == "REQUESTED",
+                CollectionAgreement.state_revision == expected_revision,
+            )
+            .values(
+                status=status,
+                decided_by=decided_by,
+                decided_at=decided_at,
+                state_revision=expected_revision + 1,
+            )
+            .execution_options(synchronize_session=False)
+        )
+    return result.rowcount
 def _split(total,n):
     base=(total/Decimal(n)).quantize(CENT,rounding=ROUND_HALF_UP); out=[]; acc=Decimal('0')
     for i in range(1,n+1):
@@ -61,10 +89,17 @@ def request_agreement(db:Session, loan_id:int, user_id:int, installments:int, re
 def decide_agreement(db:Session, agreement_id:int, admin_id:int, approve:bool, note:str|None=None):
     ag=db.get(CollectionAgreement,agreement_id)
     if not ag or ag.status!='REQUESTED': raise ValueError('Acordo não encontrado ou já decidido.')
+    expected_revision = int(ag.state_revision or 0)
+    decided_at = datetime.now(timezone.utc)
+    final_status = 'APPROVED' if approve else 'REJECTED'
+    if _claim_collection_agreement(db, ag.id, expected_revision, final_status, admin_id, decided_at) != 1:
+        raise ValueError('Acordo não encontrado ou já decidido.')
+    with db.no_autoflush:
+        db.expire(ag)
+        db.refresh(ag)
     loan=db.get(Loan,ag.loan_id); member=db.get(Member,ag.member_id)
     if not loan or not member: raise ValueError('Dados do acordo inválidos.')
     loan = lock_loan(db, loan)
-    ag.status='APPROVED' if approve else 'REJECTED'; ag.decided_by=admin_id; ag.decided_at=datetime.now(timezone.utc)
     db.add(AuditLog(actor_user_id=admin_id,action='COLLECTION_AGREEMENT_DECISION',entity_type='COLLECTION_AGREEMENT',entity_id=str(ag.id),details=json.dumps({'approve':approve,'note':note},ensure_ascii=False)))
     if not approve:
         create_notification(db,member.user_id,'AGREEMENT_REJECTED','Acordo não aprovado','Sua solicitação de acordo financeiro não foi aprovada.','COLLECTION_AGREEMENT',str(ag.id)); return ag
