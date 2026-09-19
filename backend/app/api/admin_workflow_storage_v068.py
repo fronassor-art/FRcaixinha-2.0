@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import require_admin
 from app.db.session import get_db
 from app.models import OperationalWorkflowTask, WorkflowExecutionEvidence
-from app.services.workflow_evidence_storage_v068 import upload_file, get_file_for_download, list_files
+from app.services.workflow_evidence_storage_v068 import upload_file, get_file_for_download, list_files, cleanup_storage_key
 from app.models import AuditLog
 
 router = APIRouter(prefix="/admin/workflow-storage", tags=["workflow-evidence-storage-v068"])
@@ -24,6 +24,7 @@ def upload_attachment(task_id: int, evidence_id: int, file: UploadFile = File(..
     evidence = db.get(WorkflowExecutionEvidence, evidence_id)
     if not evidence:
         raise HTTPException(404, "Evidência não encontrada.")
+    row = None
     try:
         row = upload_file(db, task, evidence, admin.id, file)
         db.commit()
@@ -32,6 +33,11 @@ def upload_attachment(task_id: int, evidence_id: int, file: UploadFile = File(..
     except ValueError as exc:
         db.rollback()
         raise HTTPException(400, str(exc))
+    except Exception:
+        db.rollback()
+        if row is not None:
+            cleanup_storage_key(row.storage_key)
+        raise
     finally:
         file.file.close()
 

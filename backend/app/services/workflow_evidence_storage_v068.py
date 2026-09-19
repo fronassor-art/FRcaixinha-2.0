@@ -8,6 +8,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 from fastapi import UploadFile
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -21,6 +22,8 @@ from app.models import (
 
 ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".txt", ".csv", ".zip"}
 SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+VERSION_ATTEMPTS = 3
+VERSION_CONSTRAINT = "uq_workflow_evidence_file_version"
 
 
 def utcnow():
@@ -56,6 +59,13 @@ def _storage_path(storage_key: str) -> Path:
     return candidate
 
 
+def cleanup_storage_key(storage_key: str) -> None:
+    try:
+        _storage_path(storage_key).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def _audit(db: Session, actor_id: int, action: str, task_id: int, details: str):
     db.add(AuditLog(actor_user_id=actor_id, action=action, entity_type="OperationalWorkflowTask", entity_id=str(task_id), details=details))
 
@@ -68,6 +78,30 @@ def _next_version(db: Session, evidence_id: int) -> int:
         .first()
     )
     return (latest.version + 1) if latest else 1
+
+
+def _lock_evidence(db: Session, evidence_id: int) -> WorkflowExecutionEvidence:
+    query = db.query(WorkflowExecutionEvidence).filter_by(id=evidence_id)
+    if db.bind is not None and db.bind.dialect.name == "postgresql":
+        query = query.with_for_update()
+    evidence = query.one_or_none()
+    if evidence is None:
+        raise ValueError("Evidência não encontrada.")
+    return evidence
+
+
+def _is_version_conflict(exc: IntegrityError) -> bool:
+    original = exc.orig
+    diagnostics = getattr(original, "diag", None)
+    sqlstate = getattr(original, "sqlstate", None) or getattr(original, "pgcode", None)
+    constraint_name = getattr(diagnostics, "constraint_name", None)
+    if diagnostics is not None or sqlstate is not None:
+        return sqlstate == "23505" and constraint_name == VERSION_CONSTRAINT
+    return str(original) == (
+        "UNIQUE constraint failed: "
+        "workflow_execution_evidence_files.evidence_id, "
+        "workflow_execution_evidence_files.version"
+    )
 
 
 def upload_file(db: Session, task: OperationalWorkflowTask, evidence: WorkflowExecutionEvidence, actor_id: int, upload: UploadFile):
@@ -101,28 +135,39 @@ def upload_file(db: Session, task: OperationalWorkflowTask, evidence: WorkflowEx
                 digest.update(chunk)
                 out.write(chunk)
     except Exception:
-        try:
-            path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        cleanup_storage_key(storage_key)
         raise
 
-    now = utcnow()
-    row = WorkflowExecutionEvidenceFile(
-        evidence_id=evidence.id,
-        version=_next_version(db, evidence.id),
-        original_name=safe_name,
-        storage_key=storage_key,
-        content_type=ctype,
-        size_bytes=size,
-        sha256=digest.hexdigest(),
-        uploaded_by=actor_id,
-        created_at=now,
-    )
-    db.add(row)
-    db.flush()
-    _audit(db, actor_id, "WORKFLOW_EVIDENCE_FILE_UPLOADED", task.id, f"file_id={row.id};version={row.version};bytes={size};sha256={row.sha256}")
-    return row
+    try:
+        locked_evidence = _lock_evidence(db, evidence.id)
+        for attempt in range(VERSION_ATTEMPTS):
+            now = utcnow()
+            row = WorkflowExecutionEvidenceFile(
+                evidence_id=locked_evidence.id,
+                version=_next_version(db, locked_evidence.id),
+                original_name=safe_name,
+                storage_key=storage_key,
+                content_type=ctype,
+                size_bytes=size,
+                sha256=digest.hexdigest(),
+                uploaded_by=actor_id,
+                created_at=now,
+            )
+            try:
+                with db.begin_nested():
+                    db.add(row)
+                    db.flush()
+            except IntegrityError as exc:
+                if not _is_version_conflict(exc):
+                    raise
+                if attempt + 1 == VERSION_ATTEMPTS:
+                    raise
+                continue
+            _audit(db, actor_id, "WORKFLOW_EVIDENCE_FILE_UPLOADED", task.id, f"file_id={row.id};version={row.version};bytes={size};sha256={row.sha256}")
+            return row
+    except Exception:
+        cleanup_storage_key(storage_key)
+        raise
 
 
 def get_file_for_download(db: Session, file_id: int):

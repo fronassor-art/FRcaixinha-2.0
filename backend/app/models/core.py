@@ -951,6 +951,9 @@ class WorkflowExecutionEvidence(Base):
 
 class WorkflowExecutionEvidenceFile(Base):
     __tablename__ = 'workflow_execution_evidence_files'
+    __table_args__ = (
+        UniqueConstraint('evidence_id', 'version', name='uq_workflow_evidence_file_version'),
+    )
     id: Mapped[int] = mapped_column(primary_key=True)
     evidence_id: Mapped[int] = mapped_column(ForeignKey('workflow_execution_evidence.id'), index=True)
     version: Mapped[int] = mapped_column(Integer, default=1)
