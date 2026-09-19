@@ -2,8 +2,26 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from sqlalchemy.orm import Session
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from app.models import CollectionCase, PaymentPromise, LoanInstallment, Loan, Member, AuditLog
 from app.services.collections_v038 import collections_summary
+
+
+_OPEN_CASE_UNIQUE_INDEX = "uq_collection_case_open_loan_subject"
+
+
+def _is_open_case_unique_violation(exc: IntegrityError) -> bool:
+    original = exc.orig
+    diagnostics = getattr(original, "diag", None)
+    constraint_name = getattr(diagnostics, "constraint_name", None)
+    if constraint_name is not None:
+        sqlstate = getattr(original, "sqlstate", None) or getattr(original, "pgcode", None)
+        return sqlstate == "23505" and constraint_name == _OPEN_CASE_UNIQUE_INDEX
+
+    return str(original) == (
+        "UNIQUE constraint failed: collection_cases.member_id, "
+        "collection_cases.loan_id"
+    )
 
 def _open_case(db, member_id, loan_id=None, stage='SOFT'):
     q=db.query(CollectionCase).filter(CollectionCase.member_id==member_id, CollectionCase.status=='OPEN')
@@ -12,7 +30,22 @@ def _open_case(db, member_id, loan_id=None, stage='SOFT'):
     if case: return case, False
     now=datetime.now(timezone.utc)
     case=CollectionCase(member_id=member_id, loan_id=loan_id, stage=stage, opened_at=now, next_action_at=now+timedelta(days=1))
-    db.add(case); db.flush(); return case, True
+    try:
+        with db.begin_nested():
+            db.add(case)
+            db.flush()
+    except IntegrityError as exc:
+        if not _is_open_case_unique_violation(exc):
+            raise
+        winner = db.query(CollectionCase).filter(
+            CollectionCase.member_id == member_id,
+            CollectionCase.loan_id == loan_id,
+            CollectionCase.status == 'OPEN',
+        ).with_for_update().first()
+        if winner is None:
+            raise
+        return winner, False
+    return case, True
 
 def sync_cases(db: Session, today: date|None=None):
     today=today or date.today(); opened=escalated=resolved=0
