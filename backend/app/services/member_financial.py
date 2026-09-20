@@ -69,6 +69,8 @@ def add_member_financial_entry(
     reference_id: str | None = None,
     description: str | None = None,
     account: MemberFinancialAccount | None = None,
+    contribution_id: int | None = None,
+    payment_settlement_id: int | None = None,
 ) -> MemberFinancialEntry:
     """
     Registra um lançamento financeiro próprio do participante.
@@ -97,6 +99,8 @@ def add_member_financial_entry(
         reference_type=reference_type,
         reference_id=reference_id,
         description=description,
+        contribution_id=contribution_id,
+        payment_settlement_id=payment_settlement_id,
     )
 
     db.add(entry)
@@ -147,6 +151,7 @@ def calculate_member_financial_position(entries):
             if entry.entry_type in {
                 "OWN_BALANCE_RENEGOTIATION",
                 "OWN_BALANCE_SETTLEMENT",
+                "CONTRIBUTION_REVERSAL",
             }:
                 own_balance = max(
                     ZERO,

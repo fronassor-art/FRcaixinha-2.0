@@ -72,6 +72,35 @@ def _lock_contribution(db: Session, contribution_id: int) -> Contribution | None
         return query.one_or_none()
 
 
+def _active_contribution_credit(
+    db: Session,
+    account_id: int,
+    contribution_id: int,
+) -> Decimal:
+    """Return the net current patrimonial credit for one Contribution."""
+    with db.no_autoflush:
+        entries = (
+            db.query(MemberFinancialEntry)
+            .filter(
+                MemberFinancialEntry.account_id == account_id,
+                MemberFinancialEntry.contribution_id == contribution_id,
+            )
+            .order_by(MemberFinancialEntry.id)
+            .all()
+        )
+    credits = sum(
+        (_money(entry.amount) for entry in entries
+         if entry.entry_type == "CONTRIBUTION" and entry.direction == "CREDIT"),
+        ZERO,
+    )
+    reversals = sum(
+        (_money(entry.amount) for entry in entries
+         if entry.entry_type == "CONTRIBUTION_REVERSAL" and entry.direction == "DEBIT"),
+        ZERO,
+    )
+    return _money(credits - reversals)
+
+
 def _validate_admin(db: Session, admin_id: int) -> User:
     admin = db.get(User, admin_id)
     if admin is None or not admin.is_active or admin.role != "ADMIN" or not admin.is_master:
@@ -665,9 +694,17 @@ def reverse_payment(
         return _reverse_agreement_payment(db, payment, settlement, admin_id, normalized_reason, reversed_at)
     if settlement.contribution_id is None:
         raise ValueError("Settlement não referencia Contribution.")
+    # Discover the Member without taking the Contribution lock first. The
+    # final financial decision is made only after Member -> Account is held.
+    contribution_locator = db.get(Contribution, settlement.contribution_id)
+    if contribution_locator is None:
+        raise ValueError("Contribution não encontrada.")
+    member, account = lock_member_financial_account(db, contribution_locator.member_id)
     contribution = _lock_contribution(db, settlement.contribution_id)
     if contribution is None:
         raise ValueError("Contribution não encontrada.")
+    if contribution.member_id != member.id:
+        raise ValueError("Contribution não corresponde ao Member do settlement.")
     _validate_contribution_reference(payment, settlement, contribution)
     values = _validate_money(settlement, payment)
     if values["amount_applied"] > _money(contribution.amount):
@@ -677,8 +714,14 @@ def reverse_payment(
     if current_paid < values["amount_applied"]:
         raise ValueError("Contribution não possui valor pago suficiente para o estorno.")
     original_status = contribution.status
+    before_financial_status = contribution_financial_status(contribution, current_paid, reversed_at)
     new_paid = current_paid - values["amount_applied"]
     after_status = contribution_financial_status(contribution, new_paid, reversed_at)
+    patrimonial_reversal_amount = ZERO
+    if before_financial_status == "PAID" and after_status != "PAID":
+        patrimonial_reversal_amount = _active_contribution_credit(db, account.id, contribution.id)
+        if patrimonial_reversal_amount not in {ZERO, _money(contribution.amount)}:
+            raise ValueError("Crédito patrimonial da Contribution é inconsistente.")
     originals = _find_original_ledger(db, payment.id, values["amount_applied"])
 
     reversal = PaymentReversal(
@@ -731,6 +774,21 @@ def reverse_payment(
     contribution.paid_amount = new_paid
     contribution.status = after_status
     contribution.paid_at = contribution.paid_at if after_status == "PAID" else None
+    if patrimonial_reversal_amount > ZERO:
+        compensating_mfe = add_member_financial_entry(
+            db,
+            member,
+            entry_type="CONTRIBUTION_REVERSAL",
+            direction="DEBIT",
+            amount=patrimonial_reversal_amount,
+            reference_type="PAYMENT_REVERSAL",
+            reference_id=str(reversal.id),
+            description="Reversão do crédito patrimonial de Contribution.",
+            account=account,
+        )
+        compensating_mfe.contribution_id = contribution.id
+        compensating_mfe.payment_reversal_id = reversal.id
+        db.flush()
 
     snapshot = _receipt_snapshot(
         reversal=reversal,

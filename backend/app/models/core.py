@@ -1550,6 +1550,16 @@ class MemberFinancialEntry(Base):
         default=now_utc,
         index=True,
     )
+    contribution_id: Mapped[int | None] = mapped_column(
+        ForeignKey("contributions.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    payment_settlement_id: Mapped[int | None] = mapped_column(
+        ForeignKey("payment_settlements.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
     payment_reversal_id: Mapped[int | None] = mapped_column(ForeignKey("payment_reversals.id"))
 
     account: Mapped["MemberFinancialAccount"] = relationship(
@@ -1569,5 +1579,18 @@ class MemberFinancialEntry(Base):
             unique=True,
             postgresql_where=text("payment_reversal_id IS NOT NULL"),
             sqlite_where=text("payment_reversal_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_member_financial_entries_one_contribution_settlement_credit",
+            "payment_settlement_id",
+            unique=True,
+            postgresql_where=text(
+                "payment_settlement_id IS NOT NULL AND "
+                "entry_type = 'CONTRIBUTION' AND direction = 'CREDIT'"
+            ),
+            sqlite_where=text(
+                "payment_settlement_id IS NOT NULL AND "
+                "entry_type = 'CONTRIBUTION' AND direction = 'CREDIT'"
+            ),
         ),
     )

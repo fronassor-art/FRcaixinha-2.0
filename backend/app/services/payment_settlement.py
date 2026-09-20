@@ -13,7 +13,7 @@ from app.models import AgreementInstallment, CollectionAgreement, Contribution, 
 from app.services.ledger import post_contribution_payment, post_entry
 from app.services.loan_engine_v17 import lock_loan
 from app.services.loan_payments_v17 import apply_confirmed_payment
-from app.services.member_financial import lock_member_financial_account
+from app.services.member_financial import add_member_financial_entry, lock_member_financial_account
 from app.services.agreements_v039 import lock_collection_agreement, touch_collection_agreement
 
 
@@ -125,7 +125,13 @@ def installment_financial_status(installment: LoanInstallment, as_of: datetime) 
     return "PARTIAL" if _money(installment.paid_amount) > ZERO or _money(installment.paid_penalty_amount) > ZERO else "PENDING"
 
 
-def _locked_contribution(db: Session, payment: Payment) -> Contribution | None:
+def _locked_contribution(
+    db: Session,
+    payment: Payment,
+    *,
+    lock: bool = True,
+    refresh: bool = False,
+) -> Contribution | None:
     contribution_id = None
     if (payment.reference_type or "").upper() == "CONTRIBUTION" and (payment.reference_id or "").isdigit():
         contribution_id = int(payment.reference_id)
@@ -134,8 +140,10 @@ def _locked_contribution(db: Session, payment: Payment) -> Contribution | None:
         query = query.filter(Contribution.id == contribution_id)
     else:
         query = query.filter(Contribution.payment_id == payment.id)
-    if _is_postgresql(db):
+    if lock and _is_postgresql(db):
         query = query.with_for_update()
+    if refresh and _is_postgresql(db):
+        query = query.populate_existing()
     contribution = query.one_or_none()
     if contribution is not None and payment.reference_type and (payment.reference_type or "").upper() == "CONTRIBUTION":
         if contribution_id is None or contribution.id != contribution_id:
@@ -335,7 +343,9 @@ def settle_confirmed_pix_payment(
     if received < ZERO:
         raise ValueError("Valor confirmado não pode ser negativo.")
 
-    contribution = _locked_contribution(db, payment)
+    # Read only to discover the Member. The financial decision and final
+    # Contribution state are reloaded after acquiring Member -> Account.
+    contribution = _locked_contribution(db, payment, lock=False)
     installment = _locked_installment(db, payment, lock=False)
     agreement_installment = None
     agreement = None
@@ -369,6 +379,7 @@ def settle_confirmed_pix_payment(
     agreement_installment_paid_penalty_amount_before = agreement_installment_paid_penalty_amount_after = None
     collection_agreement_status_before = collection_agreement_status_after = None
     collection_agreement_state_revision_before = collection_agreement_state_revision_after = None
+    contribution_became_paid = False
     if agreement_installment is not None:
         member = db.get(Member, agreement.member_id)
         if member is None:
@@ -415,6 +426,10 @@ def settle_confirmed_pix_payment(
         loan_installment_id = None
         agreement_installment_id = agreement_installment.id
     elif contribution is not None:
+        member, account = lock_member_financial_account(db, contribution.member_id)
+        contribution = _locked_contribution(db, payment, lock=True, refresh=True)
+        if contribution is None or contribution.member_id != member.id:
+            raise ValueError("Referência de contribuição inválida.")
         before_paid = _contribution_paid_amount(contribution)
         before_status = contribution_financial_status(contribution, before_paid, effective_at)
         open_amount = max(ZERO, _money(contribution.amount) - before_paid)
@@ -423,6 +438,7 @@ def settle_confirmed_pix_payment(
         after_paid = _money(before_paid + applied)
         contribution.paid_amount = after_paid
         after_status = contribution_financial_status(contribution, after_paid, effective_at)
+        contribution_became_paid = before_status != "PAID" and after_status == "PAID"
         contribution.status = after_status
         if after_status == "PAID" and contribution.paid_at is None:
             contribution.paid_at = effective_at
@@ -579,6 +595,20 @@ def settle_confirmed_pix_payment(
     )
     db.add(settlement)
     db.flush()
+    if contribution_became_paid:
+        add_member_financial_entry(
+            db,
+            member,
+            entry_type="CONTRIBUTION",
+            direction="CREDIT",
+            amount=_money(contribution.amount),
+            reference_type="PAYMENT_SETTLEMENT",
+            reference_id=str(settlement.id),
+            description="Crédito patrimonial de Contribution confirmada.",
+            account=account,
+            contribution_id=contribution.id,
+            payment_settlement_id=settlement.id,
+        )
     snapshot = _receipt_snapshot(payment=payment, settlement=settlement, ledger=_ledger_snapshot(db, payment.id))
     canonical_snapshot = _canonical_json(snapshot)
     settlement.receipt_snapshot_json = canonical_snapshot

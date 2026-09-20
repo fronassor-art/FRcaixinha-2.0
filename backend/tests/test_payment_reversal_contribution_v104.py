@@ -328,7 +328,7 @@ def test_invalid_reason_fails_before_mutation(reason):
 
 def test_reversal_rejects_missing_settlement_and_unapproved_payment():
     db = _db()
-    admin, _contribution, payment, settlement = _setup(db, suffix="invalid")
+    admin, _contribution, payment, settlement = _setup(db, received="40.00", suffix="invalid")
     db.delete(settlement)
     db.commit()
     with pytest.raises(ValueError, match="Settlement"):
