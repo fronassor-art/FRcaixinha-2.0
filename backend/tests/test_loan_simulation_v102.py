@@ -39,26 +39,80 @@ def _eligible():
     )
 
 
-def test_simulation_is_official_sac_schedule_with_auditable_snapshot():
+def test_simulation_is_official_price_schedule_with_auditable_snapshot():
     db, user, member = _db_with_member()
-    result = loans.simulate_loan(LoanSimulationIn(principal=Decimal("100"), installments=6), user, db)
+    result = loans.simulate_loan(LoanSimulationIn(principal=Decimal("150"), installments=6), user, db)
 
-    assert result["principal"] == "100.00"
+    assert result["principal"] == "150.00"
     assert result["monthly_rate"] == "0.20"
-    assert result["calculation_version"] == "linear_amortization_v1"
-    assert result["installments_schedule"][0] == {
-        "number": 1, "principal": "16.67", "interest": "20.00", "balance_after": "83.33",
-        "amount": "36.67", "balance_before": "100.00",
-    }
+    assert result["calculation_version"] == "price_amortization_v1"
+    assert result["installments_schedule"] == [
+        {"number": 1, "principal": "15.11", "interest": "30.00", "balance_after": "134.89", "amount": "45.11", "balance_before": "150.00"},
+        {"number": 2, "principal": "18.13", "interest": "26.98", "balance_after": "116.76", "amount": "45.11", "balance_before": "134.89"},
+        {"number": 3, "principal": "21.76", "interest": "23.35", "balance_after": "95.00", "amount": "45.11", "balance_before": "116.76"},
+        {"number": 4, "principal": "26.11", "interest": "19.00", "balance_after": "68.89", "amount": "45.11", "balance_before": "95.00"},
+        {"number": 5, "principal": "31.33", "interest": "13.78", "balance_after": "37.56", "amount": "45.11", "balance_before": "68.89"},
+        {"number": 6, "principal": "37.56", "interest": "7.51", "balance_after": "0.00", "amount": "45.07", "balance_before": "37.56"},
+    ]
     assert result["installments_schedule"][-1]["balance_after"] == "0.00"
-    assert result["totals"] == {"principal": "100.00", "interest": "69.99", "payment": "169.99", "final_balance": "0.00"}
+    assert result["totals"] == {"principal": "150.00", "interest": "120.62", "payment": "270.62", "final_balance": "0.00"}
 
     row = db.query(LoanSimulation).one()
     assert row.member_id == member.id
     assert row.monthly_rate == Decimal("0.20")
-    assert row.calculation_version == "linear_amortization_v1"
+    assert row.calculation_version == "price_amortization_v1"
     assert row.token_hash != result["simulation_token"]
     assert row.schedule_hash in row.schedule_json or len(row.schedule_hash) == 64
+    assert row.schedule_hash == __import__("hashlib").sha256(row.schedule_json.encode("utf-8")).hexdigest()
+    db.close()
+
+
+def test_simulation_hash_and_contract_are_preserved_by_confirmation():
+    db, user, _ = _db_with_member()
+    simulation = loans.simulate_loan(
+        LoanSimulationIn(principal=Decimal("150"), installments=6), user, db
+    )
+    row = db.query(LoanSimulation).one()
+    original_hash = row.schedule_hash
+    loans.confirm_simulation(
+        LoanSimulationConfirmationIn(simulation_token=simulation["simulation_token"]),
+        user,
+        db,
+    )
+    db.refresh(row)
+    assert row.status == "CONFIRMED"
+    assert row.calculation_version == "price_amortization_v1"
+    assert row.schedule_hash == original_hash
+    db.close()
+
+
+def test_old_linear_simulation_is_not_reinterpreted_as_price(monkeypatch):
+    db, user, _ = _db_with_member()
+    simulation = loans.simulate_loan(
+        LoanSimulationIn(principal=Decimal("100"), installments=3), user, db
+    )
+    row = db.query(LoanSimulation).one()
+    row.calculation_version = "linear_amortization_v1"
+    db.commit()
+    loans.confirm_simulation(
+        LoanSimulationConfirmationIn(simulation_token=simulation["simulation_token"]),
+        user,
+        db,
+    )
+    monkeypatch.setattr(loans, "_loan_eligibility", lambda *args: _eligible())
+    with pytest.raises(HTTPException, match="TERMS_MISMATCH"):
+        loans.request_loan(
+            LoanRequestIn(
+                principal=Decimal("100"),
+                installments=3,
+                simulation_token=simulation["simulation_token"],
+            ),
+            user,
+            db,
+        )
+    db.refresh(row)
+    assert row.calculation_version == "linear_amortization_v1"
+    assert row.status == "CONFIRMED"
     db.close()
 
 

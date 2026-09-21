@@ -1075,7 +1075,7 @@ def _decision_fixture(db, suffix):
     member = Member(user_id=user.id, group_id=group.id, status="ACTIVE")
     db.add(member)
     db.flush()
-    loan = Loan(member_id=member.id, principal=Decimal("100.00"), monthly_rate=Decimal("0.20"), installments=1, status="REQUESTED")
+    loan = Loan(member_id=member.id, principal=Decimal("100.00"), monthly_rate=Decimal("0.20"), installments=1, calculation_version="price_amortization_v1", status="REQUESTED")
     db.add(loan)
     db.flush()
     return user, loan

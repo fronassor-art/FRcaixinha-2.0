@@ -21,14 +21,18 @@ from app.schemas.finance import LoanRequestIn, LoanDecisionIn, LoanSimulationIn,
 from app.api.deps import current_user, require_admin
 from app.services.notifications_v12 import create_notification
 from app.services.loan_engine_v17 import add_months, lock_loan, money, touch_loan
-from app.services.loan_amortization import build_loan_simulation, calculate_linear_amortization
+from app.services.loan_amortization import (
+    PRICE_CALCULATION_VERSION,
+    build_price_loan_simulation,
+    calculate_amortization,
+)
 from app.services.loan_eligibility import evaluate_loan_eligibility
 from app.services.member_financial import (
     get_member_financial_position,
     lock_member_financial_account,
 )
 from app.services.risk_v036 import cash_balance
-from app.core.loan_rules import LOAN_CALCULATION_VERSION, LOAN_SIMULATION_TTL_MINUTES, OFFICIAL_LOAN_MONTHLY_RATE, validate_loan_installments
+from app.core.loan_rules import LOAN_SIMULATION_TTL_MINUTES, OFFICIAL_LOAN_MONTHLY_RATE, validate_loan_installments
 
 
 def _now_utc():
@@ -58,7 +62,7 @@ def simulate_loan(data: LoanSimulationIn, user: User = Depends(current_user), db
         validate_loan_installments(data.installments)
     except ValueError as exc:
         raise HTTPException(422, str(exc))
-    simulation = build_loan_simulation(data.principal, OFFICIAL_LOAN_MONTHLY_RATE, data.installments)
+    simulation = build_price_loan_simulation(data.principal, OFFICIAL_LOAN_MONTHLY_RATE, data.installments)
     payload = {
         "calculation_version": simulation["calculation_version"],
         "principal": str(simulation["principal"]),
@@ -75,7 +79,7 @@ def simulate_loan(data: LoanSimulationIn, user: User = Depends(current_user), db
     snapshot_json = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     row = LoanSimulation(
         member_id=member.id, principal=simulation["principal"], monthly_rate=OFFICIAL_LOAN_MONTHLY_RATE,
-        installments=data.installments, calculation_version=LOAN_CALCULATION_VERSION,
+        installments=data.installments, calculation_version=PRICE_CALCULATION_VERSION,
         schedule_json=snapshot_json, schedule_hash=hashlib.sha256(snapshot_json.encode("utf-8")).hexdigest(),
         token_hash=_token_hash(token), status="SIMULATED",
         expires_at=now + timedelta(minutes=LOAN_SIMULATION_TTL_MINUTES), created_at=now,
@@ -226,7 +230,7 @@ def request_loan(data: LoanRequestIn, user: User=Depends(current_user), db: Sess
         Decimal(simulation.principal) != Decimal(data.principal)
         or simulation.installments != data.installments
         or Decimal(simulation.monthly_rate) != OFFICIAL_LOAN_MONTHLY_RATE
-        or simulation.calculation_version != LOAN_CALCULATION_VERSION
+        or simulation.calculation_version != PRICE_CALCULATION_VERSION
     ):
         raise HTTPException(409, "LOAN_SIMULATION_TERMS_MISMATCH")
     loan = Loan(
@@ -234,6 +238,7 @@ def request_loan(data: LoanRequestIn, user: User=Depends(current_user), db: Sess
         principal=data.principal,
         monthly_rate=OFFICIAL_LOAN_MONTHLY_RATE,
         installments=data.installments,
+        calculation_version=simulation.calculation_version,
     )
 
     eligibility = _loan_eligibility(member, loan, db)
@@ -303,6 +308,8 @@ def decide_loan(loan_id: int, data: LoanDecisionIn, admin=Depends(require_admin)
     from datetime import datetime, timezone
     loan.decided_at = datetime.now(timezone.utc)
     if data.approve:
+        if loan.calculation_version is None:
+            raise HTTPException(409, "LOAN_CALCULATION_VERSION_REQUIRED")
         from app.services.approval_engine_v048 import assert_loan_approval_allowed
         try:
             assert_loan_approval_allowed(db, loan, admin.id, data.force_exception, data.admin_note)
@@ -311,9 +318,8 @@ def decide_loan(loan_id: int, data: LoanDecisionIn, admin=Depends(require_admin)
             if isinstance(detail, dict):
                 raise HTTPException(409, detail=detail)
             raise HTTPException(400, str(detail))
-        # Parcelas mensais reais: juros sobre o saldo devedor,
-        # com amortização linear do principal.
-        rows, _, _ = calculate_linear_amortization(
+        rows, _, _ = calculate_amortization(
+            loan.calculation_version,
             loan.principal,
             loan.monthly_rate,
             loan.installments,

@@ -67,11 +67,12 @@ def test_current_revision_ids_and_chain_are_unchanged():
         if revision:
             rows[revision.group(1)] = down_revision.group(1) if down_revision else None
 
-    assert len(rows) == 96
+    assert len(rows) == 98
     assert max(map(len, rows)) <= VERSION_NUM_CAPACITY
     assert rows["0012_monthly_closing_integrity_v034"] == "0011_penalty_allocation_v029"
     assert rows["0087_monthly_closing_immutability_h3c_a1"] == "0086_payment_settlement_agreement_state_v106"
     assert rows["0088_monthly_closing_snapshot_schema_h3c_b2"] == "0087_monthly_closing_immutability_h3c_a1"
+    assert rows["0092_versioned_late_charge_foundation"] == "0091_loan_calculation_version"
 
 
 def test_drop_constraint_uses_alembic_1614_type_keyword():

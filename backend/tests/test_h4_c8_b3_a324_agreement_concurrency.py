@@ -25,7 +25,7 @@ from app.services import agreements_v039
 from app.services.agreements_v039 import decide_agreement
 
 
-BASE_REVISION = "0089_collection_agreement_subjects"
+BASE_REVISION = "0092_versioned_late_charge_foundation"
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 
 

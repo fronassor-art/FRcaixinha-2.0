@@ -4,7 +4,11 @@ from sqlalchemy import String, Integer, Boolean, DateTime, Date, Numeric, Foreig
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy import event
 from app.db.base import Base
-from app.core.loan_rules import MAX_LOAN_INSTALLMENTS
+from app.core.loan_rules import (
+    LATE_CHARGE_SETTLEMENT_COMPONENT_VERSION,
+    LATE_CHARGE_VERSION,
+    MAX_LOAN_INSTALLMENTS,
+)
 
 def now_utc():
     return datetime.now(timezone.utc)
@@ -213,6 +217,10 @@ class PaymentSettlement(Base):
     principal_applied: Mapped[Decimal] = mapped_column(Numeric(14,2), default=Decimal("0.00"))
     interest_applied: Mapped[Decimal] = mapped_column(Numeric(14,2), default=Decimal("0.00"))
     penalty_applied: Mapped[Decimal] = mapped_column(Numeric(14,2), default=Decimal("0.00"))
+    settlement_component_version: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    normal_interest_applied: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    late_interest_applied: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    fixed_penalty_applied: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
     excess_amount: Mapped[Decimal] = mapped_column(Numeric(14,2), default=Decimal("0.00"))
     obligation_status_before: Mapped[str] = mapped_column(String(20))
     obligation_status_after: Mapped[str] = mapped_column(String(20))
@@ -251,6 +259,39 @@ class PaymentSettlement(Base):
         CheckConstraint("amount_received >= 0 AND amount_applied >= 0 AND principal_applied >= 0 AND interest_applied >= 0 AND penalty_applied >= 0 AND excess_amount >= 0", name="ck_payment_settlements_nonnegative_amounts"),
         CheckConstraint("amount_received = amount_applied + excess_amount", name="ck_payment_settlements_received_allocation"),
         CheckConstraint("amount_applied = principal_applied + interest_applied + penalty_applied", name="ck_payment_settlements_applied_components"),
+        CheckConstraint(
+            f"settlement_component_version IS NULL OR settlement_component_version = '{LATE_CHARGE_SETTLEMENT_COMPONENT_VERSION}'",
+            name="ck_payment_settlements_component_version",
+        ),
+        CheckConstraint(
+            "(settlement_component_version IS NULL AND normal_interest_applied IS NULL AND "
+            "late_interest_applied IS NULL AND fixed_penalty_applied IS NULL) OR "
+            "(settlement_component_version IS NOT NULL AND normal_interest_applied IS NOT NULL AND "
+            "late_interest_applied IS NOT NULL AND fixed_penalty_applied IS NOT NULL)",
+            name="ck_payment_settlements_component_presence",
+        ),
+        CheckConstraint(
+            "normal_interest_applied IS NULL OR normal_interest_applied >= 0",
+            name="ck_payment_settlements_normal_interest_nonnegative",
+        ),
+        CheckConstraint(
+            "late_interest_applied IS NULL OR late_interest_applied >= 0",
+            name="ck_payment_settlements_late_interest_nonnegative",
+        ),
+        CheckConstraint(
+            "fixed_penalty_applied IS NULL OR fixed_penalty_applied >= 0",
+            name="ck_payment_settlements_fixed_penalty_nonnegative",
+        ),
+        CheckConstraint(
+            "settlement_component_version IS NULL OR obligation_type = 'LOAN_INSTALLMENT'",
+            name="ck_payment_settlements_components_loan_only",
+        ),
+        CheckConstraint(
+            "settlement_component_version IS NULL OR "
+            "(interest_applied = normal_interest_applied AND "
+            "penalty_applied = late_interest_applied + fixed_penalty_applied)",
+            name="ck_payment_settlements_component_aggregates",
+        ),
         CheckConstraint("(obligation_type = 'CONTRIBUTION' AND contribution_id IS NOT NULL AND loan_installment_id IS NULL AND agreement_installment_id IS NULL) OR (obligation_type = 'LOAN_INSTALLMENT' AND contribution_id IS NULL AND loan_installment_id IS NOT NULL AND agreement_installment_id IS NULL) OR (obligation_type = 'AGREEMENT_INSTALLMENT' AND contribution_id IS NULL AND loan_installment_id IS NULL AND agreement_installment_id IS NOT NULL)", name="ck_payment_settlements_single_obligation"),
         CheckConstraint("obligation_status_before IN ('OPEN', 'PENDING', 'PARTIAL', 'OVERDUE', 'PAID')", name="ck_payment_settlements_status_before"),
         CheckConstraint("obligation_status_after IN ('OPEN', 'PENDING', 'PARTIAL', 'OVERDUE', 'PAID')", name="ck_payment_settlements_status_after"),
@@ -304,6 +345,7 @@ class Loan(Base):
     )
     monthly_rate: Mapped[Decimal] = mapped_column(Numeric(8,5))
     installments: Mapped[int] = mapped_column(Integer)
+    calculation_version: Mapped[str | None] = mapped_column(String(60), nullable=True)
     status: Mapped[str] = mapped_column(String(30), default="REQUESTED")
     requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -350,6 +392,12 @@ class LoanInstallment(Base):
     penalty_amount: Mapped[Decimal] = mapped_column(Numeric(14,2), default=Decimal("0"))
     paid_penalty_amount: Mapped[Decimal] = mapped_column(Numeric(14,2), default=Decimal("0"))
     last_penalty_date: Mapped[date | None] = mapped_column(Date)
+    late_charge_version: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    fixed_penalty_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    paid_fixed_penalty_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    late_interest_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    paid_late_interest_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    late_interest_accrued_through_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(20), default="OPEN")
     collection_stage: Mapped[str] = mapped_column(String(20), default="NORMAL", index=True)
@@ -357,7 +405,117 @@ class LoanInstallment(Base):
     collection_attempts: Mapped[int] = mapped_column(Integer, default=0)
     __table_args__ = (
         UniqueConstraint("loan_id", "number", name="uq_loan_installment_number"),
+        CheckConstraint(
+            "late_charge_version IS NULL OR length(trim(late_charge_version)) > 0",
+            name="ck_loan_installments_late_charge_version",
+        ),
+        CheckConstraint(
+            "(late_charge_version IS NULL AND fixed_penalty_amount IS NULL AND "
+            "paid_fixed_penalty_amount IS NULL AND late_interest_amount IS NULL AND "
+            "paid_late_interest_amount IS NULL AND late_interest_accrued_through_date IS NULL) OR "
+            "(late_charge_version IS NOT NULL AND fixed_penalty_amount IS NOT NULL AND "
+            "paid_fixed_penalty_amount IS NOT NULL AND late_interest_amount IS NOT NULL AND "
+            "paid_late_interest_amount IS NOT NULL)",
+            name="ck_loan_installments_late_charge_presence",
+        ),
+        CheckConstraint(
+            "fixed_penalty_amount IS NULL OR fixed_penalty_amount >= 0",
+            name="ck_loan_installments_fixed_penalty_nonnegative",
+        ),
+        CheckConstraint(
+            "paid_fixed_penalty_amount IS NULL OR paid_fixed_penalty_amount >= 0",
+            name="ck_loan_installments_paid_fixed_penalty_nonnegative",
+        ),
+        CheckConstraint(
+            "late_interest_amount IS NULL OR late_interest_amount >= 0",
+            name="ck_loan_installments_late_interest_nonnegative",
+        ),
+        CheckConstraint(
+            "paid_late_interest_amount IS NULL OR paid_late_interest_amount >= 0",
+            name="ck_loan_installments_paid_late_interest_nonnegative",
+        ),
+        CheckConstraint(
+            "paid_fixed_penalty_amount IS NULL OR paid_fixed_penalty_amount <= fixed_penalty_amount",
+            name="ck_loan_installments_paid_fixed_penalty_lte_assessed",
+        ),
+        CheckConstraint(
+            "paid_late_interest_amount IS NULL OR paid_late_interest_amount <= late_interest_amount",
+            name="ck_loan_installments_paid_late_interest_lte_accrued",
+        ),
         Index("ix_loan_installments_status_due_date", "status", "due_date"),
+    )
+
+
+class LoanLateChargeEvent(Base):
+    __tablename__ = "loan_late_charge_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    loan_installment_id: Mapped[int] = mapped_column(
+        ForeignKey("loan_installments.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    late_charge_version: Mapped[str] = mapped_column(String(60), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    effective_date: Mapped[date] = mapped_column(Date, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=now_utc,
+        nullable=False,
+    )
+    amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    eligible_principal: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    payment_settlement_id: Mapped[int | None] = mapped_column(
+        ForeignKey("payment_settlements.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    payment_reversal_id: Mapped[int | None] = mapped_column(
+        ForeignKey("payment_reversals.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    metadata_json: Mapped[str | None] = mapped_column(Text(), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "length(trim(late_charge_version)) > 0",
+            name="ck_loan_late_charge_events_version_nonempty",
+        ),
+        CheckConstraint(
+            "event_type IN ('FIXED_PENALTY_ASSESSED', 'LATE_INTEREST_ACCRUED', "
+            "'PRINCIPAL_BASE_REDUCED', 'PRINCIPAL_BASE_RESTORED')",
+            name="ck_loan_late_charge_events_type",
+        ),
+        CheckConstraint(
+            "amount IS NULL OR amount >= 0",
+            name="ck_loan_late_charge_events_amount_nonnegative",
+        ),
+        CheckConstraint(
+            "eligible_principal IS NULL OR eligible_principal >= 0",
+            name="ck_loan_late_charge_events_principal_nonnegative",
+        ),
+        CheckConstraint(
+            "event_type != 'FIXED_PENALTY_ASSESSED' OR amount IS NOT NULL",
+            name="ck_loan_late_charge_events_fixed_penalty_amount",
+        ),
+        CheckConstraint(
+            "event_type != 'LATE_INTEREST_ACCRUED' OR "
+            "(amount IS NOT NULL AND eligible_principal IS NOT NULL)",
+            name="ck_loan_late_charge_events_accrual_values",
+        ),
+        Index(
+            "uq_loan_late_charge_events_fixed_penalty",
+            "loan_installment_id",
+            "late_charge_version",
+            unique=True,
+            postgresql_where=text("event_type = 'FIXED_PENALTY_ASSESSED'"),
+            sqlite_where=text("event_type = 'FIXED_PENALTY_ASSESSED'"),
+        ),
+        Index(
+            "ix_loan_late_charge_events_installment_effective",
+            "loan_installment_id",
+            "effective_date",
+        ),
+        Index("ix_loan_late_charge_events_settlement_id", "payment_settlement_id"),
+        Index("ix_loan_late_charge_events_reversal_id", "payment_reversal_id"),
     )
 
 class LedgerEntry(Base):
