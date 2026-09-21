@@ -1,3 +1,4 @@
+from datetime import date
 from decimal import Decimal
 import os
 from pathlib import Path
@@ -41,6 +42,7 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     backup_retention_days: int = 7
     loan_daily_penalty_rate: Decimal = Decimal("0.00")
+    loan_late_charge_effective_date: date | None = None
     workflow_evidence_storage_root: str = "./data/workflow-evidence"
     workflow_evidence_max_bytes: int = 10 * 1024 * 1024
     workflow_evidence_allowed_types: str = "application/pdf,image/jpeg,image/png,text/plain,text/csv,application/zip"
