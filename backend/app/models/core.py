@@ -194,6 +194,11 @@ class Payment(Base):
     ledger_posted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     reference_type: Mapped[str | None] = mapped_column(String(50), index=True)
     reference_id: Mapped[str | None] = mapped_column(String(80), index=True)
+    attempt_status: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    calculated_for_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    financial_snapshot_json: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    snapshot_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    reconciliation_status: Mapped[str | None] = mapped_column(String(30), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     payment_reversal: Mapped["PaymentReversal | None"] = relationship(back_populates="payment", uselist=False)
     __table_args__ = (
@@ -201,6 +206,14 @@ class Payment(Base):
         Index("uq_payments_provider_pix_txid", "provider", "pix_txid", unique=True),
         Index("uq_payments_provider_end_to_end_id", "provider", "end_to_end_id", unique=True),
         Index("ix_payments_status_expires_at", "status", "expires_at"),
+        Index(
+            "uq_payments_reference_pending",
+            "reference_type",
+            "reference_id",
+            unique=True,
+            postgresql_where=text("attempt_status = 'PENDING'"),
+            sqlite_where=text("attempt_status = 'PENDING'"),
+        ),
     )
 
 class PaymentSettlement(Base):

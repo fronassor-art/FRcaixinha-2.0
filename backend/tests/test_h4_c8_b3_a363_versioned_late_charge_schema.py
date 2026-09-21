@@ -29,6 +29,7 @@ from app.models import LoanInstallment, LoanLateChargeEvent, PaymentSettlement
 
 REVISION = "0092_versioned_late_charge_foundation"
 PREVIOUS_REVISION = "0091_loan_calculation_version"
+HEAD_REVISION = "0093_payment_attempt_schema_foundation"
 EVENT_TYPES = {
     "FIXED_PENALTY_ASSESSED",
     "LATE_INTEREST_ACCRUED",
@@ -116,9 +117,9 @@ def test_a363_constants_models_and_single_head_contract():
     config.set_main_option("script_location", str(backend_dir / "alembic"))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_current_head() == REVISION
+    assert script.get_current_head() == HEAD_REVISION
     assert script.get_revision(REVISION).down_revision == PREVIOUS_REVISION
-    assert len(list(script.walk_revisions())) == 98
+    assert len(list(script.walk_revisions())) == 99
     assert LATE_CHARGE_VERSION == "late_charge_daily_simple_v1"
     assert LATE_CHARGE_SETTLEMENT_COMPONENT_VERSION == "late_charge_components_v1"
     assert FINANCIAL_TIMEZONE == "America/Belem"
@@ -235,7 +236,7 @@ def test_fresh_upgrade_to_head(tmp_path):
     with engine.connect() as connection:
         assert connection.execute(
             text("SELECT version_num FROM alembic_version")
-        ).scalar_one() == REVISION
+        ).scalar_one() == HEAD_REVISION
     engine.dispose()
 
 
