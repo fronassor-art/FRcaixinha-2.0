@@ -84,6 +84,8 @@ def test_expiry_boundary_is_inclusive_and_rejects_naive_datetimes():
         (Decimal("1"), "1.00"),
         (Decimal("1.2"), "1.20"),
         (Decimal("1.23"), "1.23"),
+        (Decimal("1.230"), "1.23"),
+        (Decimal("0.000"), "0.00"),
     ],
 )
 def test_normalize_money(value, expected):

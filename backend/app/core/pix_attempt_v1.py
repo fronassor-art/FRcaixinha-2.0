@@ -47,9 +47,10 @@ def normalize_money(value: Decimal) -> str:
         raise ValueError("money value must be finite")
     if value.is_signed() or value < 0:
         raise ValueError("money value cannot be negative")
-    if value.as_tuple().exponent < -2:
+    quantized = value.quantize(CENT)
+    if value != quantized:
         raise ValueError("money value must be representable in cents")
-    return format(value.quantize(CENT), ".2f")
+    return format(quantized, ".2f")
 
 def build_loan_installment_snapshot(*, loan_id: int | str, installment_id: int | str, installment_number: int, calculated_for_date: date, principal_due: Decimal, normal_price_interest_due: Decimal, fixed_penalty_due: Decimal, late_interest_due: Decimal) -> dict[str, Any]:
     if not isinstance(calculated_for_date, date) or isinstance(calculated_for_date, datetime):
