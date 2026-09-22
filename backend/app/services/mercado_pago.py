@@ -1,5 +1,24 @@
 import httpx
+from decimal import Decimal, ROUND_HALF_UP
 from app.core.config import settings
+
+
+CENT = Decimal("0.01")
+
+
+class ProviderCreateAmbiguity(RuntimeError):
+    """The request may have reached Mercado Pago; retry the same key."""
+
+
+def serialize_provider_money(amount: Decimal) -> str:
+    if not isinstance(amount, Decimal):
+        raise TypeError("provider amount must be Decimal")
+    if not amount.is_finite() or amount < 0:
+        raise ValueError("provider amount must be a finite non-negative Decimal")
+    quantized = amount.quantize(CENT, rounding=ROUND_HALF_UP)
+    if quantized != amount:
+        raise ValueError("provider amount must be exactly representable in cents")
+    return format(quantized, ".2f")
 
 
 class MercadoPagoClient:
@@ -31,9 +50,10 @@ class MercadoPagoClient:
         idempotency_key,
         external_reference=None,
     ):
+        money = serialize_provider_money(amount)
         payload = {
             "type": "online",
-            "total_amount": f"{float(amount):.2f}",
+            "total_amount": money,
             "processing_mode": "automatic",
             "capture_mode": "automatic_async",
             **(
@@ -44,7 +64,7 @@ class MercadoPagoClient:
             "transactions": {
                 "payments": [
                     {
-                        "amount": f"{float(amount):.2f}",
+                        "amount": money,
                         "payment_method": {
                             "id": "pix",
                             "type": "bank_transfer",

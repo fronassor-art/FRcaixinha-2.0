@@ -15,6 +15,7 @@ from app.db.base import Base
 from app.models import LoanLateChargeEvent
 
 
+HEAD_REVISION = "0095_pix_attempt_provider_reservation"
 REVISION = "0094_late_interest_event_contract"
 DOWN_REVISION = "0093_payment_attempt_schema_foundation"
 ADJUSTMENT_TYPES = {
@@ -94,7 +95,8 @@ def test_single_head_and_revision_chain():
     config = Config(str(_backend_dir() / "alembic.ini"))
     config.set_main_option("script_location", str(_backend_dir() / "alembic"))
     script = ScriptDirectory.from_config(config)
-    assert script.get_heads() == [REVISION]
+    assert script.get_heads() == [HEAD_REVISION]
+    assert script.get_revision(HEAD_REVISION).down_revision == REVISION
     assert script.get_revision(REVISION).down_revision == DOWN_REVISION
 
 

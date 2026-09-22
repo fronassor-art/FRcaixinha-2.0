@@ -19,7 +19,7 @@ def test_single_alembic_head_after_security_reconciliation():
         if line.strip()
     ]
 
-    assert heads == ["0094_late_interest_event_contract"]
+    assert heads == ["0095_pix_attempt_provider_reservation"]
 
     root = Path(__file__).parents[1] / "alembic" / "versions"
     rows = {}

@@ -175,7 +175,7 @@ class Payment(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     provider: Mapped[str] = mapped_column(String(40))
     provider_order_id: Mapped[str | None] = mapped_column(String(150), index=True)
-    provider_payment_id: Mapped[str] = mapped_column(String(150))
+    provider_payment_id: Mapped[str | None] = mapped_column(String(150), nullable=True)
     idempotency_key: Mapped[str] = mapped_column(String(150), unique=True, index=True)
     amount: Mapped[Decimal] = mapped_column(Numeric(14,2))
     status: Mapped[str] = mapped_column(String(30), default="PENDING")
@@ -202,6 +202,14 @@ class Payment(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     payment_reversal: Mapped["PaymentReversal | None"] = relationship(back_populates="payment", uselist=False)
     __table_args__ = (
+        CheckConstraint(
+            "provider_payment_id IS NOT NULL OR (reference_type = 'LOAN_INSTALLMENT' "
+            "AND reference_id IS NOT NULL AND attempt_status IS NOT NULL "
+            "AND idempotency_key IS NOT NULL AND calculated_for_date IS NOT NULL "
+            "AND financial_snapshot_json IS NOT NULL AND snapshot_hash IS NOT NULL "
+            "AND expires_at IS NOT NULL)",
+            name="ck_payments_provider_id_or_versioned_loan_attempt",
+        ),
         UniqueConstraint("provider", "provider_payment_id", name="uq_provider_payment"),
         Index("uq_payments_provider_pix_txid", "provider", "pix_txid", unique=True),
         Index("uq_payments_provider_end_to_end_id", "provider", "end_to_end_id", unique=True),

@@ -134,7 +134,8 @@ def test_webhook_approved_baixa_contribuicao_e_ledger():
         )
 
         assert response.status_code == 200
-        assert response.json() == {"received": True}
+        assert response.json()["received"] is True
+        assert response.json()["reconciliable"] is False
 
         db = TestingSessionLocal()
 

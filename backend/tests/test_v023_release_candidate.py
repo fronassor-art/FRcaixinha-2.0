@@ -33,7 +33,7 @@ def test_alembic_chain_has_single_head():
         if line.strip()
     ]
 
-    assert heads == ["0094_late_interest_event_contract"]
+    assert heads == ["0095_pix_attempt_provider_reservation"]
 
 def test_environment_templates_are_placeholders():
     for name in ('.env.production.example', '.env.staging.example'):

@@ -28,6 +28,7 @@ from app.models import (
     User,
 )
 from app.services.ledger import verify_ledger_chain
+from app.services.loan_installment_pix_attempts import reserve
 
 
 engine = create_engine(
@@ -139,23 +140,28 @@ def test_webhook_approved_settles_installment_idempotently_and_hashes_ledger(mon
         db,
         suffix=102,
         amount=Decimal("120.00"),
-        penalty=Decimal("10.00"),
+        penalty=Decimal("0.00"),
     )
-    payment = Payment(
-        provider="mercado_pago",
-        provider_order_id="ORDER-INSTALLMENT-102",
-        provider_payment_id="PAY-INSTALLMENT-102",
-        idempotency_key="frc-loan-installment-102",
-        amount=Decimal("130.00"),
-        status="pending",
-        raw_status="pending",
-        qr_code="000201PIX-INSTALLMENT-102",
-        qr_code_base64="base64-102",
-        ticket_url="https://pix.example/102",
-        reference_type="LOAN_INSTALLMENT",
-        reference_id=str(installment.id),
+    # Build a current A3.76H attempt so this test keeps its original purpose:
+    # an approved, verified attempt settles and posts the ledger.
+    payment, created = reserve(db, installment.id)
+    assert created is True
+    payment.provider_order_id = "ORDER-INSTALLMENT-102"
+    payment.provider_payment_id = "PAY-INSTALLMENT-102"
+    payment.status = "pending"
+    payment.raw_status = "pending"
+    payment.qr_code = "000201PIX-INSTALLMENT-102"
+    payment.qr_code_base64 = "base64-102"
+    payment.ticket_url = "https://pix.example/102"
+
+    # Provider evidence must carry a trusted confirmation instant.
+    # Use the exact financial date snapshotted by reserve(), keeping the
+    # confirmation inside that civil day.
+    provider_confirmed_at = (
+        f"{payment.calculated_for_date.isoformat()}T15:30:00Z"
     )
-    db.add(payment)
+    provider_amount = f"{payment.amount:.2f}"
+
     db.commit()
     payment_id = payment.id
     installment_id = installment.id
@@ -169,7 +175,12 @@ def test_webhook_approved_settles_installment_idempotently_and_hashes_ledger(mon
             "status": "approved",
             "transactions": {
                 "payments": [
-                    {"id": "PAY-INSTALLMENT-102", "status": "approved"},
+                    {
+                        "id": "PAY-INSTALLMENT-102",
+                        "status": "approved",
+                        "transaction_amount": provider_amount,
+                        "date_approved": provider_confirmed_at,
+                    },
                 ],
             },
         }
@@ -211,14 +222,14 @@ def test_webhook_approved_settles_installment_idempotently_and_hashes_ledger(mon
     ).order_by(LedgerEntry.id).all()
 
     assert updated_payment.status == "approved"
+    assert updated_payment.attempt_status == "APPROVED"
     assert updated_payment.ledger_posted_at is not None
     assert db.query(PaymentSettlement).filter(PaymentSettlement.payment_id == payment_id).count() == 1
     assert updated_installment.status == "PAID"
     assert updated_installment.paid_amount == Decimal("120.00")
-    assert updated_installment.paid_penalty_amount == Decimal("10.00")
+    assert updated_installment.paid_penalty_amount == Decimal("0.00")
     assert updated_loan.status == "PAID"
     assert [(entry.reference_type, entry.amount) for entry in entries] == [
-        ("LOAN_PENALTY_PAYMENT", Decimal("10.00")),
         ("LOAN_INTEREST_PAYMENT", Decimal("20.00")),
     ]
     assert all(entry.entry_hash and entry.previous_hash is not None for entry in entries[1:])

@@ -425,7 +425,8 @@ def test_approved_agreement_webhook_uses_single_settlement_path(monkeypatch):
 
     response = asyncio.run(payments_api.mercado_pago_webhook(request, db))
 
-    assert response == {"received": True}
+    assert response["received"] is True
+    assert response["reconciliable"] is False
     assert db.query(PaymentSettlement).filter_by(payment_id=payment.id).count() == 1
     assert db.query(LedgerEntry).filter_by(reference_type="AGREEMENT_INSTALLMENT_PAYMENT", reference_id=str(payment.id)).count() == 1
     assert rows[0].paid_penalty_amount == Decimal("10.00")

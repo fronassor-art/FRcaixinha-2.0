@@ -15,6 +15,7 @@ from app.services.mercado_pago import MercadoPagoClient
 from app.services.notifications_v12 import create_notification
 from app.services.payment_settlement import contribution_financial_status, installment_financial_status, settle_confirmed_pix_payment
 from app.services.webhook import validate_mercado_pago_signature
+from app.services.loan_installment_pix_attempts import approve_or_reconcile, RECONCILIATION_REQUIRED
 
 
 router = APIRouter(prefix="/payments", tags=["payments"])
@@ -261,27 +262,35 @@ async def mercado_pago_webhook(request: Request, db: Session = Depends(get_db)):
     if not valid:
         raise HTTPException(401, "Assinatura do webhook inválida.")
     event_id = str(data.get("id") or f"{data.get('type')}:{data_id}")
-    if db.query(WebhookEvent).filter(WebhookEvent.provider == "mercado_pago", WebhookEvent.event_id == event_id).first():
+    event = db.query(WebhookEvent).filter(WebhookEvent.provider == "mercado_pago", WebhookEvent.event_id == event_id).first()
+    if event is not None and event.processed:
         return {"received": True, "duplicate": True}
-    event = WebhookEvent(provider="mercado_pago", event_id=event_id, event_type=data.get("type"), processed=False)
-    db.add(event)
-    try:
-        db.flush()
-    except IntegrityError:
-        db.rollback()
-        return {"received": True, "duplicate": True}
+    if event is None:
+        event = WebhookEvent(provider="mercado_pago", event_id=event_id, event_type=data.get("type"), processed=False)
+        db.add(event)
+        try:
+            db.flush()
+        except IntegrityError:
+            db.rollback()
+            event = db.query(WebhookEvent).filter(WebhookEvent.provider == "mercado_pago", WebhookEvent.event_id == event_id).first()
+            if event is not None and event.processed:
+                return {"received": True, "duplicate": True}
+            if event is None:
+                raise
 
     if data.get("type") == "payment" and data_id:
         payment = db.query(Payment).filter(Payment.provider == "mercado_pago", Payment.provider_payment_id == data_id).first()
         if payment is not None:
             if not payment.provider_order_id:
-                db.rollback()
+                # Preserve the durable, retryable webhook evidence.
+                db.commit()
                 raise HTTPException(502, "Pagamento sem provider_order_id para consulta no Mercado Pago.")
             client = MercadoPagoClient()
             try:
                 remote = await client.get_order(payment.provider_order_id)
             except Exception:
-                db.rollback()
+                # A transient provider failure must not discard WebhookEvent.
+                db.commit()
                 raise HTTPException(502, "Não foi possível consultar o pagamento no Mercado Pago.")
             remote_payments = ((remote.get("transactions") or {}).get("payments") or [])
             remote_payment = next((item for item in remote_payments if str(item.get("id")) == str(payment.provider_payment_id)), None) or {}
@@ -290,12 +299,20 @@ async def mercado_pago_webhook(request: Request, db: Session = Depends(get_db)):
             status = remote_payment.get("status") or remote.get("status")
             payment.status = status or payment.status
             payment.raw_status = status or payment.raw_status
+            if status in {"refunded", "charged_back"}:
+                # Provider evidence is retained; financial reversal is explicit only.
+                payment.reconciliation_status = RECONCILIATION_REQUIRED
             if status == "approved":
                 received = _remote_amount(remote_payment, remote)
                 if received is not None:
                     payment.amount_received = received
                 was_settled = db.query(PaymentSettlement).filter(PaymentSettlement.payment_id == payment.id).first() is not None
-                if (payment.reference_type or "").upper() in {"CONTRIBUTION", "LOAN_INSTALLMENT"} or _payment_contribution(db, payment) is not None:
+                if (payment.reference_type or "").upper() == "LOAN_INSTALLMENT":
+                    # Evidence and the retryable event are durable before the
+                    # financial writer; DB/provider settlement is not atomic.
+                    db.commit()
+                    approve_or_reconcile(db, payment, _remote_confirmed_at(remote_payment), remote_payload, settle_confirmed_pix_payment)
+                elif (payment.reference_type or "").upper() == "CONTRIBUTION" or _payment_contribution(db, payment) is not None:
                     if payment.ledger_posted_at is None or was_settled:
                         settlement = settle_confirmed_pix_payment(
                             db,
@@ -339,7 +356,7 @@ async def mercado_pago_webhook(request: Request, db: Session = Depends(get_db)):
                             if installment is not None and agreement is not None and member is not None:
                                 create_notification(db, member.user_id, "AGREEMENT_INSTALLMENT_PAID", "Parcela do acordo paga", f"A parcela {installment.number} do acordo #{agreement.id} foi confirmada.", "AGREEMENT_INSTALLMENT", str(installment.id))
             event.processed = True
-    else:
+    elif data.get("type") != "payment":
         event.processed = True
     db.commit()
-    return {"received": True}
+    return {"received": True, "reconciliable": not event.processed}
