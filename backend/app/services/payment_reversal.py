@@ -8,6 +8,10 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.core.loan_rules import (
+    LATE_CHARGE_SETTLEMENT_COMPONENT_VERSION,
+    LATE_CHARGE_VERSION,
+)
 from app.models import (
     AuditLog,
     AgreementInstallment,
@@ -25,6 +29,7 @@ from app.models import (
 )
 from app.services.ledger import post_entry
 from app.services.loan_engine_v17 import lock_loan, touch_loan
+from app.services.loan_obligation_runtime import materialize_reversal_late_interest_adjustment
 from app.services.agreements_v039 import lock_collection_agreement, touch_collection_agreement
 from app.services.member_financial import add_member_financial_entry, get_member_financial_position, lock_member_financial_account
 from app.services.payment_settlement import _is_postgresql, _ledger_snapshot, _money, _receipt_snapshot as _settlement_receipt_snapshot, contribution_financial_status
@@ -123,6 +128,32 @@ def _validate_money(settlement: PaymentSettlement, payment: Payment, *, loan: bo
         raise ValueError("Settlement possui equação de recebimento inválida.")
     if values["amount_applied"] != values["principal_applied"] + values["interest_applied"] + values["penalty_applied"]:
         raise ValueError("Settlement possui equação de aplicação inválida.")
+    if settlement.settlement_component_version is not None:
+        if (
+            settlement.settlement_component_version
+            != LATE_CHARGE_SETTLEMENT_COMPONENT_VERSION
+        ):
+            raise ValueError("Versão de componentes do settlement inválida.")
+        if any(
+            value is None
+            for value in (
+                settlement.normal_interest_applied,
+                settlement.late_interest_applied,
+                settlement.fixed_penalty_applied,
+            )
+        ):
+            raise ValueError("Settlement versionado possui componente ausente.")
+        values.update(
+            {
+                "normal_interest_applied": _money(settlement.normal_interest_applied),
+                "late_interest_applied": _money(settlement.late_interest_applied),
+                "fixed_penalty_applied": _money(settlement.fixed_penalty_applied),
+            }
+        )
+        if values["interest_applied"] != values["normal_interest_applied"]:
+            raise ValueError("Settlement possui juros normais incompatíveis.")
+        if values["penalty_applied"] != values["late_interest_applied"] + values["fixed_penalty_applied"]:
+            raise ValueError("Settlement possui encargos de mora incompatíveis.")
     expected_received = _money(payment.amount_received if payment.amount_received is not None else payment.amount)
     if values["amount_received"] != expected_received:
         raise ValueError("Settlement não corresponde ao valor recebido pelo pagamento.")
@@ -337,6 +368,19 @@ def _validate_loan_settlement(payment: Payment, settlement: PaymentSettlement) -
     amounts = snapshot.get("amounts") or {}
     if any(amounts.get(key) != format(value, "f") for key, value in expected_amounts.items()):
         raise ValueError("Valores do settlement não correspondem ao snapshot.")
+    if settlement.settlement_component_version is not None:
+        component_amounts = {
+            "normal_price_interest": values["normal_interest_applied"],
+            "late_interest": values["late_interest_applied"],
+            "fixed_penalty": values["fixed_penalty_applied"],
+        }
+        if any(
+            amounts.get(key) != format(value, "f")
+            for key, value in component_amounts.items()
+        ):
+            raise ValueError(
+                "Componentes versionados não correspondem ao snapshot."
+            )
     payment_snapshot = snapshot.get("payment") or {}
     obligation_snapshot = snapshot.get("obligation") or {}
     if payment_snapshot.get("id") != payment.id or payment_snapshot.get("reference_type") != payment.reference_type or payment_snapshot.get("reference_id") != payment.reference_id:
@@ -617,6 +661,26 @@ def _reverse_loan_payment(db, payment, settlement, admin_id, reason, reversed_at
     base = values["principal_applied"] + values["interest_applied"]
     if _money(installment.paid_amount) < base or _money(installment.paid_penalty_amount) < values["penalty_applied"]:
         raise ValueError("Parcela não possui valores pagos suficientes para restauração.")
+    if settlement.settlement_component_version is not None:
+        if (
+            installment.paid_fixed_penalty_amount is None
+            and values["fixed_penalty_applied"] != ZERO
+        ) or (
+            installment.paid_late_interest_amount is None
+            and values["late_interest_applied"] != ZERO
+        ):
+            raise ValueError(
+                "Projeções versionadas da parcela estão ausentes."
+            )
+        if (
+            _money(installment.paid_fixed_penalty_amount)
+            < values["fixed_penalty_applied"]
+            or _money(installment.paid_late_interest_amount)
+            < values["late_interest_applied"]
+        ):
+            raise ValueError(
+                "Projeções versionadas não permitem restauração exata."
+            )
     reversal = PaymentReversal(payment_id=payment.id, settlement_id=settlement.id, admin_id=admin_id, reason=reason, reversed_at=reversed_at, reversal_competence=date(reversed_at.year, reversed_at.month, 1), original_competence=None, original_due_date=installment.due_date, original_date_kind="LOAN_INSTALLMENT_DUE_DATE", amount_received=values["amount_received"], amount_applied=values["amount_applied"], principal_applied=values["principal_applied"], interest_applied=values["interest_applied"], penalty_applied=values["penalty_applied"], excess_amount=values["excess_amount"], receipt_number=f"PIX-REV-V1-{payment.id}", receipt_version=REVERSAL_RECEIPT_VERSION, receipt_snapshot_json=f"pending:{payment.id}", receipt_hash=hashlib.sha256(f"pending:{payment.id}".encode()).hexdigest())
     db.add(reversal)
     db.flush()
@@ -635,12 +699,29 @@ def _reverse_loan_payment(db, payment, settlement, admin_id, reason, reversed_at
     db.flush()
     installment.paid_amount = _money(installment.paid_amount) - base
     installment.paid_penalty_amount = _money(installment.paid_penalty_amount) - values["penalty_applied"]
+    if settlement.settlement_component_version is not None:
+        if installment.paid_fixed_penalty_amount is not None:
+            installment.paid_fixed_penalty_amount = (
+                _money(installment.paid_fixed_penalty_amount)
+                - values["fixed_penalty_applied"]
+            )
+        if installment.paid_late_interest_amount is not None:
+            installment.paid_late_interest_amount = (
+                _money(installment.paid_late_interest_amount)
+                - values["late_interest_applied"]
+            )
     installment.status = settlement.loan_installment_status_before
     installment.paid_at = settlement.loan_installment_paid_at_before
     loan.status = settlement.loan_status_before
     loan.paid_at = settlement.loan_paid_at_before
     touch_loan(loan)
     db.flush()
+    if settlement.settlement_component_version is not None:
+        materialize_reversal_late_interest_adjustment(db, reversal.id)
+        if installment.late_charge_version == LATE_CHARGE_VERSION:
+            installment.penalty_amount = _money(
+                installment.fixed_penalty_amount
+            ) + _money(installment.late_interest_amount)
     snapshot = _loan_reversal_snapshot(reversal, payment, settlement, loan, installment, original_mfe, compensating_mfe, components)
     reversal.receipt_snapshot_json = _canonical_json(snapshot)
     reversal.receipt_hash = hashlib.sha256(reversal.receipt_snapshot_json.encode()).hexdigest()

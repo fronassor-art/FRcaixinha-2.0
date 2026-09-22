@@ -17,8 +17,10 @@ from app.core.loan_rules import (
     LATE_CHARGE_VERSION,
 )
 from app.models import (
+    Loan,
     LoanInstallment,
     LoanLateChargeEvent,
+    MemberFinancialEntry,
     PaymentReversal,
     PaymentSettlement,
 )
@@ -563,6 +565,18 @@ class LoanInstallmentObligation:
     total_due: Decimal
 
 
+@dataclass(frozen=True)
+class LoanPayoffQuote:
+    """Side-effect-free Model B payoff components for one financial date."""
+
+    financial_date: date
+    principal_due: Decimal
+    normal_price_interest_due: Decimal
+    fixed_penalty_due: Decimal
+    late_interest_due: Decimal
+    total_due: Decimal
+
+
 def loan_installment_obligation(
     db: Session,
     installment: LoanInstallment,
@@ -634,12 +648,181 @@ def loan_installment_obligation(
     )
 
 
+def loan_payoff_quote(
+    db: Session,
+    loan: Loan,
+    financial_date: date | datetime,
+) -> LoanPayoffQuote:
+    """Return a read-only Model B payoff quote without materializing charges.
+
+    Future Price interest is excluded. Future installment principal remains
+    part of the payoff principal. Payment reversals are observed on their
+    financial civil date. Own-balance reductions are counted exactly once
+    through their financial entries and checked against the Loan projection.
+    """
+
+    on_date = _as_financial_date(financial_date)
+    installments = (
+        db.query(LoanInstallment)
+        .filter(LoanInstallment.loan_id == loan.id)
+        .order_by(LoanInstallment.number)
+        .all()
+    )
+    if not installments:
+        raise ValueError("Empréstimo não possui parcelas.")
+
+    installment_ids = [row.id for row in installments]
+    settlements = (
+        db.query(PaymentSettlement)
+        .filter(
+            PaymentSettlement.obligation_type == "LOAN_INSTALLMENT",
+            PaymentSettlement.loan_installment_id.in_(installment_ids),
+        )
+        .order_by(PaymentSettlement.confirmed_at, PaymentSettlement.id)
+        .all()
+    )
+    reversals = _reversal_by_settlement(db, [row.id for row in settlements])
+    active = []
+    for settlement in settlements:
+        if _stored_financial_date(settlement.confirmed_at) > on_date:
+            continue
+        reversal = reversals.get(settlement.id)
+        if reversal is not None and _stored_financial_date(reversal.reversed_at) <= on_date:
+            continue
+        active.append(settlement)
+
+    principal_paid = sum((_money(row.principal_applied) for row in active), ZERO)
+    own_balance_entries = (
+        db.query(MemberFinancialEntry)
+        .filter(
+            MemberFinancialEntry.reference_type.in_(
+                ("OWN_BALANCE_SETTLEMENT", "OWN_BALANCE_RENEGOTIATION")
+            ),
+            MemberFinancialEntry.reference_id == str(loan.id),
+            MemberFinancialEntry.entry_type.in_(
+                ("OWN_BALANCE_SETTLEMENT", "OWN_BALANCE_RENEGOTIATION")
+            ),
+            MemberFinancialEntry.direction == "DEBIT",
+        )
+        .all()
+    )
+    projected_own_balance = _money(loan.principal_settled_with_own_balance)
+    recorded_own_balance = _money(
+        sum((_money(row.amount) for row in own_balance_entries), ZERO)
+    )
+    if recorded_own_balance != projected_own_balance:
+        raise ValueError(
+            "Projeção de principal liquidado com saldo próprio é inconsistente."
+        )
+    own_balance_through_date = sum(
+        (
+            _money(row.amount)
+            for row in own_balance_entries
+            if _stored_financial_date(row.created_at) <= on_date
+        ),
+        ZERO,
+    )
+    principal_due = max(
+        ZERO,
+        _money(loan.principal) - principal_paid - _money(own_balance_through_date),
+    )
+
+    active_by_installment: dict[int, list[PaymentSettlement]] = {
+        installment_id: [] for installment_id in installment_ids
+    }
+    for settlement in active:
+        active_by_installment[settlement.loan_installment_id].append(settlement)
+
+    events = (
+        db.query(LoanLateChargeEvent)
+        .filter(
+            LoanLateChargeEvent.loan_installment_id.in_(installment_ids),
+            LoanLateChargeEvent.late_charge_version == LATE_CHARGE_VERSION,
+            LoanLateChargeEvent.effective_date <= on_date,
+        )
+        .all()
+    )
+    fixed_assessed = {installment_id: ZERO for installment_id in installment_ids}
+    late_materialized = {installment_id: ZERO for installment_id in installment_ids}
+    for event in events:
+        installment_id = event.loan_installment_id
+        amount = _money(event.amount)
+        if event.event_type == FIXED_PENALTY_ASSESSED:
+            fixed_assessed[installment_id] += amount
+        elif event.event_type in {
+            LATE_INTEREST_ACCRUED,
+            LATE_INTEREST_ADJUSTMENT_INCREASE,
+        }:
+            late_materialized[installment_id] += amount
+        elif event.event_type == LATE_INTEREST_ADJUSTMENT_DECREASE:
+            late_materialized[installment_id] -= amount
+
+    normal_due = fixed_due = late_due = ZERO
+    for installment in installments:
+        rows = active_by_installment[installment.id]
+        normal_paid = sum(
+            (
+                _money(row.normal_interest_applied)
+                if row.settlement_component_version
+                == LATE_CHARGE_SETTLEMENT_COMPONENT_VERSION
+                else _money(row.interest_applied)
+                for row in rows
+            ),
+            ZERO,
+        )
+        fixed_paid = sum(
+            (
+                _money(row.fixed_penalty_applied)
+                for row in rows
+                if row.settlement_component_version
+                == LATE_CHARGE_SETTLEMENT_COMPONENT_VERSION
+            ),
+            ZERO,
+        )
+        late_paid = sum(
+            (
+                _money(row.late_interest_applied)
+                for row in rows
+                if row.settlement_component_version
+                == LATE_CHARGE_SETTLEMENT_COMPONENT_VERSION
+            ),
+            ZERO,
+        )
+        if installment.due_date <= on_date:
+            normal_due += max(
+                ZERO, _money(installment.interest) - _money(normal_paid)
+            )
+        fixed_due += max(
+            ZERO, _money(fixed_assessed[installment.id]) - _money(fixed_paid)
+        )
+        materialized = _money(late_materialized[installment.id])
+        if materialized < ZERO:
+            raise ValueError("Mora materializada não pode ser negativa.")
+        late_due += max(ZERO, materialized - _money(late_paid))
+
+    principal_due = _money(principal_due)
+    normal_due = _money(normal_due)
+    fixed_due = _money(fixed_due)
+    late_due = _money(late_due)
+    return LoanPayoffQuote(
+        financial_date=on_date,
+        principal_due=principal_due,
+        normal_price_interest_due=normal_due,
+        fixed_penalty_due=fixed_due,
+        late_interest_due=late_due,
+        total_due=_money(principal_due + normal_due + fixed_due + late_due),
+    )
+
+
+
 __all__ = [
     "FIXED_PENALTY_AFTER_TIMELY_PAYMENT_REVERSAL",
     "FIXED_PENALTY_EFFECTIVE_DATE_SEMANTICS",
     "LoanInstallmentObligation",
+    "LoanPayoffQuote",
     "late_interest_materialized",
     "loan_installment_obligation",
+    "loan_payoff_quote",
     "materialize_daily_late_interest",
     "materialize_fixed_penalty",
     "materialize_reversal_late_interest_adjustment",

@@ -12,7 +12,9 @@ from app.models import (
     MemberFinancialAccount,
     MemberFinancialEntry,
 )
+from app.services.loan_amortization import PRICE_CALCULATION_VERSION
 from app.services.loan_engine_v17 import apply_payment, ensure_loan_completion, lock_loan, touch_loan
+from app.services.loan_obligation_runtime import loan_payoff_quote
 from app.services.ledger import post_entry
 from app.services.member_financial import (
     add_member_financial_entry,
@@ -155,14 +157,20 @@ def apply_confirmed_payment(
     return True
 
 
-def settle_loan_with_own_balance(db, loan: Loan, actor_id: int):
-    """Liquida integralmente o principal de um empréstimo usando saldo próprio.
-
-    Nesta primeira versão, a operação trata somente empréstimos sem
-    encargos vencidos. Juros futuros são integralmente dispensados.
-    """
+def settle_loan_with_own_balance(
+    db,
+    loan: Loan,
+    actor_id: int,
+    *,
+    financial_at: datetime | None = None,
+):
+    """Quit principal with own balance only when no OPEN charge decision is needed."""
 
     from app.models import AuditLog
+    payoff_at = financial_at or datetime.now(timezone.utc)
+    if payoff_at.tzinfo is None or payoff_at.utcoffset() is None:
+        raise ValueError("financial_at precisa ser timezone-aware.")
+    payoff_at = payoff_at.astimezone(timezone.utc)
     member, account = lock_member_financial_account(db, loan.member_id)
     loan = lock_loan(db, db.get(Loan, loan.id))
 
@@ -229,17 +237,23 @@ def settle_loan_with_own_balance(db, loan: Loan, actor_id: int):
         )
 
     # ------------------------------------------------------------
-    # PRINCIPAL EM ABERTO
+    # QUOTE AUTORITATIVO / PRINCIPAL EM ABERTO
     # ------------------------------------------------------------
-    principal_settled = Decimal(
-        loan.principal_settled_with_own_balance or 0
-    )
+    quote = loan_payoff_quote(db, loan, payoff_at)
+    if loan.calculation_version == PRICE_CALCULATION_VERSION and any(
+        amount > Decimal("0.00")
+        for amount in (
+            quote.normal_price_interest_due,
+            quote.fixed_penalty_due,
+            quote.late_interest_due,
+        )
+    ):
+        raise ValueError(
+            "BUSINESS_DECISION_REQUIRED: quitação com saldo próprio "
+            "não possui regra aprovada para juros Price, multa fixa ou mora."
+        )
 
-    principal_open = max(
-        Decimal("0.00"),
-        Decimal(loan.principal or 0) - principal_settled,
-    ).quantize(Decimal("0.01"))
-
+    principal_open = quote.principal_due
     if principal_open <= 0:
         raise ValueError("Não existe principal em aberto para liquidar.")
 
@@ -279,18 +293,16 @@ def settle_loan_with_own_balance(db, loan: Loan, actor_id: int):
     # REGISTRO DO PRINCIPAL LIQUIDADO COM SALDO PRÓPRIO
     # ------------------------------------------------------------
     loan.principal_settled_with_own_balance = (
-        principal_open
+        Decimal(loan.principal_settled_with_own_balance or 0)
+        + principal_open
     ).quantize(Decimal("0.01"))
 
     # ------------------------------------------------------------
     # FECHAMENTO DAS PARCELAS
     # ------------------------------------------------------------
     for installment in installments:
-        installment.paid_penalty_amount = Decimal(
-            installment.penalty_amount or 0
-        )
         installment.status = "PAID"
-        installment.paid_at = datetime.now(timezone.utc)
+        installment.paid_at = payoff_at
 
     # ------------------------------------------------------------
     # COMPROMISSO DO PRINCIPAL
@@ -300,7 +312,7 @@ def settle_loan_with_own_balance(db, loan: Loan, actor_id: int):
     # EMPRÉSTIMO
     # ------------------------------------------------------------
     loan.status = "PAID"
-    loan.paid_at = datetime.now(timezone.utc)
+    loan.paid_at = payoff_at
     touch_loan(loan)
 
     # ------------------------------------------------------------

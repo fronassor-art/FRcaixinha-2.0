@@ -9,9 +9,21 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
+from app.core.loan_rules import (
+    LATE_CHARGE_SETTLEMENT_COMPONENT_VERSION,
+    LATE_CHARGE_VERSION,
+)
 from app.models import AgreementInstallment, CollectionAgreement, Contribution, LedgerEntry, Loan, LoanInstallment, Member, Payment, PaymentSettlement
 from app.services.ledger import post_contribution_payment, post_entry
-from app.services.loan_engine_v17 import lock_loan
+from app.services.late_charge_v1 import financial_civil_date, is_late_charge_eligible
+from app.services.loan_engine_v17 import ensure_loan_completion, lock_loan, touch_loan
+from app.services.loan_obligation_runtime import (
+    loan_installment_obligation,
+    materialize_daily_late_interest,
+    materialize_fixed_penalty,
+    materialize_settlement_late_interest_adjustment,
+)
 from app.services.loan_payments_v17 import apply_confirmed_payment
 from app.services.member_financial import add_member_financial_entry, lock_member_financial_account
 from app.services.agreements_v039 import lock_collection_agreement, touch_collection_agreement
@@ -252,6 +264,14 @@ def _receipt_snapshot(*, payment: Payment, settlement: PaymentSettlement, ledger
         },
         "ledger_entries": ledger,
     }
+    if settlement.settlement_component_version is not None:
+        snapshot["amounts"].update(
+            {
+                "normal_price_interest": format(_money(settlement.normal_interest_applied), "f"),
+                "late_interest": format(_money(settlement.late_interest_applied), "f"),
+                "fixed_penalty": format(_money(settlement.fixed_penalty_applied), "f"),
+            }
+        )
     if settlement.receipt_version == "v2":
         snapshot["loan_state"] = {
             "status_before": settlement.loan_status_before,
@@ -334,7 +354,8 @@ def settle_confirmed_pix_payment(
     if payment.ledger_posted_at is not None:
         raise ValueError("Pagamento legado já lançado não pode ser relançado sem recibo de liquidação.")
 
-    effective_at = confirmed_at or payment.confirmed_at or datetime.now(timezone.utc)
+    financial_confirmation = confirmed_at or payment.confirmed_at
+    effective_at = financial_confirmation or datetime.now(timezone.utc)
     if effective_at.tzinfo is None:
         effective_at = effective_at.replace(tzinfo=timezone.utc)
     else:
@@ -368,6 +389,10 @@ def settle_confirmed_pix_payment(
         raise ValueError("Pagamento deve referenciar exatamente uma contribuição ou parcela de empréstimo.")
 
     penalty_applied = interest_applied = principal_applied = ZERO
+    settlement_component_version = None
+    normal_interest_applied = None
+    late_interest_applied = None
+    fixed_penalty_applied = None
     loan_status_before = loan_status_after = None
     loan_state_revision_before = loan_state_revision_after = None
     loan_paid_at_before = loan_paid_at_after = None
@@ -466,20 +491,172 @@ def settle_confirmed_pix_payment(
         loan_paid_at_before = loan.paid_at
         loan_installment_status_before = installment.status
         loan_installment_paid_at_before = installment.paid_at
+        versioned = is_late_charge_eligible(
+            due_date=installment.due_date,
+            effective_date=settings.loan_late_charge_effective_date,
+        )
         before_penalty = _money(installment.paid_penalty_amount)
         before_base = _money(installment.paid_amount)
-        before_status = installment_financial_status(installment, effective_at)
-        interest_open = max(ZERO, _money(installment.interest) - min(_money(installment.interest), before_base))
-        apply_confirmed_payment(
-            db,
-            payment,
-            installment,
-            amount=received,
-            locks_acquired=True,
-            loan=loan,
-            member=member,
-            account=account,
-        )
+
+        if versioned:
+            if confirmed_at is None:
+                raise ValueError(
+                    "Settlement versionado de LoanInstallment exige confirmed_at explícito e confiável."
+                )
+            if confirmed_at.tzinfo is None or confirmed_at.utcoffset() is None:
+                raise ValueError(
+                    "Settlement versionado de LoanInstallment exige confirmed_at timezone-aware."
+                )
+            effective_at = confirmed_at.astimezone(timezone.utc)
+            financial_date = financial_civil_date(effective_at)
+            before_status = installment_financial_status(installment, effective_at)
+
+            materialize_fixed_penalty(
+                db,
+                installment.id,
+                through_date=financial_date,
+                late_charge_effective_date=settings.loan_late_charge_effective_date,
+            )
+            materialize_daily_late_interest(
+                db,
+                installment.id,
+                through_date=financial_date,
+                late_charge_effective_date=settings.loan_late_charge_effective_date,
+            )
+            obligation = loan_installment_obligation(
+                db, installment, financial_date
+            )
+            applied = min(received, obligation.total_due)
+            if applied <= ZERO:
+                raise ValueError(
+                    "Parcela versionada não possui obrigação vencida aplicável."
+                )
+
+            remaining = applied
+            fixed_penalty_applied = min(
+                obligation.fixed_penalty_due, remaining
+            )
+            remaining = _money(remaining - fixed_penalty_applied)
+            late_interest_applied = min(
+                obligation.late_interest_due, remaining
+            )
+            remaining = _money(remaining - late_interest_applied)
+            normal_interest_applied = min(
+                obligation.normal_price_interest_due, remaining
+            )
+            remaining = _money(remaining - normal_interest_applied)
+            principal_applied = min(obligation.principal_due, remaining)
+            interest_applied = normal_interest_applied
+            penalty_applied = _money(
+                fixed_penalty_applied + late_interest_applied
+            )
+            base_applied = _money(
+                normal_interest_applied + principal_applied
+            )
+            if applied != _money(base_applied + penalty_applied):
+                raise ValueError(
+                    "Alocação versionada não fecha com o valor aplicado."
+                )
+
+            installment.paid_amount = _money(before_base + base_applied)
+            installment.paid_penalty_amount = _money(
+                before_penalty + penalty_applied
+            )
+            if installment.late_charge_version == LATE_CHARGE_VERSION:
+                installment.paid_fixed_penalty_amount = _money(
+                    installment.paid_fixed_penalty_amount
+                ) + fixed_penalty_applied
+                installment.paid_late_interest_amount = _money(
+                    installment.paid_late_interest_amount
+                ) + late_interest_applied
+                installment.penalty_amount = _money(
+                    installment.fixed_penalty_amount
+                ) + _money(installment.late_interest_amount)
+
+            remaining_due = _money(obligation.total_due - applied)
+            if remaining_due == ZERO:
+                installment.status = "PAID"
+                installment.paid_at = effective_at
+            else:
+                installment.status = (
+                    "OVERDUE"
+                    if financial_date > installment.due_date
+                    else "PARTIAL"
+                )
+
+            if normal_interest_applied > ZERO:
+                post_entry(
+                    db,
+                    "CAIXINHA",
+                    "CREDIT",
+                    normal_interest_applied,
+                    "LOAN_INTEREST_PAYMENT",
+                    str(payment.id),
+                )
+            if penalty_applied > ZERO:
+                post_entry(
+                    db,
+                    "CAIXINHA",
+                    "CREDIT",
+                    penalty_applied,
+                    "LOAN_PENALTY_PAYMENT",
+                    str(payment.id),
+                )
+            if principal_applied > ZERO:
+                add_member_financial_entry(
+                    db=db,
+                    member=member,
+                    entry_type="LOAN_PRINCIPAL_PAYMENT",
+                    direction="CREDIT",
+                    amount=principal_applied,
+                    reference_type="LOAN_PRINCIPAL_PAYMENT",
+                    reference_id=str(payment.id),
+                    description="Pagamento de principal de parcela de empréstimo.",
+                    account=account,
+                )
+
+            ensure_loan_completion(
+                db,
+                loan,
+                revision_already_bumped=True,
+                loan_locked=True,
+            )
+            if loan.status == "PAID":
+                loan.paid_at = effective_at
+            touch_loan(loan)
+            payment.ledger_posted_at = datetime.now(timezone.utc)
+            settlement_component_version = (
+                LATE_CHARGE_SETTLEMENT_COMPONENT_VERSION
+            )
+            after_status = installment.status
+        else:
+            before_status = installment_financial_status(installment, effective_at)
+            interest_open = max(
+                ZERO,
+                _money(installment.interest)
+                - min(_money(installment.interest), before_base),
+            )
+            apply_confirmed_payment(
+                db,
+                payment,
+                installment,
+                amount=received,
+                locks_acquired=True,
+                loan=loan,
+                member=member,
+                account=account,
+            )
+            penalty_applied = (
+                _money(installment.paid_penalty_amount) - before_penalty
+            )
+            base_applied = _money(installment.paid_amount) - before_base
+            interest_applied = min(base_applied, interest_open)
+            principal_applied = max(ZERO, base_applied - interest_applied)
+            applied = _money(penalty_applied + base_applied)
+            after_status = installment_financial_status(
+                installment, effective_at
+            )
+
         loan_status_after = loan.status
         loan_state_revision_after = loan.state_revision
         loan_paid_at_after = loan.paid_at
@@ -487,12 +664,6 @@ def settle_confirmed_pix_payment(
         loan_installment_paid_at_after = installment.paid_at
         if loan_state_revision_after != loan_state_revision_before + 1:
             raise ValueError("Revisão do Loan inválida para settlement v4.")
-        penalty_applied = _money(installment.paid_penalty_amount) - before_penalty
-        base_applied = _money(installment.paid_amount) - before_base
-        interest_applied = min(base_applied, interest_open)
-        principal_applied = max(ZERO, base_applied - interest_applied)
-        applied = _money(penalty_applied + base_applied)
-        after_status = installment_financial_status(installment, effective_at)
         obligation_type = "LOAN_INSTALLMENT"
         member_id = member.id
         contribution_id = None
@@ -560,6 +731,10 @@ def settle_confirmed_pix_payment(
         principal_applied=principal_applied,
         interest_applied=interest_applied,
         penalty_applied=penalty_applied,
+        settlement_component_version=settlement_component_version,
+        normal_interest_applied=normal_interest_applied,
+        late_interest_applied=late_interest_applied,
+        fixed_penalty_applied=fixed_penalty_applied,
         excess_amount=excess,
         obligation_status_before=before_status,
         obligation_status_after=after_status,
@@ -595,6 +770,14 @@ def settle_confirmed_pix_payment(
     )
     db.add(settlement)
     db.flush()
+    if settlement_component_version is not None:
+        materialize_settlement_late_interest_adjustment(
+            db, settlement.id
+        )
+        if installment.late_charge_version == LATE_CHARGE_VERSION:
+            installment.penalty_amount = _money(
+                installment.fixed_penalty_amount
+            ) + _money(installment.late_interest_amount)
     if contribution_became_paid:
         add_member_financial_entry(
             db,
