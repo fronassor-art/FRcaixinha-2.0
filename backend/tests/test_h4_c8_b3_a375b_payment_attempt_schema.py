@@ -19,6 +19,7 @@ from app.models import Payment
 
 REVISION = "0093_payment_attempt_schema_foundation"
 PREVIOUS_REVISION = "0092_versioned_late_charge_foundation"
+HEAD_REVISION = "0094_late_interest_event_contract"
 INDEX_NAME = "uq_payments_reference_pending"
 
 
@@ -92,9 +93,9 @@ def test_revision_chain_and_single_head():
     )
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_current_head() == REVISION
+    assert script.get_current_head() == HEAD_REVISION
     assert script.get_revision(REVISION).down_revision == PREVIOUS_REVISION
-    assert tuple(script.get_heads()) == (REVISION,)
+    assert tuple(script.get_heads()) == (HEAD_REVISION,)
 
 
 def test_payment_orm_contract_and_storage_types():

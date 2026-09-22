@@ -494,7 +494,9 @@ class LoanLateChargeEvent(Base):
         ),
         CheckConstraint(
             "event_type IN ('FIXED_PENALTY_ASSESSED', 'LATE_INTEREST_ACCRUED', "
-            "'PRINCIPAL_BASE_REDUCED', 'PRINCIPAL_BASE_RESTORED')",
+            "'PRINCIPAL_BASE_REDUCED', 'PRINCIPAL_BASE_RESTORED', "
+            "'LATE_INTEREST_ADJUSTMENT_INCREASE', "
+            "'LATE_INTEREST_ADJUSTMENT_DECREASE')",
             name="ck_loan_late_charge_events_type",
         ),
         CheckConstraint(
@@ -514,6 +516,23 @@ class LoanLateChargeEvent(Base):
             "(amount IS NOT NULL AND eligible_principal IS NOT NULL)",
             name="ck_loan_late_charge_events_accrual_values",
         ),
+        CheckConstraint(
+            "event_type NOT IN ('LATE_INTEREST_ADJUSTMENT_INCREASE', "
+            "'LATE_INTEREST_ADJUSTMENT_DECREASE') OR amount IS NOT NULL",
+            name="ck_loan_late_charge_events_adjustment_amount",
+        ),
+        CheckConstraint(
+            "event_type NOT IN ('LATE_INTEREST_ADJUSTMENT_INCREASE', "
+            "'LATE_INTEREST_ADJUSTMENT_DECREASE') OR eligible_principal IS NULL",
+            name="ck_loan_late_charge_events_adjustment_no_principal",
+        ),
+        CheckConstraint(
+            "event_type NOT IN ('LATE_INTEREST_ADJUSTMENT_INCREASE', "
+            "'LATE_INTEREST_ADJUSTMENT_DECREASE') OR "
+            "((payment_settlement_id IS NOT NULL AND payment_reversal_id IS NULL) OR "
+            "(payment_settlement_id IS NULL AND payment_reversal_id IS NOT NULL))",
+            name="ck_loan_late_charge_events_adjustment_cause",
+        ),
         Index(
             "uq_loan_late_charge_events_fixed_penalty",
             "loan_installment_id",
@@ -521,6 +540,49 @@ class LoanLateChargeEvent(Base):
             unique=True,
             postgresql_where=text("event_type = 'FIXED_PENALTY_ASSESSED'"),
             sqlite_where=text("event_type = 'FIXED_PENALTY_ASSESSED'"),
+        ),
+        Index(
+            "uq_llce_late_interest_day",
+            "loan_installment_id",
+            "late_charge_version",
+            "effective_date",
+            unique=True,
+            postgresql_where=text("event_type = 'LATE_INTEREST_ACCRUED'"),
+            sqlite_where=text("event_type = 'LATE_INTEREST_ACCRUED'"),
+        ),
+        Index(
+            "uq_llce_adjustment_settlement",
+            "loan_installment_id",
+            "late_charge_version",
+            "payment_settlement_id",
+            unique=True,
+            postgresql_where=text(
+                "event_type IN ('LATE_INTEREST_ADJUSTMENT_INCREASE', "
+                "'LATE_INTEREST_ADJUSTMENT_DECREASE') AND "
+                "payment_settlement_id IS NOT NULL"
+            ),
+            sqlite_where=text(
+                "event_type IN ('LATE_INTEREST_ADJUSTMENT_INCREASE', "
+                "'LATE_INTEREST_ADJUSTMENT_DECREASE') AND "
+                "payment_settlement_id IS NOT NULL"
+            ),
+        ),
+        Index(
+            "uq_llce_adjustment_reversal",
+            "loan_installment_id",
+            "late_charge_version",
+            "payment_reversal_id",
+            unique=True,
+            postgresql_where=text(
+                "event_type IN ('LATE_INTEREST_ADJUSTMENT_INCREASE', "
+                "'LATE_INTEREST_ADJUSTMENT_DECREASE') AND "
+                "payment_reversal_id IS NOT NULL"
+            ),
+            sqlite_where=text(
+                "event_type IN ('LATE_INTEREST_ADJUSTMENT_INCREASE', "
+                "'LATE_INTEREST_ADJUSTMENT_DECREASE') AND "
+                "payment_reversal_id IS NOT NULL"
+            ),
         ),
         Index(
             "ix_loan_late_charge_events_installment_effective",
