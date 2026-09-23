@@ -140,21 +140,52 @@ class Member(Base):
     joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     declared_monthly_income: Mapped[Decimal | None] = mapped_column(Numeric(14,2), nullable=True)
     user: Mapped[User] = relationship(back_populates="member")
-    quota: Mapped["Quota | None"] = relationship(back_populates="member", uselist=False)
+    quotas: Mapped[list["Quota"]] = relationship(back_populates="member")
+
+    @property
+    def quota(self):
+        return self.quotas[0] if self.quotas else None
+
     financial_account: Mapped["MemberFinancialAccount | None"] = relationship(back_populates="member", uselist=False)
+
+class Cycle(Base):
+    __tablename__ = "cycles"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    start_date: Mapped[date] = mapped_column(Date, unique=True, index=True)
+    entry_deadline: Mapped[date] = mapped_column(Date)
+    closing_reference_date: Mapped[date] = mapped_column(Date)
+    monthly_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2))
+    months: Mapped[int] = mapped_column(Integer)
+    max_quotas: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(20), default="OPEN")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    quotas: Mapped[list["Quota"]] = relationship(back_populates="cycle")
+    contributions: Mapped[list["Contribution"]] = relationship(back_populates="cycle")
+    __table_args__ = (
+        CheckConstraint("entry_deadline >= start_date", name="ck_cycles_entry_deadline_after_start"),
+        CheckConstraint("closing_reference_date >= start_date", name="ck_cycles_closing_after_start"),
+        CheckConstraint("monthly_amount > 0 AND months >= 1 AND max_quotas >= 1", name="ck_cycles_positive_terms"),
+    )
+
 
 class Quota(Base):
     __tablename__ = "quotas"
     id: Mapped[int] = mapped_column(primary_key=True)
-    member_id: Mapped[int] = mapped_column(ForeignKey("members.id"), unique=True)
-    units: Mapped[Decimal] = mapped_column(Numeric(14,4), default=Decimal("1"))
+    member_id: Mapped[int] = mapped_column(ForeignKey("members.id"), index=True)
+    cycle_id: Mapped[int | None] = mapped_column(ForeignKey("cycles.id"), nullable=True, index=True)
+    units: Mapped[Decimal] = mapped_column(Numeric(14, 4), default=Decimal("1"))
     status: Mapped[str] = mapped_column(String(20), default="ACTIVE")
-    member: Mapped[Member] = relationship(back_populates="quota")
+    member: Mapped[Member] = relationship(back_populates="quotas")
+    cycle: Mapped["Cycle | None"] = relationship(back_populates="quotas")
+    __table_args__ = (
+        CheckConstraint("cycle_id IS NULL OR (units >= 1 AND units = CAST(units AS INTEGER))", name="ck_quotas_new_units_discrete"),
+    )
 
 class Contribution(Base):
     __tablename__ = "contributions"
     id: Mapped[int] = mapped_column(primary_key=True)
-    member_id: Mapped[int] = mapped_column(ForeignKey("members.id"))
+    member_id: Mapped[int] = mapped_column(ForeignKey("members.id"), index=True)
+    cycle_id: Mapped[int | None] = mapped_column(ForeignKey("cycles.id"), nullable=True, index=True)
     competence: Mapped[date] = mapped_column(Date)
     amount: Mapped[Decimal] = mapped_column(Numeric(14,2))
     status: Mapped[str] = mapped_column(String(20), default="PENDING")
@@ -164,8 +195,10 @@ class Contribution(Base):
     paid_amount: Mapped[Decimal | None] = mapped_column(Numeric(14,2))
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    cycle: Mapped["Cycle | None"] = relationship(back_populates="contributions")
     __table_args__ = (
-        UniqueConstraint("member_id", "competence", name="uq_contribution_member_competence"),
+        Index("uq_contribution_legacy_member_competence", "member_id", "competence", unique=True, sqlite_where=text("cycle_id IS NULL"), postgresql_where=text("cycle_id IS NULL")),
+        Index("uq_contribution_member_cycle_competence", "member_id", "cycle_id", "competence", unique=True, sqlite_where=text("cycle_id IS NOT NULL"), postgresql_where=text("cycle_id IS NOT NULL")),
         Index("ix_contributions_status_due_date", "status", "due_date"),
         Index("ix_contributions_member_status_due_date", "member_id", "status", "due_date"),
     )

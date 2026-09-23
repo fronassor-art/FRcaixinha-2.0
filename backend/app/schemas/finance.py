@@ -5,7 +5,9 @@ from app.core.loan_rules import MAX_LOAN_INSTALLMENTS
 
 class ContributionIn(BaseModel):
     competence: date
-    amount: Decimal = Field(gt=0)
+    amount: Decimal | None = Field(default=None, gt=0)
+    cycle_id: int | None = None
+    entry_date: date | None = None
 
 class LoanSimulationIn(BaseModel):
     principal: Decimal = Field(gt=0)

@@ -8,6 +8,7 @@ from app.models import User, Member, Contribution, Payment, Quota, Group
 from app.schemas.finance import ContributionIn
 from app.api.deps import current_user
 from app.services.payment_settlement import contribution_financial_status
+from app.services.cycle_foundation import ensure_contributions_for_entry
 
 router = APIRouter(prefix="/contributions", tags=["contributions"])
 
@@ -49,6 +50,19 @@ def _serialize(c: Contribution, db: Session):
 @router.post("")
 def create_contribution(data: ContributionIn, user: User=Depends(current_user), db: Session=Depends(get_db)):
     member = _member_or_403(user, db)
+    if data.cycle_id is not None:
+        try:
+            rows = ensure_contributions_for_entry(
+                db, member_id=member.id, cycle_id=data.cycle_id,
+                entry_date=data.entry_date or data.competence,
+            )
+            db.commit()
+            return {"items": [_serialize(row, db) for row in rows]}
+        except ValueError as exc:
+            db.rollback()
+            raise HTTPException(400, str(exc)) from exc
+    if data.amount is None:
+        raise HTTPException(422, "amount is required for legacy contribution flow")
     existing = db.query(Contribution).filter(
         Contribution.member_id == member.id, Contribution.competence == data.competence
     ).first()

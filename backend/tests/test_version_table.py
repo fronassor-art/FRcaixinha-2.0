@@ -67,7 +67,7 @@ def test_current_revision_ids_and_chain_are_unchanged():
         if revision:
             rows[revision.group(1)] = down_revision.group(1) if down_revision else None
 
-    assert len(rows) == 101
+    assert len(rows) == 102
     assert max(map(len, rows)) <= VERSION_NUM_CAPACITY
     assert rows["0093_payment_attempt_schema_foundation"] == "0092_versioned_late_charge_foundation"
     assert rows["0094_late_interest_event_contract"] == "0093_payment_attempt_schema_foundation"
