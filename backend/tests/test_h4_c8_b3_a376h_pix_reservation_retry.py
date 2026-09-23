@@ -1,11 +1,12 @@
 import asyncio
-from datetime import date
+from datetime import datetime, timezone
 from decimal import Decimal
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 from app.api.loan_installment_payments import create_installment_pix
+from app.core.pix_attempt_v1 import financial_date
 from app.db.base import Base
 from app.models import Group, Loan, LoanInstallment, Member, Payment, User
 from app.services.loan_installment_pix_attempts import PENDING, EXPIRED, SUPERSEDED, PROVIDER_CREATE_UNKNOWN
@@ -19,7 +20,7 @@ def seed(s, suffix):
     g=Group(name="G"+suffix); s.add_all([u,g]); s.flush()
     m=Member(user_id=u.id,group_id=g.id,status="ACTIVE"); s.add(m);s.flush()
     loan=Loan(member_id=m.id,principal=Decimal("100.00"),monthly_rate=Decimal("0.20"),installments=1,status="ACTIVE");s.add(loan);s.flush()
-    inst=LoanInstallment(loan_id=loan.id,number=1,due_date=date.today(),principal=Decimal("100.00"),interest=Decimal("20.00"),amount=Decimal("120.00"),paid_amount=Decimal("0"),penalty_amount=Decimal("0"),paid_penalty_amount=Decimal("0"),status="OPEN")
+    inst=LoanInstallment(loan_id=loan.id,number=1,due_date=financial_date(datetime.now(timezone.utc)),principal=Decimal("100.00"),interest=Decimal("20.00"),amount=Decimal("120.00"),paid_amount=Decimal("0"),penalty_amount=Decimal("0"),paid_penalty_amount=Decimal("0"),status="OPEN")
     s.add(inst);s.commit();return u,inst
 
 def response(n): return {"id":"pay-"+n,"order_id":"order-"+n,"status":"pending","qr_code":"qr-"+n,"qr_code_base64":"b64-"+n,"ticket_url":"https://x/"+n}

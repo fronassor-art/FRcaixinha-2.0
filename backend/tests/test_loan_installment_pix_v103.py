@@ -2,7 +2,7 @@ import asyncio
 import hashlib
 import hmac
 import time
-from datetime import date
+from datetime import datetime, timezone
 from decimal import Decimal
 
 from fastapi.testclient import TestClient
@@ -13,6 +13,7 @@ from sqlalchemy.pool import StaticPool
 from app.api.loan_installment_payments import create_installment_pix
 from app.api import payments as payments_module
 from app.core.config import settings
+from app.core.pix_attempt_v1 import financial_date
 from app.core.security import hash_password
 from app.db.base import Base
 from app.db.session import get_db
@@ -77,7 +78,7 @@ def seed_installment(db, *, suffix, amount=Decimal("120.00"), penalty=Decimal("0
     installment = LoanInstallment(
         loan_id=loan.id,
         number=1,
-        due_date=date.today(),
+        due_date=financial_date(datetime.now(timezone.utc)),
         principal=Decimal("100.00"),
         interest=Decimal("20.00"),
         amount=amount,
