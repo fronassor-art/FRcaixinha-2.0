@@ -1,15 +1,39 @@
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
-from app.models import AgreementInstallment, CollectionAgreement, Contribution, Loan, LoanInstallment, Payment, PaymentSettlement
+from app.models import AgreementInstallment, CollectionAgreement, Contribution, ContributionChargeEvent, Loan, LoanInstallment, Payment, PaymentSettlement
 from app.services.loan_engine_v17 import installment_due
 from app.services.payment_settlement import contribution_financial_status, installment_financial_status
+from app.services.late_charge_v1 import financial_civil_date
 CENT=Decimal('0.01'); ZERO=Decimal('0.00')
 def money(v): return Decimal(v or 0).quantize(CENT,rounding=ROUND_HALF_UP)
 def _payment(db,t,i,legacy=None): return db.query(Payment).filter(Payment.reference_type==t,Payment.reference_id==str(i)).order_by(Payment.id.desc()).first() or (db.get(Payment,legacy) if legacy else None)
 def _receipt(db,p): return bool(p and db.query(PaymentSettlement).filter(PaymentSettlement.payment_id==p.id).first())
-def contribution_item(db,c,as_of=None):
- as_of=as_of or datetime.now(timezone.utc); paid=money(c.paid_amount if c.paid_amount is not None else (c.amount if c.status=='PAID' else 0)); out=max(ZERO,money(c.amount)-paid); status=contribution_financial_status(c,paid,as_of); p=_payment(db,'CONTRIBUTION',c.id,c.payment_id)
- return {'member_id':c.member_id,'obligation_type':'CONTRIBUTION','obligation_id':c.id,'competence':c.competence.isoformat(),'loan_id':None,'installment_number':None,'due_date':c.due_date.isoformat() if c.due_date else None,'amount_due':str(money(c.amount)),'amount_paid':str(paid),'outstanding_amount':str(out),'financial_status':status,'days_overdue':max(0,(as_of.date()-c.due_date).days) if status=='OVERDUE' and c.due_date else 0,'penalty_outstanding':'0.00','interest_outstanding':'0.00','payment_id':p.id if p else None,'receipt_available':_receipt(db,p)}
+def contribution_item(db, c, as_of=None):
+ as_of = as_of or datetime.now(timezone.utc)
+ paid = money(c.paid_amount if c.paid_amount is not None else (c.amount if c.status == 'PAID' else 0))
+ principal_open = ZERO if c.cancelled_at is not None else max(ZERO, money(c.amount) - paid)
+ status = contribution_financial_status(c, paid, as_of)
+ event = db.query(ContributionChargeEvent).filter(
+  ContributionChargeEvent.contribution_id == c.id,
+ ).order_by(ContributionChargeEvent.accrued_through.desc(), ContributionChargeEvent.id.desc()).first()
+ penalty = money(event.fixed_penalty) if event else ZERO
+ interest = money(event.daily_interest) if event else ZERO
+ outstanding = money(principal_open + penalty + interest)
+ p = _payment(db, 'CONTRIBUTION', c.id, c.payment_id)
+ return {
+  'member_id': c.member_id, 'obligation_type': 'CONTRIBUTION', 'obligation_id': c.id,
+  'competence': c.competence.isoformat(), 'loan_id': None, 'installment_number': None,
+  'due_date': c.due_date.isoformat() if c.due_date else None,
+  'amount_due': str(money(paid + outstanding)), 'amount_paid': str(paid),
+  'outstanding_amount': str(outstanding), 'principal_outstanding': str(principal_open),
+  'cancelled_principal': str(money(event.cancelled_principal) if event else ZERO),
+  'financial_status': status,
+  'days_overdue': max(0, (financial_civil_date(as_of) - c.due_date).days) if status == 'OVERDUE' and c.due_date else 0,
+  'penalty_outstanding': str(penalty), 'interest_outstanding': str(interest),
+  'charge_rule_version': event.rule_version if event else None,
+  'charge_accrued_through': event.accrued_through.isoformat() if event else None,
+  'payment_id': p.id if p else None, 'receipt_available': _receipt(db, p),
+ }
 def installment_item(db,i,as_of=None):
  as_of=as_of or datetime.now(timezone.utc); loan=db.get(Loan,i.loan_id); paid=money(i.paid_amount)+money(i.paid_penalty_amount); out=money(installment_due(i)); status=installment_financial_status(i,as_of); p=_payment(db,'LOAN_INSTALLMENT',i.id)
  principal_paid=max(ZERO,money(i.paid_amount)-money(i.interest))

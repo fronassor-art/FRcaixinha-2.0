@@ -5,7 +5,8 @@ from decimal import Decimal, ROUND_HALF_UP
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
-from app.models import Contribution, Cycle, Member, Quota
+from app.models import Contribution, Cycle, CycleParticipation, Member, Quota
+from app.services.cycle_participation import ensure_active_participation
 
 FIRST_CYCLE_START = date(2026, 12, 10)
 FIRST_CYCLE_ENTRY_DEADLINE = date(2027, 1, 10)
@@ -48,8 +49,19 @@ def create_quota(db: Session, *, member_id: int, cycle_id: int, units: int) -> Q
     if not isinstance(units, int) or isinstance(units, bool) or units < 1:
         raise CycleFoundationError("quota units must be a positive integer")
     cycle = _cycle_for_update(db, cycle_id)
-    if db.query(Member).filter(Member.id == member_id).one_or_none() is None:
+    member_query = db.query(Member).filter(Member.id == member_id)
+    if db.bind is not None and db.bind.dialect.name == "postgresql":
+        member_query = member_query.with_for_update().populate_existing()
+    if member_query.one_or_none() is None:
         raise CycleFoundationError("member not found")
+    existing_query = db.query(CycleParticipation).filter(
+        CycleParticipation.member_id == member_id, CycleParticipation.cycle_id == cycle_id
+    )
+    if db.bind is not None and db.bind.dialect.name == "postgresql":
+        existing_query = existing_query.with_for_update().populate_existing()
+    existing_participation = existing_query.one_or_none()
+    if existing_participation is not None and existing_participation.status != "ACTIVE":
+        raise CycleFoundationError("participation is closed for this cycle")
     total = db.query(func.coalesce(func.sum(Quota.units), 0)).filter(Quota.cycle_id == cycle.id).scalar()
     if int(total or 0) + units > cycle.max_quotas:
         raise CycleFoundationError("cycle quota capacity exceeded")
@@ -76,10 +88,22 @@ def create_contribution(db: Session, *, member_id: int, cycle_id: int,
     cycle = db.get(Cycle, cycle_id)
     if cycle is None:
         raise CycleFoundationError("cycle not found")
-    if entry_date > cycle.entry_deadline:
+    participation = db.query(CycleParticipation).filter(
+        CycleParticipation.member_id == member_id, CycleParticipation.cycle_id == cycle_id
+    ).one_or_none()
+    if participation is None and entry_date > cycle.entry_deadline:
         raise CycleFoundationError("cycle entry deadline exceeded")
+    if entry_date < cycle.start_date:
+        raise CycleFoundationError("entry precedes cycle")
+    if competence.day != 1:
+        raise CycleFoundationError("competence must be the first day of a month")
     if competence < cycle.start_date.replace(day=1):
         raise CycleFoundationError("competence precedes cycle")
+    start_month = cycle.start_date.year * 12 + cycle.start_date.month
+    competence_month = competence.year * 12 + competence.month
+    if competence_month >= start_month + cycle.months:
+        raise CycleFoundationError("competence exceeds cycle")
+    ensure_active_participation(db, member_id=member_id, cycle_id=cycle_id, entry_date=entry_date)
     existing = db.query(Contribution).filter(
         Contribution.member_id == member_id, Contribution.cycle_id == cycle_id,
         Contribution.competence == competence).one_or_none()
@@ -102,12 +126,16 @@ def ensure_contributions_for_entry(db: Session, *, member_id: int, cycle_id: int
     cycle = db.get(Cycle, cycle_id)
     if cycle is None:
         raise CycleFoundationError("cycle not found")
-    if entry_date > cycle.entry_deadline:
+    participation = db.query(CycleParticipation).filter(
+        CycleParticipation.member_id == member_id, CycleParticipation.cycle_id == cycle_id
+    ).one_or_none()
+    if participation is None and entry_date > cycle.entry_deadline:
         raise CycleFoundationError("cycle entry deadline exceeded")
     start = cycle.start_date.replace(day=1)
     target = entry_date.replace(day=1)
-    if target < start:
+    if entry_date < cycle.start_date:
         raise CycleFoundationError("entry precedes cycle")
+    ensure_active_participation(db, member_id=member_id, cycle_id=cycle_id, entry_date=entry_date)
     months = min(cycle.months, (target.year - start.year) * 12 + target.month - start.month + 1)
     result = []
     for offset in range(months):

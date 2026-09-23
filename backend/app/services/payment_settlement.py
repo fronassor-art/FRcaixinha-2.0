@@ -117,10 +117,12 @@ def _contribution_paid_amount(contribution: Contribution) -> Decimal:
 
 
 def contribution_financial_status(contribution: Contribution, paid_amount: Decimal, as_of: datetime) -> str:
+    if contribution.cancelled_at is not None:
+        return "CANCELLED"
     remaining = max(ZERO, _money(contribution.amount) - paid_amount)
     if remaining == ZERO:
         return "PAID"
-    if contribution.due_date is not None and contribution.due_date < as_of.date():
+    if contribution.due_date is not None and contribution.due_date < financial_civil_date(as_of):
         return "OVERDUE"
     if contribution.paid_amount is None and contribution.status in {"PENDING", "PARTIAL", "OVERDUE"}:
         return contribution.status
@@ -455,6 +457,8 @@ def settle_confirmed_pix_payment(
         contribution = _locked_contribution(db, payment, lock=True, refresh=True)
         if contribution is None or contribution.member_id != member.id:
             raise ValueError("Referência de contribuição inválida.")
+        if contribution.cancelled_at is not None:
+            raise ValueError("Contribuição cancelada; pagamento requer reconciliação.")
         before_paid = _contribution_paid_amount(contribution)
         before_status = contribution_financial_status(contribution, before_paid, effective_at)
         open_amount = max(ZERO, _money(contribution.amount) - before_paid)

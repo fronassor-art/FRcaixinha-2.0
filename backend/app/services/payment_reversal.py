@@ -853,7 +853,7 @@ def reverse_payment(
     db.flush()
 
     contribution.paid_amount = new_paid
-    contribution.status = after_status
+    contribution.status = "CANCELLED" if contribution.cancelled_at is not None else after_status
     contribution.paid_at = contribution.paid_at if after_status == "PAID" else None
     if patrimonial_reversal_amount > ZERO:
         compensating_mfe = add_member_financial_entry(

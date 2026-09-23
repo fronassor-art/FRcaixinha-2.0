@@ -6,6 +6,8 @@ from sqlalchemy.orm import Session
 from app.models import User, Member, Contribution, Loan, LoanInstallment, LedgerEntry, Expense, Payment, PaymentSettlement, PaymentReversal, PaymentReversalComponent, MemberFinancialAccount, MemberFinancialEntry, CollectionAgreement, AgreementInstallment
 from app.services.loan_engine_v17 import installment_due
 from app.services.payment_settlement import contribution_financial_status, installment_financial_status
+from app.services.financial_obligations import contribution_item
+from app.services.late_charge_v1 import financial_civil_date
 from app.services.payment_financial_events import payment_financial_events
 from app.services.payment_reversal_evidence import validate_reversal_effect
 ZERO=Decimal('0.00'); CENT=Decimal('0.01')
@@ -27,7 +29,7 @@ def _legacy_member_statement(db,member_id):
  if not m:return None
  u=db.get(User,m.user_id); cs=db.query(Contribution).filter(Contribution.member_id==member_id).order_by(Contribution.competence.desc()).all(); loans=db.query(Loan).filter(Loan.member_id==member_id).order_by(Loan.id.desc()).all(); ids=[x.id for x in loans]; inst=db.query(LoanInstallment).filter(LoanInstallment.loan_id.in_(ids)).order_by(LoanInstallment.due_date).all() if ids else []; now=datetime.now(timezone.utc)
  contrib=sum((_cp(c) for c in cs),ZERO); loan_paid=sum((Decimal(i.paid_amount or 0)+Decimal(i.paid_penalty_amount or 0) for i in inst),ZERO); out=sum((Decimal(installment_due(i)) for i in inst),ZERO)
- return {'member':{'id':m.id,'name':u.name,'email':u.email,'cpf':u.cpf,'phone':u.phone,'status':m.status,'group_id':m.group_id},'totals':{'contributions_paid':money(contrib),'loan_payments':money(loan_paid),'loan_outstanding':money(out)},'contributions':[{'id':c.id,'competence':c.competence.isoformat(),'amount':money(c.amount),'paid_amount':money(_cp(c)),'outstanding':money(max(ZERO,Decimal(c.amount)-_cp(c))),'due_date':c.due_date.isoformat() if c.due_date else None,'status':contribution_financial_status(c,_cp(c),now),'payment_id':(_payment(db,'CONTRIBUTION',c.id,c.payment_id).id if _payment(db,'CONTRIBUTION',c.id,c.payment_id) else None),'receipt_available':_receipt(db,_payment(db,'CONTRIBUTION',c.id,c.payment_id))} for c in cs],'loans':[{'id':l.id,'principal':money(l.principal),'monthly_rate':str(l.monthly_rate),'installments':l.installments,'status':l.status} for l in loans],'installments':[{'id':i.id,'loan_id':i.loan_id,'number':i.number,'due_date':i.due_date.isoformat(),'amount':money(i.amount),'paid_amount':money(i.paid_amount),'paid_penalty_amount':money(i.paid_penalty_amount),'outstanding':money(installment_due(i)),'status':installment_financial_status(i,now),'payment_id':(_payment(db,'LOAN_INSTALLMENT',i.id).id if _payment(db,'LOAN_INSTALLMENT',i.id) else None),'receipt_available':_receipt(db,_payment(db,'LOAN_INSTALLMENT',i.id))} for i in inst]}
+ return {'member':{'id':m.id,'name':u.name,'email':u.email,'cpf':u.cpf,'phone':u.phone,'status':m.status,'group_id':m.group_id},'totals':{'contributions_paid':money(contrib),'loan_payments':money(loan_paid),'loan_outstanding':money(out)},'contributions':[{'id':c.id,'competence':c.competence.isoformat(),'amount':money(c.amount),'paid_amount':money(_cp(c)),'outstanding':contribution_item(db,c,now)["outstanding_amount"],'due_date':c.due_date.isoformat() if c.due_date else None,'status':contribution_financial_status(c,_cp(c),now),'payment_id':(_payment(db,'CONTRIBUTION',c.id,c.payment_id).id if _payment(db,'CONTRIBUTION',c.id,c.payment_id) else None),'receipt_available':_receipt(db,_payment(db,'CONTRIBUTION',c.id,c.payment_id))} for c in cs],'loans':[{'id':l.id,'principal':money(l.principal),'monthly_rate':str(l.monthly_rate),'installments':l.installments,'status':l.status} for l in loans],'installments':[{'id':i.id,'loan_id':i.loan_id,'number':i.number,'due_date':i.due_date.isoformat(),'amount':money(i.amount),'paid_amount':money(i.paid_amount),'paid_penalty_amount':money(i.paid_penalty_amount),'outstanding':money(installment_due(i)),'status':installment_financial_status(i,now),'payment_id':(_payment(db,'LOAN_INSTALLMENT',i.id).id if _payment(db,'LOAN_INSTALLMENT',i.id) else None),'receipt_available':_receipt(db,_payment(db,'LOAN_INSTALLMENT',i.id))} for i in inst]}
 def loan_report(db):
  rows=[]
  for l in db.query(Loan).order_by(Loan.id.desc()).all():
@@ -35,7 +37,18 @@ def loan_report(db):
  return {'items':rows}
 def delinquency_report(db):
  from app.services.financial_obligations import all_obligations
- rows=[x for x in all_obligations(db) if x['financial_status']=='OVERDUE']; return {'as_of':date.today().isoformat(),'count':len(rows),'total_outstanding':money(sum((Decimal(x['outstanding_amount']) for x in rows),ZERO)),'items':rows}
+ rows=[
+  x for x in all_obligations(db)
+  if x['financial_status']=='OVERDUE' or (
+   x['financial_status']=='CANCELLED' and (
+    Decimal(x['penalty_outstanding']) + Decimal(x['interest_outstanding']) > ZERO
+   )
+  )
+ ]
+ return {'as_of':financial_civil_date(datetime.now(timezone.utc)).isoformat(),
+         'count':len(rows),
+         'total_outstanding':money(sum((Decimal(x['outstanding_amount']) for x in rows),ZERO)),
+         'items':rows}
 
 def _int_or_none(value):
  try:return int(value)

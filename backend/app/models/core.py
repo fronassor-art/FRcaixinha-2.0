@@ -1,6 +1,6 @@
 from datetime import datetime, date, timezone
 from decimal import Decimal
-from sqlalchemy import String, Integer, Boolean, DateTime, Date, Numeric, ForeignKey, Text, UniqueConstraint, Index, CheckConstraint, false, text
+from sqlalchemy import String, Integer, Boolean, DateTime, Date, Numeric, ForeignKey, Text, UniqueConstraint, PrimaryKeyConstraint, Index, CheckConstraint, false, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy import event
 from app.db.base import Base
@@ -161,6 +161,7 @@ class Cycle(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     quotas: Mapped[list["Quota"]] = relationship(back_populates="cycle")
     contributions: Mapped[list["Contribution"]] = relationship(back_populates="cycle")
+    participations: Mapped[list["CycleParticipation"]] = relationship(back_populates="cycle")
     __table_args__ = (
         CheckConstraint("entry_deadline >= start_date", name="ck_cycles_entry_deadline_after_start"),
         CheckConstraint("closing_reference_date >= start_date", name="ck_cycles_closing_after_start"),
@@ -181,6 +182,24 @@ class Quota(Base):
         CheckConstraint("cycle_id IS NULL OR (units >= 1 AND units = CAST(units AS INTEGER))", name="ck_quotas_new_units_discrete"),
     )
 
+class CycleParticipation(Base):
+    __tablename__ = "cycle_participations"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    cycle_id: Mapped[int] = mapped_column(ForeignKey("cycles.id", name="fk_cycle_participations_cycle"), nullable=False)
+    member_id: Mapped[int] = mapped_column(ForeignKey("members.id", name="fk_cycle_participations_member"), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="ACTIVE")
+    joined_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    voluntary_exit_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    blocked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    block_reason: Mapped[str | None] = mapped_column(String(80))
+    cycle: Mapped[Cycle] = relationship(back_populates="participations")
+    __table_args__ = (
+        PrimaryKeyConstraint("id", name="pk_cycle_participations"),
+        UniqueConstraint("member_id", "cycle_id", name="uq_cycle_participations_member_cycle"),
+        CheckConstraint("(status = 'ACTIVE' AND voluntary_exit_at IS NULL AND blocked_at IS NULL AND block_reason IS NULL) OR (status = 'VOLUNTARILY_EXITED' AND voluntary_exit_at IS NOT NULL AND blocked_at IS NULL AND block_reason IS NULL) OR (status = 'BLOCKED_DELINQUENCY' AND voluntary_exit_at IS NULL AND blocked_at IS NOT NULL AND block_reason IS NOT NULL)", name="ck_cycle_participations_state"),
+        Index("ix_cycle_participations_cycle_status", "cycle_id", "status"),
+    )
+
 class Contribution(Base):
     __tablename__ = "contributions"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -194,6 +213,8 @@ class Contribution(Base):
     due_date: Mapped[date | None] = mapped_column(Date)
     paid_amount: Mapped[Decimal | None] = mapped_column(Numeric(14,2))
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancellation_reason: Mapped[str | None] = mapped_column(String(80))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     cycle: Mapped["Cycle | None"] = relationship(back_populates="contributions")
     __table_args__ = (
@@ -201,6 +222,26 @@ class Contribution(Base):
         Index("uq_contribution_member_cycle_competence", "member_id", "cycle_id", "competence", unique=True, sqlite_where=text("cycle_id IS NOT NULL"), postgresql_where=text("cycle_id IS NOT NULL")),
         Index("ix_contributions_status_due_date", "status", "due_date"),
         Index("ix_contributions_member_status_due_date", "member_id", "status", "due_date"),
+    )
+
+class ContributionChargeEvent(Base):
+    __tablename__ = "contribution_charge_events"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    contribution_id: Mapped[int] = mapped_column(ForeignKey("contributions.id", name="fk_contribution_charge_events_contribution"), nullable=False)
+    participation_id: Mapped[int] = mapped_column(ForeignKey("cycle_participations.id", name="fk_contribution_charge_events_participation"), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    rule_version: Mapped[str] = mapped_column(String(40), nullable=False)
+    accrued_through: Mapped[date] = mapped_column(Date, nullable=False)
+    fixed_penalty: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    daily_interest: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    cancelled_principal: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=now_utc)
+    __table_args__ = (
+        PrimaryKeyConstraint("id", name="pk_contribution_charge_events"),
+        UniqueConstraint("contribution_id", "event_type", "accrued_through", name="uq_contribution_charge_events_snapshot"),
+        CheckConstraint("event_type IN ('ACCRUAL_SNAPSHOT', 'BLOCK_FREEZE')", name="ck_contribution_charge_events_type"),
+        CheckConstraint("fixed_penalty >= 0 AND daily_interest >= 0 AND cancelled_principal >= 0", name="ck_contribution_charge_events_nonnegative"),
+        Index("ix_contribution_charge_events_participation", "participation_id"),
     )
 
 class Payment(Base):

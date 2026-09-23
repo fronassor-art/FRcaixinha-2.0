@@ -27,7 +27,9 @@ def dashboard(admin=Depends(require_admin), db: Session = Depends(get_db)):
     members_active = db.query(Member).filter(Member.status == "ACTIVE").count()
     quotas_active = db.query(Quota).filter(Quota.status == "ACTIVE").count()
     contributions_paid = db.query(func.coalesce(func.sum(Contribution.amount), 0)).filter(Contribution.status == "PAID").scalar()
-    contributions_pending = db.query(func.coalesce(func.sum(Contribution.amount), 0)).filter(Contribution.status != "PAID").scalar()
+    contributions_pending = db.query(func.coalesce(func.sum(Contribution.amount), 0)).filter(
+        Contribution.status != "PAID", Contribution.cancelled_at.is_(None)
+    ).scalar()
 
     loan_counts = {}
     for status in ["REQUESTED", "APPROVED", "REJECTED", "ACTIVE", "PAID", "CANCELLED"]:

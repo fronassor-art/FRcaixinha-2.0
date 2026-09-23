@@ -2,7 +2,7 @@ import logging, time
 from datetime import datetime, timezone
 from app.core.config import settings
 from app.core.logging_config import configure_logging
-from app.worker.tasks import run_daily_tasks
+from app.worker.tasks import run_daily_tasks, run_cycle_participation_tasks
 from app.core.metrics import WORKER_HEARTBEAT, WORKER_RUNS
 
 configure_logging()
@@ -20,6 +20,14 @@ def acquire_daily_lock():
     key = f"frcaixinha:daily:{datetime.now(timezone.utc).date().isoformat()}"
     return bool(r.set(key, "1", nx=True, ex=86400))
 
+def acquire_cycle_lock():
+    if redis is None:
+        return True
+    r = redis.from_url(settings.redis_url, decode_responses=True)
+    key = f"frcaixinha:cycle-daily:{datetime.now(timezone.utc).date().isoformat()}"
+    return bool(r.set(key, "1", nx=True, ex=86400))
+
+
 def main():
     while True:
         WORKER_HEARTBEAT.set(time.time())
@@ -35,6 +43,13 @@ def main():
                 run_daily_tasks(); WORKER_RUNS.labels("success").inc()
             except Exception:
                 WORKER_RUNS.labels("failure").inc(); log.exception("scheduled_task_failed")
+        # 04:05 UTC is 01:05 in America/Belem, after the financial day changes.
+        if now.hour == 4 and now.minute == 5 and acquire_cycle_lock():
+            try:
+                result = run_cycle_participation_tasks(now)
+                log.info("cycle_participation_tasks_completed %s", result)
+            except Exception:
+                log.exception("cycle_participation_tasks_failed")
         time.sleep(30)
 
 if __name__ == "__main__": main()

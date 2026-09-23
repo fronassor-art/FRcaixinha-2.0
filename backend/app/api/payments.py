@@ -46,6 +46,8 @@ def _contribution_status(contribution: Contribution) -> str:
 
 
 def _contribution_open_amount(contribution: Contribution) -> Decimal:
+    if contribution.cancelled_at is not None:
+        return ZERO
     return max(ZERO, _money(contribution.amount) - _contribution_paid_amount(contribution))
 
 
@@ -142,6 +144,8 @@ async def create_pix(contribution_id: int, user: User = Depends(current_user), d
     financial_status = _contribution_status(contribution)
     if financial_status == "PAID":
         raise HTTPException(409, "Contribuição já paga.")
+    if financial_status == "CANCELLED":
+        raise HTTPException(409, "Contribuição encerrada neste ciclo.")
     existing = _payment_for_contribution(db, contribution)
     if existing and existing.status in {"pending", "in_process", "PENDING"}:
         return _pix_response(existing)
@@ -313,6 +317,11 @@ async def mercado_pago_webhook(request: Request, db: Session = Depends(get_db)):
                     db.commit()
                     approve_or_reconcile(db, payment, _remote_confirmed_at(remote_payment), remote_payload, settle_confirmed_pix_payment)
                 elif (payment.reference_type or "").upper() == "CONTRIBUTION" or _payment_contribution(db, payment) is not None:
+                    contribution = _payment_contribution(db, payment)
+                    if contribution is not None and contribution.cancelled_at is not None and not was_settled:
+                        payment.reconciliation_status = RECONCILIATION_REQUIRED
+                        db.commit()
+                        return {"received": True, "reconciliable": True}
                     if payment.ledger_posted_at is None or was_settled:
                         settlement = settle_confirmed_pix_payment(
                             db,

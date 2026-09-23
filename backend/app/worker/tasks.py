@@ -1,5 +1,9 @@
 import logging
-from datetime import date
+from datetime import date, datetime, timezone
+from app.models import Cycle, CycleParticipation
+from app.services.cycle_foundation import ensure_contributions_for_entry
+from app.services.cycle_participation import evaluate_delinquency, materialize_active_charges
+from app.services.late_charge_v1 import financial_civil_date
 from app.db.session import SessionLocal
 from app.services.notifications_v12 import queue_installment_reminders
 from app.services.loan_engine_v17 import accrue_overdue_penalties
@@ -34,6 +38,47 @@ from app.services.continuous_improvement_finalization_v093_100 import persist_al
 from app.models import ExecutiveRiskDecisionGovernance, ExecutiveRiskDecisionExecution
 
 log = logging.getLogger(__name__)
+
+
+def run_cycle_participation_tasks(now: datetime | None = None) -> dict[str, int]:
+    """Materialize elapsed monthly obligations and block three-month delinquency."""
+    now = now or datetime.now(timezone.utc)
+    civil = financial_civil_date(now)
+    db = SessionLocal()
+    try:
+        ids = db.query(CycleParticipation.id).filter(
+            CycleParticipation.status == "ACTIVE"
+        ).order_by(CycleParticipation.id).all()
+    finally:
+        db.close()
+    processed = blocked = 0
+    for (participation_id,) in ids:
+        db = SessionLocal()
+        try:
+            row = db.get(CycleParticipation, participation_id)
+            if row is None or row.status != "ACTIVE":
+                continue
+            cycle = db.get(Cycle, row.cycle_id)
+            if cycle is None or civil < cycle.start_date:
+                continue
+            ensure_contributions_for_entry(
+                db, member_id=row.member_id, cycle_id=row.cycle_id, entry_date=civil
+            )
+            materialize_active_charges(
+                db, member_id=row.member_id, cycle_id=row.cycle_id, effective_at=now
+            )
+            result = evaluate_delinquency(
+                db, member_id=row.member_id, cycle_id=row.cycle_id, effective_at=now
+            )
+            db.commit()
+            processed += 1
+            blocked += result.status == "BLOCKED_DELINQUENCY"
+        except Exception:
+            db.rollback()
+            log.exception("cycle_participation_task_failed participation_id=%s", participation_id)
+        finally:
+            db.close()
+    return {"processed": processed, "blocked": blocked}
 
 def run_daily_tasks():
     db = SessionLocal()
