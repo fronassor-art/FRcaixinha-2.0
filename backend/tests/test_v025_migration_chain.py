@@ -19,7 +19,7 @@ def test_single_alembic_head_after_security_reconciliation():
         if line.strip()
     ]
 
-    assert heads == ["0097_cycle_participation_a377b1"]
+    assert heads == ["0098_cycle_closing_persistence_a377b2"]
 
     root = Path(__file__).parents[1] / "alembic" / "versions"
     rows = {}

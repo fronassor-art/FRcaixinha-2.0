@@ -9,7 +9,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.db.base import Base
 from app.models import (
-    AgreementInstallment, CollectionAgreement, Contribution, CycleParticipation,
+    AgreementInstallment, CollectionAgreement, Contribution, Cycle, CycleParticipation,
     Loan, LoanInstallment, Member, Payment, PaymentSettlement,
 )
 from app.services.cycle_foundation import ensure_first_cycle
@@ -233,7 +233,7 @@ def test_untyped_or_unpersisted_gain_is_not_invented():
     result = preview(gains=[gain(kind="UNKNOWN", source_type="REQUEST")])
     assert result["gross_realized_result"] == "0.00"
     assert result["source_gaps"][0]["code"] == "UNTYPED_GAIN"
-    assert "INVESTMENT_YIELD" in result["unavailable_result_sources"]
+    assert result["unavailable_result_sources"] == []
 
 
 
@@ -272,7 +272,8 @@ def test_no_eligible_base_with_positive_result_is_contract_gap():
 
 
 @pytest.mark.parametrize("payment_status", ["approved", "PENDING"])
-def test_preview_reads_persisted_settlement_without_any_write(payment_status):
+@pytest.mark.parametrize(("loan_cycle_id", "expected_gross", "attribution_gap"), [(None, "0.00", True), (1, "10.00", False), (2, "0.00", False)])
+def test_preview_reads_persisted_settlement_without_any_write(payment_status, loan_cycle_id, expected_gross, attribution_gap):
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     db = sessionmaker(bind=engine)()
@@ -306,8 +307,16 @@ def test_preview_reads_persisted_settlement_without_any_write(payment_status):
         receipt_version="v1", receipt_snapshot_json="{}", receipt_hash="b2-r1-1",
     )
     db.add(settlement)
-    loan = Loan(member_id=member.id, principal=D("50.00"), monthly_rate=D("0.20"),
-                installments=1, status="RESTRUCTURED")
+    if loan_cycle_id == 2:
+        db.add(Cycle(start_date=date(2028, 12, 10), entry_deadline=date(2029, 1, 10),
+                     closing_reference_date=date(2029, 12, 10), monthly_amount=D("150.00"),
+                     months=12, max_quotas=50, status="OPEN"))
+        db.flush()
+        other_cycle = db.query(Cycle).filter(Cycle.start_date == date(2028, 12, 10)).one()
+        db.add(CycleParticipation(cycle_id=other_cycle.id, member_id=member.id, status="ACTIVE"))
+        db.flush()
+    loan = Loan(member_id=member.id, cycle_id=loan_cycle_id, principal=D("50.00"),
+                monthly_rate=D("0.20"), installments=1, status="RESTRUCTURED")
     db.add(loan)
     db.flush()
     installment = LoanInstallment(
@@ -322,7 +331,7 @@ def test_preview_reads_persisted_settlement_without_any_write(payment_status):
     agreement_decided_at = datetime(2027, 10, 10, 12, tzinfo=timezone.utc)
     interest_payment = Payment(
         provider="test", provider_payment_id="b2-r1-interest",
-        idempotency_key="b2-r1-interest", amount=D("10.00"), status="approved",
+        idempotency_key="b2-r1-interest", amount=D("60.00"), status="approved",
         reference_type="LOAN_INSTALLMENT", reference_id=str(installment.id),
         confirmed_at=interest_received_at,
     )
@@ -331,8 +340,8 @@ def test_preview_reads_persisted_settlement_without_any_write(payment_status):
     db.add(PaymentSettlement(
         payment_id=interest_payment.id, member_id=member.id,
         obligation_type="LOAN_INSTALLMENT", loan_installment_id=installment.id,
-        amount_received=D("10.00"), amount_applied=D("10.00"),
-        principal_applied=D("0.00"), interest_applied=D("10.00"),
+        amount_received=D("60.00"), amount_applied=D("60.00"),
+        principal_applied=D("50.00"), interest_applied=D("10.00"),
         penalty_applied=D("0.00"), excess_amount=D("0.00"),
         obligation_status_before="OPEN", obligation_status_after="PARTIAL",
         confirmed_at=interest_received_at, confirmation_source="TEST", receipt_number="B2-R1-2",
@@ -370,11 +379,16 @@ def test_preview_reads_persisted_settlement_without_any_write(payment_status):
         assert source.superseded_loan_ids == (loan.id,)
         result = preview_cycle_closing(db, cycle_id=cycle_id, closing_cutoff_at=CUTOFF)
         assert result["total_eligible_contributions"] == "100.00"
-        assert result["gross_realized_result"] == "0.00"
-        assert result["participants"][0]["gross_entitlement"] == "100.00"
+        assert result["gross_realized_result"] == expected_gross
+        if expected_gross == "10.00":
+            assert [gain["kind"] for gain in result["source_trace"]["included_gains"]] == ["LOAN_INTEREST"]
+            assert any(gain["kind"] == "LOAN_PRINCIPAL" for gain in result["source_trace"]["excluded_gains"])
+        expected_share = "8.50" if expected_gross == "10.00" else "0.00"
+        assert result["participants"][0]["gross_share"] == expected_share
+        assert result["participants"][0]["gross_entitlement"] == ("108.50" if expected_gross == "10.00" else "100.00")
         assert result["participants"][0]["compensable_obligations_total"] == "50.00"
-        assert result["participants"][0]["projected_net"] == "50.00"
-        assert any(row["code"] == "CYCLE_ATTRIBUTION_MISSING" for row in result["source_gaps"])
+        assert result["participants"][0]["projected_net"] == ("58.50" if expected_gross == "10.00" else "50.00")
+        assert any(row["code"] == "CYCLE_ATTRIBUTION_MISSING" for row in result["source_gaps"]) is attribution_gap
         assert statements and all(command.startswith("SELECT") for command in statements)
         assert not db.new and member in db.dirty and not db.deleted
     finally:

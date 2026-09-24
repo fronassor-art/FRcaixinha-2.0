@@ -15,7 +15,7 @@ from app.db.base import Base
 from app.models import LoanLateChargeEvent
 
 
-HEAD_REVISION = "0097_cycle_participation_a377b1"
+HEAD_REVISION = "0098_cycle_closing_persistence_a377b2"
 REVISION = "0094_late_interest_event_contract"
 DOWN_REVISION = "0093_payment_attempt_schema_foundation"
 ADJUSTMENT_TYPES = {
@@ -98,7 +98,7 @@ def test_single_head_and_revision_chain():
     assert script.get_heads() == [HEAD_REVISION]
     assert (
         script.get_revision(HEAD_REVISION).down_revision
-        == "0096_cycle_foundation_a377a"
+        == "0097_cycle_participation_a377b1"
     )
     assert (
         script.get_revision("0095_pix_attempt_provider_reservation").down_revision

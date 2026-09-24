@@ -1,6 +1,6 @@
 from datetime import datetime, date, timezone
 from decimal import Decimal
-from sqlalchemy import String, Integer, Boolean, DateTime, Date, Numeric, ForeignKey, Text, UniqueConstraint, PrimaryKeyConstraint, Index, CheckConstraint, false, text
+from sqlalchemy import String, Integer, Boolean, DateTime, Date, Numeric, ForeignKey, ForeignKeyConstraint, Text, UniqueConstraint, PrimaryKeyConstraint, Index, CheckConstraint, false, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy import event
 from app.db.base import Base
@@ -12,6 +12,12 @@ from app.core.loan_rules import (
 
 def now_utc():
     return datetime.now(timezone.utc)
+
+
+CYCLE_EXTERNAL_GAIN_SOURCE_TYPES = ("BANK_STATEMENT", "BANK_CORRECTION")
+_CYCLE_EXTERNAL_GAIN_SOURCE_TYPES_SQL = ", ".join(
+    f"'{source_type}'" for source_type in CYCLE_EXTERNAL_GAIN_SOURCE_TYPES
+)
 
 class User(Base):
     __tablename__ = "users"
@@ -433,6 +439,7 @@ class Loan(Base):
     __tablename__ = "loans"
     id: Mapped[int] = mapped_column(primary_key=True)
     member_id: Mapped[int] = mapped_column(ForeignKey("members.id"))
+    cycle_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     principal: Mapped[Decimal] = mapped_column(Numeric(14,2))
     principal_settled_with_own_balance: Mapped[Decimal] = mapped_column(
         Numeric(14,2),
@@ -448,7 +455,15 @@ class Loan(Base):
     disbursed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     state_revision: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
-    __table_args__ = (CheckConstraint("state_revision >= 0", name="ck_loans_state_revision_nonnegative"),)
+    __table_args__ = (
+        CheckConstraint("state_revision >= 0", name="ck_loans_state_revision_nonnegative"),
+        ForeignKeyConstraint(
+            ["member_id", "cycle_id"],
+            ["cycle_participations.member_id", "cycle_participations.cycle_id"],
+            name="fk_loans_member_cycle_participation",
+        ),
+        Index("ix_loans_cycle_id", "cycle_id"),
+    )
 
 
 class LoanSimulation(Base):
@@ -844,6 +859,126 @@ class ReportSnapshot(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     __table_args__ = (UniqueConstraint("report_type", "competence", "scope_id", name="uq_report_snapshot_scope"),)
 
+class CycleAnnualClosing(Base):
+    __tablename__ = "cycle_annual_closings"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    cycle_id: Mapped[int] = mapped_column(
+        ForeignKey("cycles.id", name="fk_cycle_annual_closings_cycle", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="ASSESSING")
+    state_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=now_utc)
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", name="fk_cycle_annual_closings_created_by", ondelete="RESTRICT"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=now_utc, onupdate=now_utc)
+    updated_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", name="fk_cycle_annual_closings_updated_by", ondelete="RESTRICT"))
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    approved_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", name="fk_cycle_annual_closings_approved_by", ondelete="RESTRICT"))
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    closed_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", name="fk_cycle_annual_closings_closed_by", ondelete="RESTRICT"))
+
+    __table_args__ = (
+        UniqueConstraint("cycle_id", name="uq_cycle_annual_closings_cycle"),
+        UniqueConstraint("id", "cycle_id", name="uq_cycle_annual_closings_id_cycle"),
+        CheckConstraint(
+            "status IN ('ASSESSING', 'READY_FOR_REVIEW', 'MASTER_APPROVED', 'CLOSED', 'PAYING', 'LIQUIDATED')",
+            name="ck_cycle_annual_closings_status",
+        ),
+        CheckConstraint("state_revision >= 0", name="ck_cycle_annual_closings_revision"),
+        Index("ix_cycle_annual_closings_status", "status"),
+    )
+
+
+class CycleAnnualClosingSnapshot(Base):
+    __tablename__ = "cycle_annual_closing_snapshots"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    closing_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    cycle_id: Mapped[int] = mapped_column(
+        ForeignKey("cycles.id", name="fk_cycle_annual_snapshots_cycle", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    snapshot_version: Mapped[str] = mapped_column(String(60), nullable=False)
+    closing_cutoff_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    calculation_version: Mapped[str] = mapped_column(String(60), nullable=False)
+    canonical_payload: Mapped[str] = mapped_column(Text(), nullable=False)
+    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    gross_realized_result: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    administration_fee_rate: Mapped[Decimal] = mapped_column(Numeric(5, 4), nullable=False)
+    administration_fee: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    distributable_result: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    total_eligible_contributions: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=now_utc)
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", name="fk_cycle_annual_snapshots_created_by", ondelete="RESTRICT"))
+
+    __table_args__ = (
+        UniqueConstraint("closing_id", name="uq_cycle_annual_snapshots_closing"),
+        ForeignKeyConstraint(
+            ["closing_id", "cycle_id"],
+            ["cycle_annual_closings.id", "cycle_annual_closings.cycle_id"],
+            name="fk_cycle_annual_snapshots_closing_cycle", ondelete="RESTRICT",
+        ),
+        UniqueConstraint("cycle_id", name="uq_cycle_annual_snapshots_cycle"),
+        UniqueConstraint("payload_hash", name="uq_cycle_annual_snapshots_hash"),
+        CheckConstraint("length(payload_hash) = 64", name="ck_cycle_annual_snapshots_hash_length"),
+        CheckConstraint(
+            "gross_realized_result >= 0 AND administration_fee >= 0 AND distributable_result >= 0 "
+            "AND total_eligible_contributions >= 0 AND administration_fee_rate >= 0 "
+            "AND administration_fee_rate <= 1",
+            name="ck_cycle_annual_snapshots_nonnegative",
+        ),
+        CheckConstraint(
+            "gross_realized_result = administration_fee + distributable_result",
+            name="ck_cycle_annual_snapshots_result_equation",
+        ),
+        Index("ix_cycle_annual_snapshots_cycle_created", "cycle_id", "created_at"),
+    )
+
+
+class CycleRealizedGainEvent(Base):
+    __tablename__ = "cycle_realized_gain_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    cycle_id: Mapped[int] = mapped_column(
+        ForeignKey("cycles.id", name="fk_cycle_realized_gain_events_cycle", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    event_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    realized_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    source_type: Mapped[str] = mapped_column(String(60), nullable=False)
+    source_id: Mapped[str] = mapped_column(String(150), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(150), nullable=False)
+    evidence_reference: Mapped[str] = mapped_column(String(500), nullable=False)
+    evidence_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=now_utc)
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", name="fk_cycle_realized_gain_events_created_by", ondelete="RESTRICT"))
+    reversal_of_id: Mapped[int | None] = mapped_column(
+        ForeignKey("cycle_realized_gain_events.id", name="fk_cycle_realized_gain_events_reversal", ondelete="RESTRICT")
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "event_type IN ('INVESTMENT_YIELD_REALIZED', 'OTHER_REALIZED_GAIN')",
+            name="ck_cycle_realized_gain_events_type",
+        ),
+        CheckConstraint("amount > 0", name="ck_cycle_realized_gain_events_positive"),
+        CheckConstraint("length(trim(source_type)) > 0 AND length(trim(source_id)) > 0", name="ck_cycle_realized_gain_events_source"),
+        CheckConstraint(
+            f"source_type IN ({_CYCLE_EXTERNAL_GAIN_SOURCE_TYPES_SQL})",
+            name="ck_cycle_realized_gain_events_external_source_only",
+        ),
+        CheckConstraint("length(trim(idempotency_key)) > 0", name="ck_cycle_realized_gain_events_idempotency"),
+        CheckConstraint("length(trim(evidence_reference)) > 0", name="ck_cycle_realized_gain_events_evidence"),
+        CheckConstraint("length(evidence_hash) = 64", name="ck_cycle_realized_gain_events_evidence_hash"),
+        UniqueConstraint("idempotency_key", name="uq_cycle_realized_gain_events_idempotency"),
+        UniqueConstraint("cycle_id", "event_type", "source_type", "source_id", name="uq_cycle_realized_gain_events_source"),
+        UniqueConstraint("reversal_of_id", name="uq_cycle_realized_gain_events_one_full_reversal"),
+        Index("ix_cycle_realized_gain_events_cycle_realized", "cycle_id", "realized_at"),
+    )
+
+
 class AuditLog(Base):
     __tablename__ = "audit_logs"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -966,12 +1101,13 @@ class Notification(Base):
 # v0.35: Ledger is append-only. Corrections must be represented by a reversal entry.
 @event.listens_for(__import__("sqlalchemy").orm.Session, "before_flush")
 def _protect_ledger_mutations(session, flush_context, instances):
+    immutable_types = (LedgerEntry, CycleAnnualClosingSnapshot, CycleRealizedGainEvent)
     for obj in list(session.dirty):
-        if isinstance(obj, LedgerEntry):
-            raise RuntimeError("LedgerEntry é imutável; use uma reversão controlada.")
+        if isinstance(obj, immutable_types):
+            raise RuntimeError(f"{type(obj).__name__} é imutável; use uma linha compensatória quando aplicável.")
     for obj in list(session.deleted):
-        if isinstance(obj, LedgerEntry):
-            raise RuntimeError("LedgerEntry não pode ser excluído.")
+        if isinstance(obj, immutable_types):
+            raise RuntimeError(f"{type(obj).__name__} não pode ser excluído.")
 
 class ConsentRecord(Base):
     __tablename__ = "consent_records"

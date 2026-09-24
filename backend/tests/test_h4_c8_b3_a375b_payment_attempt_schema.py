@@ -19,7 +19,7 @@ from app.models import Payment
 
 REVISION = "0093_payment_attempt_schema_foundation"
 PREVIOUS_REVISION = "0092_versioned_late_charge_foundation"
-HEAD_REVISION = "0097_cycle_participation_a377b1"
+HEAD_REVISION = "0098_cycle_closing_persistence_a377b2"
 INDEX_NAME = "uq_payments_reference_pending"
 
 

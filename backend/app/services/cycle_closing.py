@@ -15,7 +15,7 @@ from app.models import (
     AgreementInstallment, CollectionAgreement, Contribution,
     ContributionChargeEvent, Cycle, CycleParticipation, Loan, LoanInstallment,
     LoanLateChargeEvent, Member, MemberFinancialAccount, MemberFinancialEntry,
-    Payment, PaymentReversal, PaymentReversalComponent, PaymentSettlement,
+    Payment, PaymentReversal, PaymentReversalComponent, PaymentSettlement, CycleRealizedGainEvent,
     LedgerEntry,
 )
 from app.services.payment_financial_events import payment_financial_events
@@ -281,7 +281,10 @@ def calculate_cycle_closing(evidence: ClosingEvidence) -> dict:
         elif gain.kind not in RESULT_KINDS or not gain.source_type or not gain.source_id:
             reason = "UNTYPED_GAIN"
             source_gaps.append({"code": reason, "source": gain.source_id})
-        elif gain.kind not in RECEIPT_RESULT_KINDS or gain.source_type != "PAYMENT_SETTLEMENT":
+        elif gain.kind in RECEIPT_RESULT_KINDS and gain.source_type != "PAYMENT_SETTLEMENT":
+            reason = "UNAVAILABLE_RESULT_SOURCE"
+            source_gaps.append({"code": reason, "source": gain.source_id})
+        elif gain.kind in UNAVAILABLE_RESULT_KINDS and gain.source_type != "CYCLE_REALIZED_GAIN_EVENT":
             reason = "UNAVAILABLE_RESULT_SOURCE"
             source_gaps.append({"code": reason, "source": gain.source_id})
         elif gain.cycle_id is None:
@@ -394,14 +397,17 @@ def calculate_cycle_closing(evidence: ClosingEvidence) -> dict:
             "own_balance_settled_loan_ids": sorted(evidence.own_balance_settled_loan_ids),
         },
         "source_gaps": sorted(source_gaps, key=lambda item: (item["code"], item["source"])),
-        "unavailable_result_sources": ["INVESTMENT_YIELD", "OTHER_REALIZED_GAIN"],
+        "unavailable_result_sources": [],
     }
     memory["calculation_hash"] = hashlib.sha256(_canonical(memory).encode()).hexdigest()
     return memory
 
 
-def _gain_from_event(event, settlement: PaymentSettlement, contribution_cycle_id: int | None):
-    """Classify received components; only Contribution has a baseline cycle FK."""
+def _gain_from_event(
+    event, settlement: PaymentSettlement, contribution_cycle_id: int | None,
+    loan_cycle_id: int | None = None,
+):
+    """Classify received components and use only explicit Loan.cycle_id attribution."""
     if event.component == "CONTRIBUTION":
         return (GainEvidence(
             source_id=event.event_id, source_type="PAYMENT_SETTLEMENT",
@@ -411,7 +417,7 @@ def _gain_from_event(event, settlement: PaymentSettlement, contribution_cycle_id
     if event.component in {"LOAN_PRINCIPAL", "LOAN_INTEREST"}:
         return (GainEvidence(
             source_id=event.event_id, source_type="PAYMENT_SETTLEMENT",
-            kind=event.component, cycle_id=None,
+            kind=event.component, cycle_id=loan_cycle_id,
             amount=Decimal(event.amount), occurred_at=event.occurred_at,
         ),)
     if event.component == "LOAN_PENALTY":
@@ -424,7 +430,7 @@ def _gain_from_event(event, settlement: PaymentSettlement, contribution_cycle_id
             return tuple(
                 GainEvidence(
                     source_id=f"{event.event_id}:{kind}", source_type="PAYMENT_SETTLEMENT",
-                    kind=kind, cycle_id=None, amount=sign * amount,
+                    kind=kind, cycle_id=loan_cycle_id, amount=sign * amount,
                     occurred_at=event.occurred_at,
                 )
                 for kind, amount in (
@@ -433,7 +439,7 @@ def _gain_from_event(event, settlement: PaymentSettlement, contribution_cycle_id
             )
         return (GainEvidence(
             source_id=event.event_id, source_type="PAYMENT_SETTLEMENT",
-            kind="LOAN_PENALTY", cycle_id=None,
+            kind="LOAN_PENALTY", cycle_id=loan_cycle_id,
             amount=Decimal(event.amount), occurred_at=event.occurred_at,
         ),)
     if event.component == "AGREEMENT":
@@ -445,7 +451,7 @@ def _gain_from_event(event, settlement: PaymentSettlement, contribution_cycle_id
         return tuple(
             GainEvidence(
                 source_id=f"{event.event_id}:{kind}", source_type="PAYMENT_SETTLEMENT",
-                kind=kind, cycle_id=None, amount=sign * amount,
+                kind=kind, cycle_id=loan_cycle_id, amount=sign * amount,
                 occurred_at=event.occurred_at,
             )
             for kind, amount in (
@@ -524,6 +530,7 @@ def _legacy_contribution_cash(db: Session, row: Contribution) -> CashEvidence | 
 FINANCIAL_PREVIEW_MODELS = (
     Cycle, CycleParticipation, Contribution, ContributionChargeEvent,
     Payment, PaymentSettlement, PaymentReversal, PaymentReversalComponent,
+    CycleRealizedGainEvent,
     Loan, LoanInstallment, LoanLateChargeEvent,
     CollectionAgreement, AgreementInstallment,
     MemberFinancialAccount, MemberFinancialEntry, LedgerEntry,
@@ -610,12 +617,57 @@ def build_closing_evidence(
                     settlement.agreement_installment_id, []
                 ).append(event)
             linked_contribution = contribution_by_id.get(settlement.contribution_id)
+            loan_cycle_id = None
+            if settlement.loan_installment_id is not None:
+                linked_installment = db.get(LoanInstallment, settlement.loan_installment_id)
+                linked_loan = db.get(Loan, linked_installment.loan_id) if linked_installment is not None else None
+                if linked_loan is not None and linked_loan.member_id == settlement.member_id:
+                    loan_cycle_id = linked_loan.cycle_id
+            elif settlement.agreement_installment_id is not None:
+                linked_agreement_installment = db.get(AgreementInstallment, settlement.agreement_installment_id)
+                linked_agreement = (
+                    db.get(CollectionAgreement, linked_agreement_installment.agreement_id)
+                    if linked_agreement_installment is not None else None
+                )
+                linked_loan = db.get(Loan, linked_agreement.loan_id) if linked_agreement is not None else None
+                if (
+                    linked_agreement is not None and linked_loan is not None
+                    and linked_agreement.member_id == settlement.member_id
+                    and linked_loan.member_id == settlement.member_id
+                ):
+                    loan_cycle_id = linked_loan.cycle_id
             gains.extend(_gain_from_event(
                 event, settlement,
                 linked_contribution.cycle_id if linked_contribution is not None else None,
+                loan_cycle_id,
             ))
             if event.component == "AGREEMENT" and Decimal(settlement.principal_applied or 0):
                 gaps.append(("AGREEMENT_BASE_COMPONENT_NOT_CLASSIFIED", str(settlement.id)))
+
+        external_gain_rows = (
+            db.query(CycleRealizedGainEvent)
+            .filter(CycleRealizedGainEvent.cycle_id == cycle_id)
+            .order_by(CycleRealizedGainEvent.id)
+            .all()
+        )
+        external_kind = {
+            "INVESTMENT_YIELD_REALIZED": "INVESTMENT_YIELD",
+            "OTHER_REALIZED_GAIN": "OTHER_REALIZED_GAIN",
+        }
+        for row in external_gain_rows:
+            if row.event_type not in external_kind:
+                raise ClosingContractGap("UNTYPED_GAIN", str(row.id))
+            amount = Decimal(row.amount)
+            if row.reversal_of_id is not None:
+                amount = -amount
+            gains.append(GainEvidence(
+                source_id=f"cycle_realized_gain_event:{row.id}",
+                source_type="CYCLE_REALIZED_GAIN_EVENT",
+                kind=external_kind[row.event_type],
+                cycle_id=row.cycle_id,
+                amount=amount,
+                occurred_at=_stored_utc(row.realized_at),
+            ))
 
         for row in contribution_rows:
             if row.id not in settled_contribution_ids:

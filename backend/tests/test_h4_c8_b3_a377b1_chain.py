@@ -1,5 +1,6 @@
 """Run the real Alembic chain without application secret settings."""
 import os
+import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -15,18 +16,50 @@ ROOT = Path(__file__).parents[1]
 
 
 def chain(url):
-    config = Config(str(ROOT / "alembic.ini"))
-    config.set_main_option("script_location", str(ROOT / "alembic"))
-    fake = ModuleType("app.core.config")
-    fake.settings = SimpleNamespace(database_url=url)
-    with patch.dict(sys.modules, {"app.core.config": fake}):
-        command.upgrade(config, "head")
-        engine = sa.create_engine(url)
+    env = os.environ.copy()
+    env["A377_CHAIN_URL"] = url
+    script = r"""
+import os
+import sys
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
+from unittest.mock import patch
+
+import sqlalchemy as sa
+from alembic import command
+from alembic.config import Config
+
+ROOT = Path.cwd()
+url = os.environ["A377_CHAIN_URL"]
+
+config = Config(str(ROOT / "alembic.ini"))
+config.set_main_option("script_location", str(ROOT / "alembic"))
+
+fake = ModuleType("app.core.config")
+fake.settings = SimpleNamespace(database_url=url)
+
+with patch.dict(sys.modules, {"app.core.config": fake}):
+    command.upgrade(config, "head")
+
+    engine = sa.create_engine(url)
+    try:
         with engine.connect() as connection:
-            assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "0097_cycle_participation_a377b1"
+            revision = connection.execute(
+                sa.text("SELECT version_num FROM alembic_version")
+            ).scalar_one()
+            assert revision == "0098_cycle_closing_persistence_a377b2"
+    finally:
         engine.dispose()
-        command.downgrade(config, "-1")
-        command.upgrade(config, "head")
+
+    command.downgrade(config, "-1")
+    command.upgrade(config, "head")
+"""
+    subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=ROOT,
+        env=env,
+        check=True,
+    )
 
 
 def test_sqlite_full_chain_upgrade_downgrade_upgrade(tmp_path):
