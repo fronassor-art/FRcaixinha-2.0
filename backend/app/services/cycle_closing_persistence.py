@@ -13,12 +13,13 @@ from datetime import date, datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models import (
     CycleAnnualClosing,
+    CycleAnnualClosingReview,
     CycleAnnualClosingSnapshot,
     CycleRealizedGainEvent,
     Payment,
@@ -585,26 +586,88 @@ def persist_approved_cycle_closing_snapshot(
     db: Session,
     *,
     closing_id: int,
-    closing_cutoff_at: datetime,
+    closing_cutoff_at: datetime | None = None,
     closed_by: int | None = None,
+    expected_state_revision: int | None = None,
 ) -> CycleAnnualClosingSnapshot:
-    from app.services.cycle_closing import preview_cycle_closing
+    from app.services.cycle_closing_workflow import (
+        ClosingWorkflowConflict, StaleClosingReview, _actor, _stored_utc,
+        _lock_closing_financial_sources,
+        audit_closed_cycle_closing, revalidate_cycle_closing_review,
+    )
 
-    cutoff = _utc(closing_cutoff_at)
     closing = db.get(CycleAnnualClosing, closing_id)
     if closing is None:
         raise ValueError("annual closing process not found")
+    if closing.status == "CLOSED" and closing.approved_review_id is not None:
+        if expected_state_revision is None or expected_state_revision != closing.state_revision:
+            raise ClosingWorkflowConflict("stale annual closing state revision")
+        existing = db.execute(
+            select(CycleAnnualClosingSnapshot).where(CycleAnnualClosingSnapshot.closing_id == closing.id)
+        ).scalar_one_or_none()
+        review = db.get(CycleAnnualClosingReview, closing.approved_review_id)
+        latest_review_id = db.execute(
+            select(CycleAnnualClosingReview.id)
+            .where(CycleAnnualClosingReview.closing_id == closing.id)
+            .order_by(CycleAnnualClosingReview.review_version.desc()).limit(1)
+        ).scalar_one_or_none()
+        if (
+            existing is not None and review is not None
+            and review.closing_id == closing.id and review.cycle_id == closing.cycle_id
+            and latest_review_id == review.id
+            and review.process_revision + 2 == closing.state_revision
+            and closing.approved_at is not None and closing.approved_by is not None
+            and closing.closed_at is not None
+            and closing.closed_by is not None and existing.created_by == closing.closed_by
+            and (closed_by is None or closed_by == closing.closed_by)
+            and (closing_cutoff_at is None or _utc(closing_cutoff_at) == _stored_utc(review.closing_cutoff_at))
+            and existing.cycle_id == closing.cycle_id
+            and _stored_utc(existing.closing_cutoff_at) == _stored_utc(review.closing_cutoff_at)
+        ):
+            verify_cycle_annual_closing_snapshot(existing)
+            snapshot_memory = _parse_canonical_payload(existing.canonical_payload)
+            if (
+                existing.calculation_version == review.calculation_version
+                and snapshot_memory.get("calculation_version") == review.calculation_version
+                and snapshot_memory.get("calculation_hash") == review.calculation_hash
+            ):
+                return existing
+        raise ClosingWorkflowConflict("closed annual closing does not match requested snapshot")
     if closing.status != "MASTER_APPROVED":
         raise ValueError("annual closing must be approved by Master before snapshot persistence")
+    if expected_state_revision is None or closing.state_revision != expected_state_revision:
+        raise ClosingWorkflowConflict("stale annual closing state revision")
+    review = db.get(CycleAnnualClosingReview, closing.approved_review_id) if closing.approved_review_id is not None else None
+    if review is None or review.closing_id != closing.id or review.cycle_id != closing.cycle_id:
+        raise ValueError("annual closing has no valid approved review")
+    if closing.approved_at is None or closing.approved_by is None:
+        raise ValueError("annual closing has no audited Master approval")
+    _actor(db, closing.approved_by, master=True)
+    latest = db.execute(
+        select(CycleAnnualClosingReview.id)
+        .where(CycleAnnualClosingReview.closing_id == closing.id)
+        .order_by(CycleAnnualClosingReview.review_version.desc()).limit(1)
+    ).scalar_one_or_none()
+    if latest != review.id or review.process_revision + 1 != closing.state_revision:
+        raise StaleClosingReview("approved annual closing review is not current")
+    cutoff = _stored_utc(review.closing_cutoff_at)
+    if closing_cutoff_at is not None and _utc(closing_cutoff_at) != cutoff:
+        raise ValueError("snapshot cutoff differs from approved annual closing review")
+    actor_id = closed_by if closed_by is not None else closing.approved_by
+    if actor_id is None:
+        raise ValueError("annual closing actor is required")
+    _actor(db, actor_id, master=False)
     if db.execute(
         select(CycleAnnualClosingSnapshot.id).where(
             CycleAnnualClosingSnapshot.cycle_id == closing.cycle_id
         )
     ).scalar_one_or_none() is not None:
         raise ValueError("official snapshot already exists for Cycle")
-    result = preview_cycle_closing(
-        db, cycle_id=closing.cycle_id, closing_cutoff_at=cutoff
+    _lock_closing_financial_sources(
+        db, closing_id=closing_id, status="MASTER_APPROVED",
+        revision=expected_state_revision,
     )
+    result = revalidate_cycle_closing_review(db, review)
     totals = _validate_result_totals(result, closing.cycle_id)
     payload = canonical_snapshot_payload(result)
     digest = snapshot_payload_hash(payload)
@@ -617,18 +680,30 @@ def persist_approved_cycle_closing_snapshot(
         canonical_payload=payload,
         payload_hash=digest,
         **totals,
-        created_by=closed_by if closed_by is not None else closing.approved_by,
+        created_by=actor_id,
     )
-    db.add(snapshot)
-    db.flush()
     now = datetime.now(timezone.utc)
-    closing.status = "CLOSED"
-    closing.state_revision += 1
-    closing.closed_at = now
-    closing.closed_by = closed_by if closed_by is not None else closing.approved_by
-    closing.updated_at = now
-    closing.updated_by = closing.closed_by
-    db.flush()
+    with db.begin_nested():
+        claimed = db.execute(
+            update(CycleAnnualClosing)
+            .where(
+                CycleAnnualClosing.id == closing_id,
+                CycleAnnualClosing.status == "MASTER_APPROVED",
+                CycleAnnualClosing.state_revision == expected_state_revision,
+                CycleAnnualClosing.approved_review_id == review.id,
+            )
+            .values(status="CLOSED", state_revision=expected_state_revision + 1,
+                    closed_at=now, closed_by=actor_id, updated_at=now, updated_by=actor_id)
+            .execution_options(synchronize_session=False)
+        )
+        if claimed.rowcount != 1:
+            raise ClosingWorkflowConflict("annual closing snapshot was claimed concurrently")
+        db.add(snapshot)
+        db.flush()
+        audit_closed_cycle_closing(db, closing=closing, review=review,
+                                   actor_id=actor_id, revision_before=expected_state_revision)
+        db.flush()
+    db.refresh(closing)
     return snapshot
 
 
@@ -645,7 +720,10 @@ def verify_cycle_annual_closing_snapshot(snapshot: CycleAnnualClosingSnapshot) -
         raise ValueError("snapshot payload has no cutoff")
     try:
         parsed_cutoff = datetime.fromisoformat(payload_cutoff.replace("Z", "+00:00"))
-        if _utc(parsed_cutoff) != _utc(snapshot.closing_cutoff_at):
+        stored_cutoff = snapshot.closing_cutoff_at
+        if stored_cutoff.tzinfo is None:
+            stored_cutoff = stored_cutoff.replace(tzinfo=timezone.utc)
+        if _utc(parsed_cutoff) != _utc(stored_cutoff):
             raise ValueError("snapshot cutoff does not match payload")
     except (TypeError, ValueError) as exc:
         raise ValueError("snapshot cutoff is invalid or inconsistent") from exc

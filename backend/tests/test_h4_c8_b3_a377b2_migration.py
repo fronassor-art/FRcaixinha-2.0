@@ -120,7 +120,7 @@ def _run_roundtrip(url, monkeypatch):
         _insert_legacy_loan(connection)
     engine.dispose()
 
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, REVISION)
     engine = sa.create_engine(url)
     with engine.begin() as connection:
         assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == REVISION
@@ -155,7 +155,7 @@ def _run_roundtrip(url, monkeypatch):
         assert connection.execute(text("SELECT count(*) FROM loans WHERE id=1")).scalar_one() == 1
     engine.dispose()
 
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, REVISION)
     engine = sa.create_engine(url)
     with engine.connect() as connection:
         assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == REVISION

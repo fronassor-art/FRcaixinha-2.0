@@ -875,6 +875,10 @@ class CycleAnnualClosing(Base):
     updated_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", name="fk_cycle_annual_closings_updated_by", ondelete="RESTRICT"))
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     approved_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", name="fk_cycle_annual_closings_approved_by", ondelete="RESTRICT"))
+    approved_review_id: Mapped[int | None] = mapped_column(
+        ForeignKey("cycle_annual_closing_reviews.id", name="fk_cycle_annual_closings_approved_review", ondelete="RESTRICT"),
+        nullable=True,
+    )
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     closed_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", name="fk_cycle_annual_closings_closed_by", ondelete="RESTRICT"))
 
@@ -887,6 +891,78 @@ class CycleAnnualClosing(Base):
         ),
         CheckConstraint("state_revision >= 0", name="ck_cycle_annual_closings_revision"),
         Index("ix_cycle_annual_closings_status", "status"),
+    )
+
+
+class CycleAnnualClosingCashEvidence(Base):
+    __tablename__ = "cycle_annual_closing_cash_evidence"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    closing_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    cycle_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    file_id: Mapped[int] = mapped_column(ForeignKey("workflow_execution_evidence_files.id", ondelete="RESTRICT"), nullable=False)
+    storage_reference: Mapped[str] = mapped_column(String(180), nullable=False)
+    file_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    declared_cash_balance: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    closing_cutoff_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    uploaded_by: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
+    attested_by: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
+    attested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=now_utc)
+    __table_args__ = (
+        ForeignKeyConstraint(["closing_id", "cycle_id"], ["cycle_annual_closings.id", "cycle_annual_closings.cycle_id"], name="fk_cycle_cash_evidence_closing_cycle", ondelete="RESTRICT"),
+        UniqueConstraint("id", "closing_id", "cycle_id", name="uq_cycle_cash_evidence_id_closing_cycle"),
+        CheckConstraint("declared_cash_balance >= 0", name="ck_cycle_cash_evidence_balance"),
+        CheckConstraint("length(file_sha256) = 64", name="ck_cycle_cash_evidence_hash"),
+    )
+
+
+class CycleAnnualClosingReview(Base):
+    __tablename__ = "cycle_annual_closing_reviews"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    closing_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    cycle_id: Mapped[int] = mapped_column(ForeignKey("cycles.id", ondelete="RESTRICT"), nullable=False)
+    cash_evidence_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    review_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    process_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    closing_cutoff_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    calculation_version: Mapped[str] = mapped_column(String(60), nullable=False)
+    calculation_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    ledger_cash_balance: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    actual_cash_balance: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    reconciliation_difference: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    participant_payout_liability: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    administration_fee: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    required_liquidity: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    liquidity_surplus: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    cash_evidence_reference: Mapped[str] = mapped_column(String(500), nullable=False)
+    cash_evidence_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    reconciliation_payload: Mapped[str] = mapped_column(Text(), nullable=False)
+    reconciliation_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    review_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=now_utc)
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["closing_id", "cycle_id"],
+            ["cycle_annual_closings.id", "cycle_annual_closings.cycle_id"],
+            name="fk_cycle_annual_reviews_closing_cycle", ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["cash_evidence_id", "closing_id", "cycle_id"],
+            ["cycle_annual_closing_cash_evidence.id", "cycle_annual_closing_cash_evidence.closing_id", "cycle_annual_closing_cash_evidence.cycle_id"],
+            name="fk_cycle_annual_reviews_cash_evidence", ondelete="RESTRICT",
+        ),
+        UniqueConstraint("closing_id", "review_version", name="uq_cycle_annual_reviews_version"),
+        UniqueConstraint("id", "closing_id", name="uq_cycle_annual_reviews_id_closing"),
+        UniqueConstraint("closing_id", "review_hash", name="uq_cycle_annual_reviews_hash"),
+        CheckConstraint("review_version >= 1 AND process_revision >= 1", name="ck_cycle_annual_reviews_versions"),
+        CheckConstraint("actual_cash_balance >= 0 AND reconciliation_difference = 0 AND liquidity_surplus >= 0", name="ck_cycle_annual_reviews_gates"),
+        CheckConstraint("required_liquidity = participant_payout_liability + administration_fee", name="ck_cycle_annual_reviews_liquidity_equation"),
+        CheckConstraint("length(calculation_hash) = 64 AND length(cash_evidence_hash) = 64 AND length(reconciliation_hash) = 64 AND length(review_hash) = 64", name="ck_cycle_annual_reviews_hash_lengths"),
+        Index("ix_cycle_annual_reviews_closing_created", "closing_id", "created_at"),
     )
 
 
@@ -1101,7 +1177,7 @@ class Notification(Base):
 # v0.35: Ledger is append-only. Corrections must be represented by a reversal entry.
 @event.listens_for(__import__("sqlalchemy").orm.Session, "before_flush")
 def _protect_ledger_mutations(session, flush_context, instances):
-    immutable_types = (LedgerEntry, CycleAnnualClosingSnapshot, CycleRealizedGainEvent)
+    immutable_types = (LedgerEntry, CycleAnnualClosingSnapshot, CycleAnnualClosingReview, CycleAnnualClosingCashEvidence, CycleRealizedGainEvent)
     for obj in list(session.dirty):
         if isinstance(obj, immutable_types):
             raise RuntimeError(f"{type(obj).__name__} é imutável; use uma linha compensatória quando aplicável.")

@@ -47,7 +47,7 @@ with patch.dict(sys.modules, {"app.core.config": fake}):
             revision = connection.execute(
                 sa.text("SELECT version_num FROM alembic_version")
             ).scalar_one()
-            assert revision == "0098_cycle_closing_persistence_a377b2"
+            assert revision == "0099_cycle_closing_review_a377b3r1"
     finally:
         engine.dispose()
 

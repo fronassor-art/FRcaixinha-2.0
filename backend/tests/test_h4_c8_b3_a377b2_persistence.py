@@ -29,6 +29,10 @@ from app.services.cycle_closing_persistence import (
     persist_approved_cycle_closing_snapshot, record_realized_gain_event,
     reverse_realized_gain_event, snapshot_payload_hash, verify_cycle_annual_closing_snapshot,
 )
+from app.services.cycle_closing_workflow import (
+    prepare_cycle_closing_review, approve_cycle_closing_review,
+)
+from app.services.ledger import post_entry
 
 D = Decimal
 CUTOFF = datetime(2027, 12, 10, 18, tzinfo=timezone.utc)
@@ -38,7 +42,9 @@ HASH = hashlib.sha256(b"document evidence").hexdigest()
 
 
 @pytest.fixture()
-def db():
+def db(tmp_path, monkeypatch):
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "workflow_evidence_storage_root", str(tmp_path))
     engine = sa.create_engine("sqlite:///:memory:")
 
     @event.listens_for(engine, "connect")
@@ -59,6 +65,8 @@ def seed_cycle(db, *, cycle_id=1, member_id=1, participation_id=1):
                 cpf=f"0000000000{member_id:04d}", password_hash="unused"))
     db.add(Group(id=member_id, name=f"Group {member_id}"))
     db.flush()
+
+
     db.add(Member(id=member_id, user_id=member_id, group_id=member_id))
     db.add(Cycle(id=cycle_id, start_date=date(2026, 12, 10), entry_deadline=date(2027, 1, 10),
                  closing_reference_date=date(2027, 12, 10), monthly_amount=D("150.00"),
@@ -71,6 +79,50 @@ def seed_cycle(db, *, cycle_id=1, member_id=1, participation_id=1):
                         competence=date(2027, 1, 1), amount=D("100.00"), status="PAID",
                         paid_amount=D("100.00"), paid_at=BEFORE))
     db.flush()
+
+
+def approve_for_snapshot(db, closing):
+    master = db.get(User, 1)
+    master.role = "ADMIN"
+    master.is_master = True
+    db.flush()
+    post_entry(db, "CAIXINHA", "CREDIT", D("100.00"), "TEST_CASH", str(closing.id))
+    db.flush()
+    import hashlib
+    from app.models import (OperationalWorkflowTask, OperationalWorkflowOrchestration,
+                            WorkflowExecutionEvidence, WorkflowExecutionEvidenceFile)
+    from app.services.workflow_evidence_storage_v068 import _storage_path
+    task = OperationalWorkflowTask(action_code="CLOSING_EVIDENCE", status="OPEN", priority="MEDIUM", created_by=1)
+    db.add(task)
+    db.flush()
+    db.add(OperationalWorkflowOrchestration(task_id=task.id, priority="MEDIUM", sla_status="ON_TRACK",
+                                            execution_state="IN_EXECUTION", started_by=1))
+    evidence = WorkflowExecutionEvidence(task_id=task.id, added_by=1, evidence_type="ATTACHMENT",
+        title="Cash position", content="stored", content_hash=hashlib.sha256(b"stored").hexdigest())
+    db.add(evidence)
+    db.flush()
+    key = f"closing-cash-{closing.id}.txt"
+    payload = b"cash statement"
+    path = _storage_path(key)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload)
+    stored_file = WorkflowExecutionEvidenceFile(evidence_id=evidence.id, version=1,
+        original_name="cash.txt", storage_key=key, content_type="text/plain", size_bytes=len(payload),
+        sha256=hashlib.sha256(payload).hexdigest(), uploaded_by=1)
+    db.add(stored_file)
+    db.flush()
+    from app.services.cycle_closing_workflow import record_cycle_annual_closing_cash_evidence
+    cash_evidence = record_cycle_annual_closing_cash_evidence(db, closing_id=closing.id,
+        file_id=stored_file.id, declared_cash_balance=D("100.00"), observed_at=CUTOFF,
+        closing_cutoff_at=CUTOFF, attested_by=1)
+    review = prepare_cycle_closing_review(
+        db, closing_id=closing.id, expected_state_revision=closing.state_revision,
+        closing_cutoff_at=CUTOFF, cash_evidence_id=cash_evidence.id, actor_id=1,
+    )
+    approve_cycle_closing_review(
+        db, closing_id=closing.id, review_id=review.id,
+        expected_state_revision=closing.state_revision, actor_id=1,
+    )
 
 
 def gain(db, *, event_type="INVESTMENT_YIELD_REALIZED", amount=D("20.00"),
@@ -412,10 +464,10 @@ def test_external_gain_after_cutoff_is_not_included(db):
 def test_snapshot_is_canonical_hashable_unique_and_immutable(db):
     seed_cycle(db)
     closing = create_or_get_cycle_annual_closing(db, cycle_id=1)
-    closing.status = "MASTER_APPROVED"
-    closing.approved_at = BEFORE
+    approve_for_snapshot(db, closing)
     snapshot = persist_approved_cycle_closing_snapshot(
         db, closing_id=closing.id, closing_cutoff_at=CUTOFF, closed_by=None,
+        expected_state_revision=closing.state_revision,
     )
     assert snapshot.snapshot_version == SNAPSHOT_VERSION
     assert snapshot.payload_hash == snapshot_payload_hash(snapshot.canonical_payload)
@@ -463,9 +515,10 @@ def test_valid_financial_memory_change_changes_canonical_hash(db):
 def test_snapshot_db_trigger_and_one_per_cycle(db):
     seed_cycle(db)
     closing = create_or_get_cycle_annual_closing(db, cycle_id=1)
-    closing.status = "MASTER_APPROVED"
+    approve_for_snapshot(db, closing)
     snapshot = persist_approved_cycle_closing_snapshot(db, closing_id=closing.id,
-                                                        closing_cutoff_at=CUTOFF)
+                                                        closing_cutoff_at=CUTOFF,
+                                                        expected_state_revision=closing.state_revision)
     with pytest.raises(sa.exc.DatabaseError):
         with db.begin_nested():
             db.execute(text("UPDATE cycle_annual_closing_snapshots SET payload_hash=:hash WHERE id=:id"),
