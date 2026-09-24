@@ -11,6 +11,7 @@ from sqlalchemy.pool import StaticPool
 from app.db.base import Base
 from app.models import Contribution, Group, LedgerEntry, Loan, LoanInstallment, Member, MemberFinancialEntry, Payment, PaymentSettlement, User
 from app.services.ledger import verify_ledger_chain
+from app.services.late_charge_v1 import financial_civil_date
 from app.services import payment_settlement as payment_settlement_service
 from app.services.payment_settlement import settle_confirmed_pix_payment
 
@@ -136,10 +137,11 @@ def test_partial_contribution_keeps_partial_status_and_persists_received_amount(
 def test_overdue_contribution_is_determined_from_due_date_and_quits_to_paid():
     db = _db()
     member = _member(db, "overdue")
-    contribution = _contribution(db, member, due_date=date.today() - timedelta(days=1))
+    confirmed_at = datetime.now(timezone.utc)
+    contribution = _contribution(db, member, due_date=financial_civil_date(confirmed_at) - timedelta(days=1))
     payment = _payment(db, suffix="overdue", amount="100.00", reference_type="CONTRIBUTION", reference_id=str(contribution.id))
 
-    settlement = _settle(db, payment)
+    settlement = _settle(db, payment, when=confirmed_at)
 
     assert settlement.obligation_status_before == "OVERDUE"
     assert settlement.obligation_status_after == "PAID"
@@ -339,10 +341,11 @@ def test_repeated_payment_returns_immutable_receipt_without_duplicate_ledger_or_
 def test_partial_payment_after_due_date_remains_overdue_with_outstanding_balance():
     db = _db()
     member = _member(db, "overdue-partial")
-    contribution = _contribution(db, member, due_date=date.today() - timedelta(days=1))
+    confirmed_at = datetime.now(timezone.utc)
+    contribution = _contribution(db, member, due_date=financial_civil_date(confirmed_at) - timedelta(days=1))
     payment = _payment(db, suffix="overdue-partial", amount="100.00", received="40.00", reference_type="CONTRIBUTION", reference_id=str(contribution.id))
 
-    settlement = _settle(db, payment)
+    settlement = _settle(db, payment, when=confirmed_at)
 
     assert contribution.paid_amount == Decimal("40.00")
     assert contribution.status == "OVERDUE"

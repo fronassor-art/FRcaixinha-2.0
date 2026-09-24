@@ -3,7 +3,7 @@ import hashlib
 import hmac
 import json
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -21,6 +21,7 @@ from app.db.session import get_db
 from app.main import app
 from app.models import Contribution, Group, LedgerEntry, Loan, LoanInstallment, Member, Payment, PaymentSettlement, User
 from app.schemas.finance import ContributionIn
+from app.services.late_charge_v1 import financial_civil_date
 from app.services.payment_settlement import settle_confirmed_pix_payment
 
 
@@ -189,11 +190,12 @@ def test_receipt_is_authorized_immutable_and_unavailable_before_settlement():
 def test_contribution_payment_status_exposes_all_official_states():
     db = SessionLocal()
     user, member = _seed(db, "states")
+    financial_today = financial_civil_date(datetime.now(timezone.utc))
     rows = [
-        Contribution(member_id=member.id, competence=date(2026, 5, 1), amount=Decimal("10"), due_date=date.today() + timedelta(days=1), paid_amount=Decimal("0"), status="PENDING"),
-        Contribution(member_id=member.id, competence=date(2026, 6, 1), amount=Decimal("10"), due_date=date.today() + timedelta(days=1), paid_amount=Decimal("4"), status="PARTIAL"),
-        Contribution(member_id=member.id, competence=date(2026, 7, 1), amount=Decimal("10"), due_date=date.today() - timedelta(days=1), paid_amount=Decimal("0"), status="PENDING"),
-        Contribution(member_id=member.id, competence=date(2026, 8, 1), amount=Decimal("10"), due_date=date.today() - timedelta(days=1), paid_amount=Decimal("10"), status="PAID"),
+        Contribution(member_id=member.id, competence=date(2026, 5, 1), amount=Decimal("10"), due_date=financial_today + timedelta(days=1), paid_amount=Decimal("0"), status="PENDING"),
+        Contribution(member_id=member.id, competence=date(2026, 6, 1), amount=Decimal("10"), due_date=financial_today + timedelta(days=1), paid_amount=Decimal("4"), status="PARTIAL"),
+        Contribution(member_id=member.id, competence=date(2026, 7, 1), amount=Decimal("10"), due_date=financial_today - timedelta(days=1), paid_amount=Decimal("0"), status="PENDING"),
+        Contribution(member_id=member.id, competence=date(2026, 8, 1), amount=Decimal("10"), due_date=financial_today - timedelta(days=1), paid_amount=Decimal("10"), status="PAID"),
     ]
     db.add_all(rows)
     db.commit()
