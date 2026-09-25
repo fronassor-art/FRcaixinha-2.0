@@ -17,9 +17,10 @@ from app.services.ledger import post_entry
 from app.services.member_financial import add_member_financial_entry
 from app.services.loan_amortization import calculate_linear_amortization
 from app.services.loan_engine_v17 import add_months
+from app.core.seed_safety import read_required_seed_secret, require_seed_execution
 
 
-TEST_PASSWORD = "Homologacao123!"
+_ALLOWED_SEED_ENVS = {"development", "test", "homologation", "staging"}
 GROUP_NAME = "FRcaixinha HOMOLOGAÇÃO 2026"
 CONTRIBUTION_AMOUNT = Decimal("150.00")
 
@@ -54,7 +55,7 @@ def get_or_create_group(db):
     return group
 
 
-def get_or_create_user(db, index, name, email, cpf, income):
+def get_or_create_user(db, index, name, email, cpf, income, password):
     user = db.query(User).filter(User.email == email).first()
 
     if user is None:
@@ -64,7 +65,7 @@ def get_or_create_user(db, index, name, email, cpf, income):
             name=name,
             email=email,
             cpf=cpf,
-            password_hash=hash_password(TEST_PASSWORD),
+            password_hash=hash_password(password),
             role="USER",
             is_active=True,
         )
@@ -276,6 +277,12 @@ def audit(db, user_id, action, entity_type, entity_id, details):
 
 
 def seed():
+    require_seed_execution(
+        seed_name="homologation",
+        confirmation_env="FRCAIXINHA_ENABLE_HOMOLOGATION_SEED",
+        allowed_non_production_envs=_ALLOWED_SEED_ENVS,
+    )
+    password = read_required_seed_secret("FRCAIXINHA_HOMOLOGATION_PASSWORD")
     db = SessionLocal()
 
     try:
@@ -329,6 +336,7 @@ def seed():
                 email,
                 cpf,
                 income,
+                password,
             )
             member = create_member_if_needed(
                 db,
@@ -489,7 +497,6 @@ def seed():
         print("Ledger coletivo criado via post_entry().")
         print("Saldo próprio criado via MemberFinancialEntry.")
         print("Auditoria de homologação criada.")
-        print("Senha dos usuários: Homologacao123!")
         print("======================================")
         print("SEED CONCLUÍDO")
         print("======================================")
