@@ -5,6 +5,7 @@ from app.db.session import get_db
 from app.models import User, UserSession, LoginAttempt, PasswordResetToken
 from app.schemas.auth import RegisterIn, LoginIn, TokenOut, PasswordChangeIn, PasswordResetRequestIn, PasswordResetConfirmIn, TwoFactorVerifyIn, TwoFactorCodeIn
 from app.core.security import hash_password, verify_password, create_access_token, new_session_jti, new_reset_token, hash_reset_token
+from app.core.cpf import CPFValidationError, normalize_cpf
 from app.core.config import settings
 from app.services.notifications_v12 import create_notification, send_email
 from app.models import UserSecurity, TrustedDevice, SecurityEvent
@@ -41,7 +42,10 @@ def register(data: RegisterIn, request: Request, db: Session = Depends(get_db)):
     if not data.accept_terms:
         raise HTTPException(400, "É necessário aceitar os termos.")
     email = data.email.lower()
-    cpf = "".join(c for c in data.cpf if c.isdigit())
+    try:
+        cpf = normalize_cpf(data.cpf)
+    except CPFValidationError:
+        raise HTTPException(422, "CPF inválido.") from None
     if db.query(User).filter(User.email == email).first():
         raise HTTPException(409, "E-mail já cadastrado.")
     if db.query(User).filter(User.cpf == cpf).first():
