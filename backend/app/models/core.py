@@ -1012,6 +1012,42 @@ class CycleAnnualClosingSnapshot(Base):
     )
 
 
+class CycleAnnualClosingPayoutObligation(Base):
+    """Immutable individual amount owed according to an official closing snapshot."""
+
+    __tablename__ = "cycle_annual_closing_payout_obligations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    snapshot_id: Mapped[int] = mapped_column(
+        ForeignKey("cycle_annual_closing_snapshots.id", name="fk_cpo_snapshot", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    closing_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    cycle_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    member_id: Mapped[int] = mapped_column(
+        ForeignKey("members.id", name="fk_cpo_member", ondelete="RESTRICT"), nullable=False,
+    )
+    cycle_participation_id: Mapped[int] = mapped_column(
+        ForeignKey("cycle_participations.id", name="fk_cpo_participation", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    source_payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=now_utc)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["closing_id", "cycle_id"],
+            ["cycle_annual_closings.id", "cycle_annual_closings.cycle_id"],
+            name="fk_cpo_closing_cycle", ondelete="RESTRICT",
+        ),
+        UniqueConstraint("snapshot_id", "member_id", name="uq_cpo_snapshot_member"),
+        UniqueConstraint("snapshot_id", "cycle_participation_id", name="uq_cpo_snapshot_part"),
+        CheckConstraint("amount >= 0", name="ck_cpo_amount_nonnegative"),
+        CheckConstraint("length(source_payload_hash) = 64", name="ck_cpo_hash_length"),
+    )
+
+
 class CycleRealizedGainEvent(Base):
     __tablename__ = "cycle_realized_gain_events"
 
@@ -1177,7 +1213,7 @@ class Notification(Base):
 # v0.35: Ledger is append-only. Corrections must be represented by a reversal entry.
 @event.listens_for(__import__("sqlalchemy").orm.Session, "before_flush")
 def _protect_ledger_mutations(session, flush_context, instances):
-    immutable_types = (LedgerEntry, CycleAnnualClosingSnapshot, CycleAnnualClosingReview, CycleAnnualClosingCashEvidence, CycleRealizedGainEvent)
+    immutable_types = (LedgerEntry, CycleAnnualClosingSnapshot, CycleAnnualClosingPayoutObligation, CycleAnnualClosingReview, CycleAnnualClosingCashEvidence, CycleRealizedGainEvent)
     for obj in list(session.dirty):
         if isinstance(obj, immutable_types):
             raise RuntimeError(f"{type(obj).__name__} é imutável; use uma linha compensatória quando aplicável.")
