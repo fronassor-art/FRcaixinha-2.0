@@ -299,13 +299,40 @@ def test_required_divergent_payout_obligations_fail_closed(db, divergence):
             amount=ZERO, source_hash=snapshot.payload_hash,
         )
     else:
-        db.add(User(id=5, name="Member Three", email="member3@statement.test", cpf="00000000000005", password_hash="unused"))
+        expected_participant = json.loads(snapshot.canonical_payload)["participants"][0]
+        existing_member = db.get(Member, expected_participant["member_id"])
+        assert existing_member is not None
+
+        extra_user = User(
+            name="Member Three",
+            email="member3@statement.test",
+            cpf="00000000000005",
+            password_hash="unused",
+        )
+        db.add(extra_user)
         db.flush()
-        db.add(Member(id=3, user_id=5, group_id=1))
-        db.add(CycleParticipation(id=3, cycle_id=1, member_id=3, status="ACTIVE"))
+
+        extra_member = Member(
+            user_id=extra_user.id,
+            group_id=existing_member.group_id,
+        )
+        db.add(extra_member)
         db.flush()
+
+        extra_participation = CycleParticipation(
+            cycle_id=closing.cycle_id,
+            member_id=extra_member.id,
+            status="ACTIVE",
+        )
+        db.add(extra_participation)
+        db.flush()
+
         helpers._manual_obligation(
-            db, snapshot, closing, member_id=3, participation_id=3,
+            db,
+            snapshot,
+            closing,
+            member_id=extra_member.id,
+            participation_id=extra_participation.id,
             amount=ZERO, source_hash=snapshot.payload_hash,
         )
     before = _counts(db)
