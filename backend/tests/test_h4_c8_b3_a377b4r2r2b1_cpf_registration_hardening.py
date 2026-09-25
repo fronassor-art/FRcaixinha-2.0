@@ -59,7 +59,7 @@ def test_normalize_cpf_rejects_invalid_values_without_echoing_input(value):
         normalize_cpf(value)
 
     assert str(caught.value) == "CPF inválido."
-    assert value is None or str(value) not in str(caught.value)
+    assert value is None or not value or str(value) not in str(caught.value)
 
 
 @pytest.fixture()
@@ -89,7 +89,7 @@ def _register(client: TestClient, cpf: str):
         "/auth/register",
         json={
             "name": "CPF Test User",
-            "email": "cpf-register@example.test",
+            "email": "cpf-register@example.com",
             "cpf": cpf,
             "phone": None,
             "password": "StrongTestPassword123!",
@@ -107,7 +107,7 @@ def test_register_accepts_valid_cpf_and_persists_canonical_digits(
     response = _register(client, cpf)
 
     assert response.status_code == 200
-    user = db.scalar(select(User).where(User.email == "cpf-register@example.test"))
+    user = db.scalar(select(User).where(User.email == "cpf-register@example.com"))
     assert user is not None
     assert user.cpf == VALID_CPF
     assert user.cpf.isascii()
@@ -149,7 +149,7 @@ def test_register_detects_duplicate_cpf_in_plain_and_formatted_forms(
         "/auth/register",
         json={
             "name": "CPF Duplicate User",
-            "email": "cpf-duplicate@example.test",
+            "email": "cpf-duplicate@example.com",
             "cpf": FORMATTED_CPF,
             "phone": None,
             "password": "StrongTestPassword123!",
