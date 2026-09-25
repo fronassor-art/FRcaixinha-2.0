@@ -17,7 +17,12 @@ from app.services.ledger import post_entry
 from app.services.member_financial import add_member_financial_entry
 from app.services.loan_amortization import calculate_linear_amortization
 from app.services.loan_engine_v17 import add_months
-from app.core.seed_safety import read_required_seed_secret, require_seed_execution
+from app.core.cpf import CPFValidationError, normalize_cpf
+from app.core.seed_safety import (
+    read_required_seed_cpf,
+    read_required_seed_secret,
+    require_seed_execution,
+)
 
 
 _ALLOWED_SEED_ENVS = {"development", "test", "homologation", "staging"}
@@ -56,7 +61,22 @@ def get_or_create_group(db):
 
 
 def get_or_create_user(db, index, name, email, cpf, income, password):
+    try:
+        expected_cpf = normalize_cpf(cpf)
+    except CPFValidationError:
+        raise RuntimeError("Configured homologation user identity is invalid.") from None
+
     user = db.query(User).filter(User.email == email).first()
+
+    if user is not None:
+        try:
+            existing_cpf = normalize_cpf(user.cpf)
+        except CPFValidationError:
+            raise RuntimeError("Existing homologation user identity is invalid.") from None
+        if existing_cpf != expected_cpf:
+            raise RuntimeError("Existing homologation user identity conflicts with configuration.")
+    elif db.query(User).filter(User.cpf == expected_cpf).first() is not None:
+        raise RuntimeError("Configured homologation CPF belongs to another user.")
 
     if user is None:
         from app.core.security import hash_password
@@ -64,7 +84,7 @@ def get_or_create_user(db, index, name, email, cpf, income, password):
         user = User(
             name=name,
             email=email,
-            cpf=cpf,
+            cpf=expected_cpf,
             password_hash=hash_password(password),
             role="USER",
             is_active=True,
@@ -283,6 +303,12 @@ def seed():
         allowed_non_production_envs=_ALLOWED_SEED_ENVS,
     )
     password = read_required_seed_secret("FRCAIXINHA_HOMOLOGATION_PASSWORD")
+    homologation_cpfs = [
+        read_required_seed_cpf(f"FRCAIXINHA_HOMOLOGATION_CPF_{index}")
+        for index in range(1, 6)
+    ]
+    if len(set(homologation_cpfs)) != 5:
+        raise RuntimeError("Homologation seed CPFs must be distinct.")
     db = SessionLocal()
 
     try:
@@ -293,35 +319,35 @@ def seed():
                 1,
                 "HOMO Teste Normal",
                 "homo.normal@example.com",
-                "90000000001",
+                homologation_cpfs[0],
                 Decimal("5000.00"),
             ),
             (
                 2,
                 "HOMO Teste Capacidade",
                 "homo.capacidade@example.com",
-                "90000000002",
+                homologation_cpfs[1],
                 Decimal("6000.00"),
             ),
             (
                 3,
                 "HOMO Teste Baixo Saldo",
                 "homo.baixosaldo@example.com",
-                "90000000003",
+                homologation_cpfs[2],
                 Decimal("3000.00"),
             ),
             (
                 4,
                 "HOMO Teste Empréstimo",
                 "homo.emprestimo@example.com",
-                "90000000004",
+                homologation_cpfs[3],
                 Decimal("5000.00"),
             ),
             (
                 5,
                 "HOMO Teste Especial",
                 "homo.especial@example.com",
-                "90000000005",
+                homologation_cpfs[4],
                 Decimal("10000.00"),
             ),
         ]

@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from app.core.cpf import CPFValidationError, normalize_cpf
 from app.core.config import settings
 
 
@@ -47,3 +48,14 @@ def read_required_seed_secret(env_name: str) -> str:
     if not secret.strip():
         raise RuntimeError("Required seed secret is empty.")
     return secret
+
+
+def read_required_seed_cpf(env_name: str) -> str:
+    """Read and canonically validate a seed CPF without exposing its value."""
+    value = os.getenv(env_name)
+    if value is None or not value.strip():
+        raise RuntimeError("Required seed CPF is not configured.")
+    try:
+        return normalize_cpf(value)
+    except CPFValidationError:
+        raise RuntimeError("Required seed CPF is invalid.") from None
