@@ -280,6 +280,49 @@ def _review_memory(review: CycleAnnualClosingReview) -> dict:
     }
 
 
+def verify_cycle_annual_closing_review_read_only(
+    review: CycleAnnualClosingReview,
+) -> bool:
+    """Verify stored review/reconciliation hashes using pure in-memory work only."""
+    try:
+        if not SHA256.fullmatch(review.review_hash or ""):
+            return False
+        if not SHA256.fullmatch(review.reconciliation_hash or ""):
+            return False
+        raw = review.reconciliation_payload
+        if not isinstance(raw, str) or _digest(raw) != review.reconciliation_hash:
+            return False
+
+        def reject_float(_value: str):
+            raise ValueError("float is forbidden in persisted reconciliation")
+
+        memory = json.loads(raw, parse_float=reject_float)
+        if not isinstance(memory, dict) or _canonical(memory) != raw:
+            return False
+        expected_memory = {
+            "schema": RECONCILIATION_SCHEMA,
+            "cycle_id": review.cycle_id,
+            "cutoff": _iso(_stored_utc(review.closing_cutoff_at)),
+            "calculation_hash": review.calculation_hash,
+            "ledger_cash_balance": str(review.ledger_cash_balance),
+            "actual_cash_balance": str(review.actual_cash_balance),
+            "reconciliation_difference": str(review.reconciliation_difference),
+            "participant_payout_liability": str(review.participant_payout_liability),
+            "administration_fee": str(review.administration_fee),
+            "required_liquidity": str(review.required_liquidity),
+            "liquidity_surplus": str(review.liquidity_surplus),
+            "cash_evidence_reference": review.cash_evidence_reference,
+            "cash_evidence_hash": review.cash_evidence_hash,
+            "cash_evidence_id": review.cash_evidence_id,
+            "cash_evidence_file_sha256": review.cash_evidence_hash,
+        }
+        if any(memory.get(key) != value for key, value in expected_memory.items()):
+            return False
+        return _digest(_canonical(_review_memory(review))) == review.review_hash
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return False
+
+
 def _audit(db: Session, *, actor_id: int, closing: CycleAnnualClosing,
            review: CycleAnnualClosingReview, from_status: str, to_status: str,
            revision_before: int, revision_after: int) -> None:
