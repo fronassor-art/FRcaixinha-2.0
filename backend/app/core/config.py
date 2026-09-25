@@ -19,6 +19,7 @@ def _read_file_env(field: str) -> str | None:
 class Settings(BaseSettings):
     database_url: str = ""
     jwt_secret: str = ""
+    payout_destination_encryption_key: str | None = None
     access_token_minutes: int = 60
     password_reset_minutes: int = 30
     session_idle_minutes: int = 30
@@ -64,7 +65,8 @@ settings = Settings()
 # *_FILE takes precedence over the corresponding setting when present.
 for _field in (
     "database_url", "jwt_secret", "mercado_pago_access_token",
-    "mercado_pago_webhook_secret", "smtp_password", "redis_url"
+    "mercado_pago_webhook_secret", "smtp_password", "redis_url",
+    "payout_destination_encryption_key",
 ):
     _value = _read_file_env(_field)
     if _value is not None:

@@ -32,7 +32,7 @@ def test_security_chain_is_present_and_single_head():
         if line.strip()
     ]
 
-    assert heads == ["0100_cycle_payout_obligations_a377b4r1"]
+    assert heads == ["0101_member_payout_destination_a377b4r2"]
 
     rows = revisions()
     assert rows["0006_security_v11"] == "0005_financial_operations"
