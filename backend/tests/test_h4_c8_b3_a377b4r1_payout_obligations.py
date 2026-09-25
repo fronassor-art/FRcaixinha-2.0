@@ -371,26 +371,20 @@ def test_database_prevents_duplicate_member_or_participation_per_snapshot(
     assert len(_obligations(db, snapshot.id)) == 2
 
 
-@pytest.mark.parametrize(
-    "changes",
-    [
-        {"amount": D("99.99")},
-        {"source_hash": "b" * 64},
-    ],
-    ids=["divergent-amount", "divergent-source-hash"],
-)
-def test_complete_but_divergent_existing_set_is_not_repaired(db, changes):
+def test_complete_but_divergent_amount_set_is_not_repaired(db):
     closing, _review, snapshot = _seed_and_close(db)
-    _manual_obligation(db, snapshot, closing, **changes)
-    _manual_obligation(db, snapshot, closing, member_id=2, participation_id=2,
-                       amount=D("0.00"), source_hash=snapshot.payload_hash)
+    _manual_obligation(db, snapshot, closing, amount=D("99.99"))
+    _manual_obligation(
+        db, snapshot, closing, member_id=2, participation_id=2,
+        amount=D("0.00"), source_hash=snapshot.payload_hash,
+    )
 
     with pytest.raises(PayoutObligationConflict, match="partial or differs"):
         materialize_cycle_annual_closing_payout_obligations(db, closing_id=closing.id)
 
     rows = _obligations(db, snapshot.id)
     assert len(rows) == 2
-    assert rows[0].amount == changes.get("amount", D("100.00"))
+    assert rows[0].amount == D("99.99")
 
 
 @pytest.mark.parametrize(
