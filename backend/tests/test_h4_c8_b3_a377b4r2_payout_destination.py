@@ -286,6 +286,7 @@ def test_orm_and_database_block_version_mutation_deletion_and_fake_verification(
         db, member_id=1, key_type="CPF", value=PLAIN_CPF, actor_id=1,
     )
     db.flush()
+    db.commit()
     row_id = row.id
     original_ciphertext = row.encrypted_value
 
@@ -371,7 +372,7 @@ def test_sqlite_partial_unique_index_has_matching_predicate(db):
         item for item in sa.inspect(db.bind).get_indexes("member_payout_destinations")
         if item["name"] == "uq_mpd_one_active_member"
     )
-    assert index["unique"] is True
+    assert bool(index["unique"])
     assert "verification_status" in index["dialect_options"]["sqlite_where"].text
 
 
