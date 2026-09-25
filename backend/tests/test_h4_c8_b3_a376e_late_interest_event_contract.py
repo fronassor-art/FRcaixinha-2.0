@@ -98,7 +98,7 @@ def test_single_head_and_revision_chain():
     assert script.get_heads() == [HEAD_REVISION]
     assert (
         script.get_revision(HEAD_REVISION).down_revision
-        == "0098_cycle_closing_persistence_a377b2"
+        == "0099_cycle_closing_review_a377b3r1"
     )
     assert (
         script.get_revision("0095_pix_attempt_provider_reservation").down_revision
