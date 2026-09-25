@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from decimal import Decimal, InvalidOperation
 
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -26,6 +26,10 @@ ZERO = Decimal("0.00")
 
 class PayoutObligationConflict(ValueError):
     """Stored closing or obligation data cannot safely be materialized/reused."""
+
+    def __init__(self, message: str, *, reason_code: str = "OBLIGATIONS_INCOMPLETE"):
+        self.reason_code = reason_code
+        super().__init__(message)
 
 
 def _lock_closing(db: Session, closing_id: int) -> CycleAnnualClosing:
@@ -71,6 +75,154 @@ def _decimal_cents(value: object, label: str) -> Decimal:
     return amount
 
 
+def _stored_decimal_cents(value: object, label: str) -> Decimal:
+    if not isinstance(value, Decimal) or not value.is_finite() or value.quantize(CENT) != value:
+        raise PayoutObligationConflict(f"{label} must be finite Decimal cents")
+    if value < ZERO:
+        raise PayoutObligationConflict(f"{label} must be non-negative")
+    return value
+
+
+def _load_expected_obligations(db: Session, closing: CycleAnnualClosing):
+    """Read and validate the immutable snapshot source shared by both paths."""
+    if closing.status != "CLOSED":
+        raise PayoutObligationConflict(
+            "annual closing must be CLOSED before payout obligations are materialized",
+            reason_code="CLOSING_NOT_CLOSED",
+        )
+    if closing.approved_review_id is None:
+        raise PayoutObligationConflict(
+            "closed annual closing has no approved review",
+            reason_code="APPROVED_REVIEW_INVALID",
+        )
+
+    snapshot = db.execute(
+        select(CycleAnnualClosingSnapshot).where(
+            CycleAnnualClosingSnapshot.closing_id == closing.id,
+        )
+    ).scalar_one_or_none()
+    if snapshot is None:
+        raise PayoutObligationConflict(
+            "official closing snapshot not found", reason_code="SNAPSHOT_MISSING",
+        )
+    if snapshot.cycle_id != closing.cycle_id:
+        raise PayoutObligationConflict(
+            "snapshot does not belong to the closing Cycle",
+            reason_code="SNAPSHOT_INVALID",
+        )
+    try:
+        verify_cycle_annual_closing_snapshot(snapshot)
+        payload = json.loads(
+            snapshot.canonical_payload,
+            parse_float=lambda _value: (_ for _ in ()).throw(
+                PayoutObligationConflict(
+                    "float is forbidden in the official snapshot",
+                    reason_code="SNAPSHOT_INVALID",
+                )
+            ),
+        )
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise PayoutObligationConflict(
+            "official closing snapshot failed integrity verification",
+            reason_code="SNAPSHOT_INVALID",
+        ) from exc
+    if not isinstance(payload, dict) or payload.get("cycle_id") != closing.cycle_id:
+        raise PayoutObligationConflict(
+            "official snapshot does not match the closing Cycle",
+            reason_code="SNAPSHOT_INVALID",
+        )
+    if not isinstance(snapshot.payload_hash, str) or len(snapshot.payload_hash) != 64:
+        raise PayoutObligationConflict(
+            "official snapshot payload hash is invalid",
+            reason_code="SNAPSHOT_INVALID",
+        )
+
+    review = db.get(CycleAnnualClosingReview, closing.approved_review_id)
+    if (
+        review is None
+        or review.id != closing.approved_review_id
+        or review.closing_id != closing.id
+        or review.cycle_id != closing.cycle_id
+    ):
+        raise PayoutObligationConflict(
+            "approved closing review is missing or mismatched",
+            reason_code="APPROVED_REVIEW_INVALID",
+        )
+    liability = _stored_decimal_cents(
+        review.participant_payout_liability, "approved payout liability",
+    )
+
+    participants = payload.get("participants")
+    if not isinstance(participants, list):
+        raise PayoutObligationConflict(
+            "official snapshot participants are invalid", reason_code="SNAPSHOT_INVALID",
+        )
+    expected: list[tuple[int, int, Decimal]] = []
+    seen_members: set[int] = set()
+    seen_participations: set[int] = set()
+    for participant in participants:
+        if not isinstance(participant, dict):
+            raise PayoutObligationConflict(
+                "official snapshot participant is invalid", reason_code="SNAPSHOT_INVALID",
+            )
+        member_id = participant.get("member_id")
+        participation_id = participant.get("cycle_participation_id")
+        if (
+            isinstance(member_id, bool) or not isinstance(member_id, int) or member_id <= 0
+            or isinstance(participation_id, bool) or not isinstance(participation_id, int)
+            or participation_id <= 0
+        ):
+            raise PayoutObligationConflict(
+                "official snapshot participant identity is invalid",
+                reason_code="SNAPSHOT_INVALID",
+            )
+        if member_id in seen_members or participation_id in seen_participations:
+            raise PayoutObligationConflict(
+                "official snapshot contains duplicate participant identity",
+                reason_code="SNAPSHOT_INVALID",
+            )
+        seen_members.add(member_id)
+        seen_participations.add(participation_id)
+        try:
+            amount = _decimal_cents(participant.get("projected_net"), "projected_net")
+        except PayoutObligationConflict as exc:
+            raise PayoutObligationConflict(
+                str(exc), reason_code="SNAPSHOT_INVALID",
+            ) from exc
+
+        member = db.get(Member, member_id)
+        if member is None:
+            raise PayoutObligationConflict(
+                f"snapshot Member {member_id} does not exist",
+                reason_code="SNAPSHOT_INVALID",
+            )
+        participation = db.get(CycleParticipation, participation_id)
+        if participation is None:
+            raise PayoutObligationConflict(
+                f"snapshot CycleParticipation {participation_id} does not exist",
+                reason_code="SNAPSHOT_INVALID",
+            )
+        if participation.member_id != member_id:
+            raise PayoutObligationConflict(
+                "snapshot participation belongs to a different Member",
+                reason_code="SNAPSHOT_INVALID",
+            )
+        if participation.cycle_id != closing.cycle_id:
+            raise PayoutObligationConflict(
+                "snapshot participation belongs to a different Cycle",
+                reason_code="SNAPSHOT_INVALID",
+            )
+        expected.append((member_id, participation_id, amount))
+
+    total = sum((amount for _member_id, _participation_id, amount in expected), ZERO)
+    if total != liability:
+        raise PayoutObligationConflict(
+            "snapshot participant payout total does not equal the approved payout liability",
+            reason_code="OBLIGATION_RECONCILIATION_MISMATCH",
+        )
+    return snapshot, review, payload, expected, liability
+
+
 def _matches_existing(
     existing: list[CycleAnnualClosingPayoutObligation],
     *,
@@ -90,7 +242,8 @@ def _matches_existing(
             or row.snapshot_id != snapshot.id
             or row.closing_id != closing.id
             or row.cycle_id != closing.cycle_id
-            or Decimal(row.amount) != expected_by_identity[identity]
+            or _stored_decimal_cents(row.amount, "stored payout obligation amount")
+            != expected_by_identity[identity]
             or row.source_payload_hash != snapshot.payload_hash
         ):
             return False
@@ -107,87 +260,7 @@ def materialize_cycle_annual_closing_payout_obligations(
     function never changes the closing status/revision and never commits.
     """
     closing = _lock_closing(db, closing_id)
-    if closing.status != "CLOSED":
-        raise PayoutObligationConflict("annual closing must be CLOSED before payout obligations are materialized")
-    if closing.approved_review_id is None:
-        raise PayoutObligationConflict("closed annual closing has no approved review")
-
-    snapshot = db.execute(
-        select(CycleAnnualClosingSnapshot).where(
-            CycleAnnualClosingSnapshot.closing_id == closing.id,
-        )
-    ).scalar_one_or_none()
-    if snapshot is None:
-        raise PayoutObligationConflict("official closing snapshot not found")
-    if snapshot.cycle_id != closing.cycle_id:
-        raise PayoutObligationConflict("snapshot does not belong to the closing Cycle")
-    try:
-        verify_cycle_annual_closing_snapshot(snapshot)
-        payload = json.loads(
-            snapshot.canonical_payload,
-            parse_float=lambda _value: (_ for _ in ()).throw(
-                PayoutObligationConflict("float is forbidden in the official snapshot")
-            ),
-        )
-    except (TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise PayoutObligationConflict("official closing snapshot failed integrity verification") from exc
-    if not isinstance(payload, dict) or payload.get("cycle_id") != closing.cycle_id:
-        raise PayoutObligationConflict("official snapshot does not match the closing Cycle")
-    if not isinstance(snapshot.payload_hash, str) or len(snapshot.payload_hash) != 64:
-        raise PayoutObligationConflict("official snapshot payload hash is invalid")
-
-    review = db.get(CycleAnnualClosingReview, closing.approved_review_id)
-    if (
-        review is None
-        or review.id != closing.approved_review_id
-        or review.closing_id != closing.id
-        or review.cycle_id != closing.cycle_id
-    ):
-        raise PayoutObligationConflict("approved closing review is missing or mismatched")
-    liability = Decimal(review.participant_payout_liability)
-    if not liability.is_finite() or liability < ZERO or liability.quantize(CENT) != liability:
-        raise PayoutObligationConflict("approved payout liability is invalid")
-
-    participants = payload.get("participants")
-    if not isinstance(participants, list):
-        raise PayoutObligationConflict("official snapshot participants are invalid")
-    expected: list[tuple[int, int, Decimal]] = []
-    seen_members: set[int] = set()
-    seen_participations: set[int] = set()
-    for participant in participants:
-        if not isinstance(participant, dict):
-            raise PayoutObligationConflict("official snapshot participant is invalid")
-        member_id = participant.get("member_id")
-        participation_id = participant.get("cycle_participation_id")
-        if (
-            isinstance(member_id, bool) or not isinstance(member_id, int) or member_id <= 0
-            or isinstance(participation_id, bool) or not isinstance(participation_id, int)
-            or participation_id <= 0
-        ):
-            raise PayoutObligationConflict("official snapshot participant identity is invalid")
-        if member_id in seen_members or participation_id in seen_participations:
-            raise PayoutObligationConflict("official snapshot contains duplicate participant identity")
-        seen_members.add(member_id)
-        seen_participations.add(participation_id)
-        amount = _decimal_cents(participant.get("projected_net"), "projected_net")
-
-        member = db.get(Member, member_id)
-        if member is None:
-            raise PayoutObligationConflict(f"snapshot Member {member_id} does not exist")
-        participation = db.get(CycleParticipation, participation_id)
-        if participation is None:
-            raise PayoutObligationConflict(f"snapshot CycleParticipation {participation_id} does not exist")
-        if participation.member_id != member_id:
-            raise PayoutObligationConflict("snapshot participation belongs to a different Member")
-        if participation.cycle_id != closing.cycle_id:
-            raise PayoutObligationConflict("snapshot participation belongs to a different Cycle")
-        expected.append((member_id, participation_id, amount))
-
-    total = sum((amount for _member_id, _participation_id, amount in expected), ZERO)
-    if total != liability:
-        raise PayoutObligationConflict(
-            "snapshot participant payout total does not equal the approved payout liability"
-        )
+    snapshot, review, _payload, expected, _liability = _load_expected_obligations(db, closing)
 
     existing = db.execute(
         select(CycleAnnualClosingPayoutObligation)
@@ -229,3 +302,65 @@ def materialize_cycle_annual_closing_payout_obligations(
             "payout obligation materialization conflicted with an existing or invalid row"
         ) from exc
     return rows
+
+
+def verify_cycle_annual_closing_payout_obligations_read_only(
+    db: Session, *, closing_id: int,
+) -> list[CycleAnnualClosingPayoutObligation]:
+    """Verify a complete persisted obligation set without locking or writing."""
+    with db.no_autoflush:
+        closing = db.get(CycleAnnualClosing, closing_id)
+        if closing is None:
+            raise PayoutObligationConflict(
+                "annual closing process not found", reason_code="CLOSING_NOT_FOUND",
+            )
+        snapshot, _review, _payload, expected, _liability = _load_expected_obligations(
+            db, closing,
+        )
+        existing = db.execute(
+            select(CycleAnnualClosingPayoutObligation)
+            .where(or_(
+                CycleAnnualClosingPayoutObligation.snapshot_id == snapshot.id,
+                CycleAnnualClosingPayoutObligation.closing_id == closing.id,
+            ))
+            .order_by(CycleAnnualClosingPayoutObligation.id)
+        ).scalars().all()
+        expected_by_identity = {
+            (member_id, participation_id): amount
+            for member_id, participation_id, amount in expected
+        }
+        identities = [(row.member_id, row.cycle_participation_id) for row in existing]
+        if (
+            not existing
+            or len(existing) != len(expected_by_identity)
+            or len(set(identities)) != len(identities)
+            or any(identity not in expected_by_identity for identity in identities)
+            or any(
+                row.snapshot_id != snapshot.id
+                or row.closing_id != closing.id
+                or row.cycle_id != closing.cycle_id
+                or row.source_payload_hash != snapshot.payload_hash
+                for row in existing
+            )
+        ):
+            raise PayoutObligationConflict(
+                "existing payout obligation set is partial or differs from the official snapshot",
+                reason_code="OBLIGATIONS_INCOMPLETE",
+            )
+        total = sum(
+            (_stored_decimal_cents(row.amount, "stored payout obligation amount") for row in existing),
+            ZERO,
+        )
+        if total != _liability:
+            raise PayoutObligationConflict(
+                "persisted payout obligations do not equal the approved payout liability",
+                reason_code="OBLIGATION_RECONCILIATION_MISMATCH",
+            )
+        if not _matches_existing(
+            existing, expected=expected, snapshot=snapshot, closing=closing,
+        ):
+            raise PayoutObligationConflict(
+                "existing payout obligation set is partial or differs from the official snapshot",
+                reason_code="OBLIGATIONS_INCOMPLETE",
+            )
+        return existing
