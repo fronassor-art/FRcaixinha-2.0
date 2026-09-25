@@ -47,12 +47,44 @@ with patch.dict(sys.modules, {"app.core.config": fake}):
             revision = connection.execute(
                 sa.text("SELECT version_num FROM alembic_version")
             ).scalar_one()
-            assert revision == "0100_cycle_payout_obligations_a377b4r1"
+            assert revision == "0101_member_payout_destination_a377b4r2"
+            inspector = sa.inspect(connection)
+            assert inspector.has_table("member_payout_destinations")
+            assert any(
+                item["name"] == "uq_mpd_one_active_member" and item["unique"]
+                for item in inspector.get_indexes("member_payout_destinations")
+            )
+            assert {item["name"] for item in inspector.get_check_constraints(
+                "member_payout_destinations"
+            )} >= {
+                "ck_mpd_version_positive", "ck_mpd_key_type",
+                "ck_mpd_verification_status", "ck_mpd_lifecycle_fields",
+            }
     finally:
         engine.dispose()
 
-    command.downgrade(config, "-1")
+    command.downgrade(config, "0100_cycle_payout_obligations_a377b4r1")
+    engine = sa.create_engine(url)
+    try:
+        with engine.connect() as connection:
+            assert not sa.inspect(connection).has_table("member_payout_destinations")
+            revision = connection.execute(
+                sa.text("SELECT version_num FROM alembic_version")
+            ).scalar_one()
+            assert revision == "0100_cycle_payout_obligations_a377b4r1"
+    finally:
+        engine.dispose()
     command.upgrade(config, "head")
+    engine = sa.create_engine(url)
+    try:
+        with engine.connect() as connection:
+            revision = connection.execute(
+                sa.text("SELECT version_num FROM alembic_version")
+            ).scalar_one()
+            assert revision == "0101_member_payout_destination_a377b4r2"
+            assert sa.inspect(connection).has_table("member_payout_destinations")
+    finally:
+        engine.dispose()
 """
     subprocess.run(
         [sys.executable, "-c", script],

@@ -2,7 +2,7 @@ from datetime import datetime, date, timezone
 from decimal import Decimal
 from sqlalchemy import String, Integer, Boolean, DateTime, Date, Numeric, ForeignKey, ForeignKeyConstraint, Text, UniqueConstraint, PrimaryKeyConstraint, Index, CheckConstraint, false, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from sqlalchemy import event
+from sqlalchemy import event, inspect
 from app.db.base import Base
 from app.core.loan_rules import (
     LATE_CHARGE_SETTLEMENT_COMPONENT_VERSION,
@@ -153,6 +153,69 @@ class Member(Base):
         return self.quotas[0] if self.quotas else None
 
     financial_account: Mapped["MemberFinancialAccount | None"] = relationship(back_populates="member", uselist=False)
+
+
+class MemberPayoutDestination(Base):
+    """One immutable PIX key version; lifecycle changes are limited to revocation."""
+
+    __tablename__ = "member_payout_destinations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    member_id: Mapped[int] = mapped_column(
+        ForeignKey("members.id", name="fk_mpd_member", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    key_type: Mapped[str] = mapped_column(String(10), nullable=False)
+    encrypted_value: Mapped[str] = mapped_column(Text(), nullable=False)
+    masked_value: Mapped[str] = mapped_column(String(255), nullable=False)
+    verification_status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="UNVERIFIED",
+        server_default=text("'UNVERIFIED'"),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=now_utc,
+    )
+    created_by: Mapped[int] = mapped_column(
+        ForeignKey("users.id", name="fk_mpd_created_by", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    verified_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", name="fk_mpd_verified_by", ondelete="RESTRICT"),
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", name="fk_mpd_revoked_by", ondelete="RESTRICT"),
+    )
+
+    __table_args__ = (
+        UniqueConstraint("member_id", "version", name="uq_mpd_member_version"),
+        Index(
+            "uq_mpd_one_active_member", "member_id", unique=True,
+            postgresql_where=text("verification_status <> 'REVOKED'"),
+            sqlite_where=text("verification_status <> 'REVOKED'"),
+        ),
+        CheckConstraint("version >= 1", name="ck_mpd_version_positive"),
+        CheckConstraint(
+            "key_type IN ('CPF', 'PHONE', 'EMAIL', 'EVP')",
+            name="ck_mpd_key_type",
+        ),
+        CheckConstraint(
+            "verification_status IN ('UNVERIFIED', 'VERIFIED', 'REVOKED')",
+            name="ck_mpd_verification_status",
+        ),
+        CheckConstraint(
+            "(verification_status = 'UNVERIFIED' AND verified_at IS NULL AND verified_by IS NULL "
+            "AND revoked_at IS NULL AND revoked_by IS NULL) OR "
+            "(verification_status = 'VERIFIED' AND verified_at IS NOT NULL AND verified_by IS NOT NULL "
+            "AND revoked_at IS NULL AND revoked_by IS NULL) OR "
+            "(verification_status = 'REVOKED' AND revoked_at IS NOT NULL AND revoked_by IS NOT NULL "
+            "AND ((verified_at IS NULL AND verified_by IS NULL) OR "
+            "(verified_at IS NOT NULL AND verified_by IS NOT NULL)))",
+            name="ck_mpd_lifecycle_fields",
+        ),
+    )
 
 class Cycle(Base):
     __tablename__ = "cycles"
@@ -1215,10 +1278,46 @@ class Notification(Base):
 def _protect_ledger_mutations(session, flush_context, instances):
     immutable_types = (LedgerEntry, CycleAnnualClosingSnapshot, CycleAnnualClosingPayoutObligation, CycleAnnualClosingReview, CycleAnnualClosingCashEvidence, CycleRealizedGainEvent)
     for obj in list(session.dirty):
+        if isinstance(obj, MemberPayoutDestination):
+            state = inspect(obj)
+            immutable_fields = (
+                "id", "member_id", "version", "key_type", "encrypted_value",
+                "masked_value", "created_at", "created_by",
+            )
+            if any(state.attrs[name].history.has_changes() for name in immutable_fields):
+                raise RuntimeError("MemberPayoutDestination: campos da versão são imutáveis.")
+            lifecycle_fields = (
+                "verification_status", "verified_at", "verified_by", "revoked_at", "revoked_by",
+            )
+            if any(state.attrs[name].history.has_changes() for name in lifecycle_fields):
+                status_history = state.attrs["verification_status"].history
+                revoked_at_history = state.attrs["revoked_at"].history
+                revoked_by_history = state.attrs["revoked_by"].history
+                can_revoke = (
+                    status_history.has_changes()
+                    and status_history.deleted
+                    and status_history.deleted[0] in {"UNVERIFIED", "VERIFIED"}
+                    and obj.verification_status == "REVOKED"
+                    and not state.attrs["verified_at"].history.has_changes()
+                    and not state.attrs["verified_by"].history.has_changes()
+                    and revoked_at_history.has_changes()
+                    and revoked_at_history.deleted
+                    and revoked_at_history.deleted[0] is None
+                    and obj.revoked_at is not None
+                    and revoked_by_history.has_changes()
+                    and revoked_by_history.deleted
+                    and revoked_by_history.deleted[0] is None
+                    and obj.revoked_by is not None
+                )
+                if not can_revoke:
+                    raise RuntimeError(
+                        "MemberPayoutDestination: ciclo de vida só permite revogação."
+                    )
+            continue
         if isinstance(obj, immutable_types):
             raise RuntimeError(f"{type(obj).__name__} é imutável; use uma linha compensatória quando aplicável.")
     for obj in list(session.deleted):
-        if isinstance(obj, immutable_types):
+        if isinstance(obj, immutable_types) or isinstance(obj, MemberPayoutDestination):
             raise RuntimeError(f"{type(obj).__name__} não pode ser excluído.")
 
 class ConsentRecord(Base):
