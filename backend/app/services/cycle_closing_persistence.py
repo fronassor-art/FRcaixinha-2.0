@@ -189,6 +189,11 @@ def create_or_get_cycle_annual_closing(
         return existing
     row = CycleAnnualClosing(cycle_id=cycle_id, created_by=created_by, updated_by=created_by)
     try:
+        connection = db.connection()
+        if connection.dialect.name == "sqlite":
+            driver_connection = connection.connection.driver_connection
+            if not driver_connection.in_transaction:
+                connection.exec_driver_sql("BEGIN")
         with db.begin_nested():
             db.add(row)
             db.flush()
