@@ -77,6 +77,7 @@ def db(tmp_path, monkeypatch):
     migration = module_from_spec(spec)
     spec.loader.exec_module(migration)
     with engine.begin() as connection:
+        migration._create_sqlite_insert_guard(connection)
         migration._create_sqlite_immutability_guards(connection)
 
     with Session(engine, expire_on_commit=False) as session:
@@ -200,6 +201,108 @@ def _manual_obligation(db, snapshot, closing, *, member_id=1, participation_id=1
     db.add(row)
     db.flush()
     return row
+
+
+def _insert_obligation_direct(
+    db, *, snapshot_id, closing_id, cycle_id, member_id,
+    participation_id, source_hash, amount="100.00",
+):
+    return db.execute(text("""
+        INSERT INTO cycle_annual_closing_payout_obligations (
+            snapshot_id, closing_id, cycle_id, member_id,
+            cycle_participation_id, amount, source_payload_hash, created_at
+        ) VALUES (
+            :snapshot_id, :closing_id, :cycle_id, :member_id,
+            :participation_id, :amount, :source_hash, CURRENT_TIMESTAMP
+        )
+    """), {
+        "snapshot_id": snapshot_id,
+        "closing_id": closing_id,
+        "cycle_id": cycle_id,
+        "member_id": member_id,
+        "participation_id": participation_id,
+        "amount": amount,
+        "source_hash": source_hash,
+    })
+
+
+def test_database_insert_guard_rejects_snapshot_hash_mismatch(db):
+    closing, _review, snapshot = _seed_and_close(db)
+
+    with pytest.raises(sa.exc.IntegrityError, match="snapshot linkage is invalid"):
+        with db.begin_nested():
+            _insert_obligation_direct(
+                db, snapshot_id=snapshot.id, closing_id=closing.id,
+                cycle_id=closing.cycle_id, member_id=1, participation_id=1,
+                source_hash="b" * 64,
+            )
+
+    assert _obligations(db, snapshot.id) == []
+
+
+def test_database_insert_guard_rejects_participation_for_another_member(db):
+    closing, _review, snapshot = _seed_and_close(db)
+
+    with pytest.raises(sa.exc.IntegrityError, match="participation linkage is invalid"):
+        with db.begin_nested():
+            _insert_obligation_direct(
+                db, snapshot_id=snapshot.id, closing_id=closing.id,
+                cycle_id=closing.cycle_id, member_id=1, participation_id=2,
+                source_hash=snapshot.payload_hash,
+            )
+
+    assert _obligations(db, snapshot.id) == []
+
+
+def test_database_insert_guard_rejects_snapshot_from_another_closing_cycle(db):
+    closing, _review, snapshot = _seed_and_close(db)
+    other_cycle = Cycle(
+        id=2, start_date=date(2028, 12, 10), entry_deadline=date(2029, 1, 10),
+        closing_reference_date=date(2029, 12, 10), monthly_amount=D("150.00"),
+        months=12, max_quotas=50, status="OPEN",
+    )
+    db.add(other_cycle)
+    db.flush()
+    other_participation = CycleParticipation(
+        id=20, cycle_id=other_cycle.id, member_id=1, status="ACTIVE",
+    )
+    other_closing = CycleAnnualClosing(
+        cycle_id=other_cycle.id, status="CLOSED", created_by=4,
+    )
+    db.add_all([other_participation, other_closing])
+    db.flush()
+
+    with pytest.raises(sa.exc.IntegrityError, match="snapshot linkage is invalid"):
+        with db.begin_nested():
+            _insert_obligation_direct(
+                db, snapshot_id=snapshot.id, closing_id=other_closing.id,
+                cycle_id=other_cycle.id, member_id=1,
+                participation_id=other_participation.id,
+                source_hash=snapshot.payload_hash,
+            )
+
+    assert _obligations(db, snapshot.id) == []
+    assert closing.status == "CLOSED"
+
+
+def test_database_insert_guard_requires_closing_still_be_closed(db):
+    closing, _review, snapshot = _seed_and_close(db)
+
+    with pytest.raises(sa.exc.IntegrityError, match="snapshot linkage is invalid"):
+        with db.begin_nested():
+            db.execute(
+                text("UPDATE cycle_annual_closings SET status='MASTER_APPROVED' WHERE id=:id"),
+                {"id": closing.id},
+            )
+            _insert_obligation_direct(
+                db, snapshot_id=snapshot.id, closing_id=closing.id,
+                cycle_id=closing.cycle_id, member_id=1, participation_id=1,
+                source_hash=snapshot.payload_hash,
+            )
+
+    db.refresh(closing)
+    assert closing.status == "CLOSED"
+    assert _obligations(db, snapshot.id) == []
 
 
 def test_materializes_one_exact_obligation_per_snapshot_participant_including_zero(db):

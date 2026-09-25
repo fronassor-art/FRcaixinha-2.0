@@ -10,6 +10,35 @@ branch_labels = None
 depends_on = None
 
 
+def _create_sqlite_insert_guard(bind):
+    bind.exec_driver_sql("""
+        CREATE TRIGGER trg_cpo_insert_guard
+        BEFORE INSERT ON cycle_annual_closing_payout_obligations
+        BEGIN
+            SELECT CASE WHEN NOT EXISTS (
+                SELECT 1
+                FROM cycle_annual_closing_snapshots AS snapshot
+                JOIN cycle_annual_closings AS closing
+                  ON closing.id = NEW.closing_id
+                 AND closing.cycle_id = NEW.cycle_id
+                WHERE snapshot.id = NEW.snapshot_id
+                  AND snapshot.closing_id = NEW.closing_id
+                  AND snapshot.cycle_id = NEW.cycle_id
+                  AND snapshot.payload_hash = NEW.source_payload_hash
+                  AND closing.status = 'CLOSED'
+            ) THEN RAISE(ABORT, 'payout obligation snapshot linkage is invalid') END;
+
+            SELECT CASE WHEN NOT EXISTS (
+                SELECT 1
+                FROM cycle_participations AS participation
+                WHERE participation.id = NEW.cycle_participation_id
+                  AND participation.member_id = NEW.member_id
+                  AND participation.cycle_id = NEW.cycle_id
+            ) THEN RAISE(ABORT, 'payout obligation participation linkage is invalid') END;
+        END
+    """)
+
+
 def _create_sqlite_immutability_guards(bind):
     bind.exec_driver_sql("""
         CREATE TRIGGER trg_cpo_no_update
@@ -40,6 +69,47 @@ def _create_postgresql_immutability_guards(bind):
         CREATE TRIGGER trg_cpo_immutable
         BEFORE UPDATE OR DELETE ON cycle_annual_closing_payout_obligations
         FOR EACH ROW EXECUTE FUNCTION cycle_annual_payout_obligation_immutable_guard()
+    """)
+
+
+def _create_postgresql_insert_guard(bind):
+    bind.exec_driver_sql("""
+        CREATE FUNCTION cycle_payout_obligation_insert_guard()
+        RETURNS trigger AS $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM cycle_annual_closing_snapshots AS snapshot
+                JOIN cycle_annual_closings AS closing
+                  ON closing.id = NEW.closing_id
+                 AND closing.cycle_id = NEW.cycle_id
+                WHERE snapshot.id = NEW.snapshot_id
+                  AND snapshot.closing_id = NEW.closing_id
+                  AND snapshot.cycle_id = NEW.cycle_id
+                  AND snapshot.payload_hash = NEW.source_payload_hash
+                  AND closing.status = 'CLOSED'
+            ) THEN
+                RAISE EXCEPTION 'payout obligation snapshot linkage is invalid';
+            END IF;
+
+            IF NOT EXISTS (
+                SELECT 1
+                FROM cycle_participations AS participation
+                WHERE participation.id = NEW.cycle_participation_id
+                  AND participation.member_id = NEW.member_id
+                  AND participation.cycle_id = NEW.cycle_id
+            ) THEN
+                RAISE EXCEPTION 'payout obligation participation linkage is invalid';
+            END IF;
+
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+    """)
+    bind.exec_driver_sql("""
+        CREATE TRIGGER trg_cpo_insert_guard
+        BEFORE INSERT ON cycle_annual_closing_payout_obligations
+        FOR EACH ROW EXECUTE FUNCTION cycle_payout_obligation_insert_guard()
     """)
 
 
@@ -79,8 +149,10 @@ def upgrade():
 
     bind = op.get_bind()
     if bind.dialect.name == "sqlite":
+        _create_sqlite_insert_guard(bind)
         _create_sqlite_immutability_guards(bind)
     elif bind.dialect.name == "postgresql":
+        _create_postgresql_insert_guard(bind)
         _create_postgresql_immutability_guards(bind)
     else:
         raise RuntimeError("Unsupported database dialect for payout obligation immutability")
@@ -89,9 +161,14 @@ def upgrade():
 def downgrade():
     bind = op.get_bind()
     if bind.dialect.name == "sqlite":
+        bind.exec_driver_sql("DROP TRIGGER IF EXISTS trg_cpo_insert_guard")
         bind.exec_driver_sql("DROP TRIGGER IF EXISTS trg_cpo_no_update")
         bind.exec_driver_sql("DROP TRIGGER IF EXISTS trg_cpo_no_delete")
     elif bind.dialect.name == "postgresql":
+        bind.exec_driver_sql(
+            "DROP TRIGGER IF EXISTS trg_cpo_insert_guard ON cycle_annual_closing_payout_obligations"
+        )
+        bind.exec_driver_sql("DROP FUNCTION IF EXISTS cycle_payout_obligation_insert_guard()")
         bind.exec_driver_sql(
             "DROP TRIGGER IF EXISTS trg_cpo_immutable ON cycle_annual_closing_payout_obligations"
         )
