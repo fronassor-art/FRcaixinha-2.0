@@ -3,6 +3,20 @@ import hashlib, json
 from sqlalchemy.orm import Session
 from app.models import User, Member, Contribution, Loan, LoanInstallment, CollectionAgreement, AgreementInstallment, Notification, PrivacyRequest, DataAccessLog, ConsentRecord, UserSession
 
+_MAX_POSTGRES_INTEGER_ID = 2_147_483_647
+
+
+def _privacy_cpf_tombstone(user_id: int) -> str:
+    """Return a deterministic, non-CPF marker for a supported User.id."""
+    if (
+        isinstance(user_id, bool)
+        or not isinstance(user_id, int)
+        or not 1 <= user_id <= _MAX_POSTGRES_INTEGER_ID
+    ):
+        raise ValueError("User ID cannot be represented as a privacy CPF tombstone.")
+    return f"ANON{user_id:010d}"
+
+
 def log_access(db: Session, actor_user_id: int | None, subject_user_id: int | None, action: str, resource: str, ip: str | None = None, user_agent: str | None = None):
     db.add(DataAccessLog(actor_user_id=actor_user_id, subject_user_id=subject_user_id, action=action, resource=resource, ip_address=ip, user_agent=user_agent))
 
@@ -37,7 +51,7 @@ def anonymize_user(db: Session, user_id: int, admin_id: int):
     marker=f"anon-{u.id}-{hashlib.sha256(f'{u.id}:{u.email}'.encode()).hexdigest()[:12]}"
     u.name="Usuário anonimizado"
     u.email=f"{marker}@anon.invalid"
-    u.cpf=f"ANON-{u.id}-{hashlib.sha256(str(u.id).encode()).hexdigest()[:8]}"
+    u.cpf=_privacy_cpf_tombstone(u.id)
     u.phone=None; u.is_active=False
     for s in db.query(UserSession).filter(UserSession.user_id==u.id, UserSession.revoked_at.is_(None)).all(): s.revoked_at=datetime.now(timezone.utc)
     m=db.query(Member).filter(Member.user_id==u.id).first()
