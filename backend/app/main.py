@@ -12,6 +12,7 @@ from app.api.metrics import router as metrics_router
 from app.core.config import settings
 from app.api.admin import router as admin_router
 from app.api.admin_finance import router as admin_finance_router
+from app.api.admin_cycle_annual_closing import router as admin_cycle_annual_closing_router
 from app.api.admin_reports import router as admin_reports_router
 from app.api.notifications import router as notifications_router
 from app.api.loan_installment_payments import router as loan_installment_payments_router
@@ -106,6 +107,7 @@ app.include_router(loans_router, prefix="/api")
 app.include_router(payments_router, prefix="/api")
 app.include_router(admin_router, prefix="/api")
 app.include_router(admin_finance_router, prefix="/api")
+app.include_router(admin_cycle_annual_closing_router, prefix="/api")
 app.include_router(admin_reports_router, prefix="/api")
 app.include_router(notifications_router, prefix="/api")
 app.include_router(loan_installment_payments_router, prefix="/api")
