@@ -241,7 +241,7 @@ def test_migration_revision_and_single_head():
     assert 'down_revision = "0081_master_integrity_v104"' in migration
     config = Config(str(BACKEND_ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(BACKEND_ROOT / "alembic"))
-    assert tuple(ScriptDirectory.from_config(config).get_heads()) == ("0099_cycle_closing_review_a377b3r1",)
+    assert tuple(ScriptDirectory.from_config(config).get_heads()) == ("0100_cycle_payout_obligations_a377b4r1",)
 
 
 

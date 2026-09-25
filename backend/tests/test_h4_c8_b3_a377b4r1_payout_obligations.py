@@ -356,7 +356,11 @@ def test_corrupted_snapshot_is_rejected(db):
 def test_snapshot_total_must_equal_approved_review_liability_exactly(db):
     closing, review, snapshot = _seed_and_close(db)
     db.execute(
-        text("UPDATE cycle_annual_closing_reviews SET participant_payout_liability=:amount WHERE id=:id"),
+        text("""
+            UPDATE cycle_annual_closing_reviews
+            SET participant_payout_liability=:amount, required_liquidity=:amount
+            WHERE id=:id
+        """),
         {"amount": "100.01", "id": review.id},
     )
     db.expire_all()
