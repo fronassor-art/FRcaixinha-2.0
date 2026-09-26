@@ -22,3 +22,37 @@ jobs:
       - run: pip install -r requirements.txt
       - run: python -m compileall app alembic
       - run: pytest -q tests
+
+  postgres-payout-verification:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: frcaixinha_test
+          POSTGRES_PASSWORD: frcaixinha_test
+          POSTGRES_DB: frcaixinha_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U frcaixinha_test -d frcaixinha_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql+psycopg://frcaixinha_test:frcaixinha_test@127.0.0.1:5432/frcaixinha_test
+      JWT_SECRET: test-only-payout-verification-secret
+      APP_ENV: test
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: pip install -r requirements.txt
+      - run: python -m compileall app alembic
+      - run: alembic upgrade head
+      - run: alembic current
+      - run: pytest -q tests/test_h4_c8_b3_a377b4r2r2b2f6_live_postgresql_payout_verification.py
