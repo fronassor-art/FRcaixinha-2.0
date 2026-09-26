@@ -1,7 +1,7 @@
 from datetime import datetime, date, timezone
 from decimal import Decimal
 from sqlalchemy import String, Integer, Boolean, DateTime, Date, Numeric, ForeignKey, ForeignKeyConstraint, Text, UniqueConstraint, PrimaryKeyConstraint, Index, CheckConstraint, false, text
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 from sqlalchemy import event, inspect
 from app.db.base import Base
 from app.core.loan_rules import (
@@ -216,6 +216,125 @@ class MemberPayoutDestination(Base):
             name="ck_mpd_lifecycle_fields",
         ),
     )
+
+
+def _require_aware_datetime(value, *, field_name: str, nullable: bool = False):
+    if value is None and nullable:
+        return value
+    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(f"{field_name} must be timezone-aware.")
+    return value
+
+
+class PayoutDestinationVerificationAttempt(Base):
+    """Persistent identity and lifecycle for one destination check.
+
+    ``requested_by`` records the initiating actor. It is not the actor who
+    would later authorize a destination lifecycle transition.
+    """
+
+    __tablename__ = "payout_destination_verification_attempts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    attempt_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(150), nullable=False)
+    destination_id: Mapped[int] = mapped_column(
+        ForeignKey("member_payout_destinations.id", name="fk_pdva_destination", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    destination_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    key_type: Mapped[str] = mapped_column(String(10), nullable=False)
+    provider_name: Mapped[str] = mapped_column(String(80), nullable=False)
+    state: Mapped[str] = mapped_column(String(20), nullable=False, default="REQUESTED", server_default=text("'REQUESTED'"))
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    requested_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", name="fk_pdva_requested_by", ondelete="RESTRICT"), nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=now_utc)
+
+    __table_args__ = (
+        UniqueConstraint("attempt_id", name="uq_pdva_attempt_id"),
+        UniqueConstraint("idempotency_key", name="uq_pdva_idempotency_key"),
+        CheckConstraint("length(trim(attempt_id)) > 0", name="ck_pdva_attempt_id_nonempty"),
+        CheckConstraint("length(trim(idempotency_key)) > 0", name="ck_pdva_idempotency_nonempty"),
+        CheckConstraint("destination_version >= 1", name="ck_pdva_destination_version_positive"),
+        CheckConstraint("key_type IN ('CPF', 'PHONE', 'EMAIL', 'EVP')", name="ck_pdva_key_type"),
+        CheckConstraint("length(trim(provider_name)) > 0", name="ck_pdva_provider_nonempty"),
+        CheckConstraint("state IN ('REQUESTED', 'PENDING', 'FINAL')", name="ck_pdva_state"),
+        Index(
+            "uq_pdva_one_active_destination", "destination_id", unique=True,
+            postgresql_where=text("state IN ('REQUESTED', 'PENDING')"),
+            sqlite_where=text("state IN ('REQUESTED', 'PENDING')"),
+        ),
+    )
+
+    @validates("requested_at", "created_at")
+    def _validate_required_timestamps(self, key, value):
+        return _require_aware_datetime(value, field_name=key)
+
+
+class PayoutDestinationVerificationEvidence(Base):
+    """Sanitized, append-only provider result metadata for one attempt."""
+
+    __tablename__ = "payout_destination_verification_evidence"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    verification_attempt_id: Mapped[int] = mapped_column(
+        ForeignKey("payout_destination_verification_attempts.id", name="fk_pdve_attempt", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    result_state: Mapped[str] = mapped_column(String(20), nullable=False)
+    outcome: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    reason_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    provider_request_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    provider_response_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    provider_event_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    provider_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    authenticity_status: Mapped[str] = mapped_column(String(20), nullable=False)
+    authenticity_method: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    authenticity_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    freshness: Mapped[str] = mapped_column(String(20), nullable=False)
+    evidence_digest: Mapped[str] = mapped_column(String(71), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=now_utc)
+
+    __table_args__ = (
+        UniqueConstraint("verification_attempt_id", "sequence", name="uq_pdve_attempt_sequence"),
+        UniqueConstraint("verification_attempt_id", "evidence_digest", name="uq_pdve_attempt_digest"),
+        CheckConstraint("sequence >= 1", name="ck_pdve_sequence_positive"),
+        CheckConstraint(
+            "(result_state = 'PENDING' AND outcome IS NULL) OR "
+            "(result_state = 'FINAL' AND outcome IS NOT NULL AND outcome IN "
+            "('CONFIRMED', 'NOT_CONFIRMED', 'RETRYABLE', 'AMBIGUOUS', 'INVALID_RESPONSE'))",
+            name="ck_pdve_state_outcome",
+        ),
+        CheckConstraint(
+            "authenticity_status IN ('NOT_CHECKED', 'AUTHENTIC', 'INVALID', 'UNVERIFIABLE')",
+            name="ck_pdve_authenticity_status",
+        ),
+        CheckConstraint(
+            "(authenticity_status = 'NOT_CHECKED' AND authenticity_method IS NULL AND authenticity_checked_at IS NULL) OR "
+            "(authenticity_status <> 'NOT_CHECKED' AND authenticity_method IS NOT NULL "
+            "AND length(trim(authenticity_method)) > 0 AND authenticity_checked_at IS NOT NULL)",
+            name="ck_pdve_authenticity_fields",
+        ),
+        CheckConstraint("freshness IN ('CURRENT', 'STALE', 'REVOKED', 'NOT_UNVERIFIED')", name="ck_pdve_freshness"),
+        CheckConstraint(
+            "length(evidence_digest) = 71 AND substr(evidence_digest, 1, 7) = 'sha256:'",
+            name="ck_pdve_digest_prefix_length",
+        ),
+        Index(
+            "uq_pdve_one_final_per_attempt", "verification_attempt_id", unique=True,
+            postgresql_where=text("result_state = 'FINAL'"),
+            sqlite_where=text("result_state = 'FINAL'"),
+        ),
+    )
+
+    @validates("provider_timestamp", "received_at", "authenticity_checked_at", "created_at")
+    def _validate_evidence_timestamps(self, key, value):
+        return _require_aware_datetime(value, field_name=key, nullable=key in {"provider_timestamp", "authenticity_checked_at"})
+
 
 class Cycle(Base):
     __tablename__ = "cycles"

@@ -29,7 +29,7 @@ from app.models import LoanInstallment, LoanLateChargeEvent, PaymentSettlement
 
 REVISION = "0092_versioned_late_charge_foundation"
 PREVIOUS_REVISION = "0091_loan_calculation_version"
-HEAD_REVISION = "0101_member_payout_destination_a377b4r2"
+HEAD_REVISION = "0102_payout_verification_evidence_a377b4r3"
 EVENT_TYPES = {
     "FIXED_PENALTY_ASSESSED",
     "LATE_INTEREST_ACCRUED",
@@ -119,7 +119,7 @@ def test_a363_constants_models_and_single_head_contract():
 
     assert script.get_current_head() == HEAD_REVISION
     assert script.get_revision(REVISION).down_revision == PREVIOUS_REVISION
-    assert len(list(script.walk_revisions())) == 107
+    assert len(list(script.walk_revisions())) == 108
     assert LATE_CHARGE_VERSION == "late_charge_daily_simple_v1"
     assert LATE_CHARGE_SETTLEMENT_COMPONENT_VERSION == "late_charge_components_v1"
     assert FINANCIAL_TIMEZONE == "America/Belem"

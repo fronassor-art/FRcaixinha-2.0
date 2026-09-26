@@ -67,7 +67,7 @@ def test_current_revision_ids_and_chain_are_unchanged():
         if revision:
             rows[revision.group(1)] = down_revision.group(1) if down_revision else None
 
-    assert len(rows) == 107
+    assert len(rows) == 108
     assert max(map(len, rows)) <= VERSION_NUM_CAPACITY
     assert rows["0093_payment_attempt_schema_foundation"] == "0092_versioned_late_charge_foundation"
     assert rows["0094_late_interest_event_contract"] == "0093_payment_attempt_schema_foundation"
@@ -77,6 +77,7 @@ def test_current_revision_ids_and_chain_are_unchanged():
     assert rows["0099_cycle_closing_review_a377b3r1"] == "0098_cycle_closing_persistence_a377b2"
     assert rows["0100_cycle_payout_obligations_a377b4r1"] == "0099_cycle_closing_review_a377b3r1"
     assert rows["0101_member_payout_destination_a377b4r2"] == "0100_cycle_payout_obligations_a377b4r1"
+    assert rows["0102_payout_verification_evidence_a377b4r3"] == "0101_member_payout_destination_a377b4r2"
     assert rows["0012_monthly_closing_integrity_v034"] == "0011_penalty_allocation_v029"
     assert rows["0087_monthly_closing_immutability_h3c_a1"] == "0086_payment_settlement_agreement_state_v106"
     assert rows["0088_monthly_closing_snapshot_schema_h3c_b2"] == "0087_monthly_closing_immutability_h3c_a1"
