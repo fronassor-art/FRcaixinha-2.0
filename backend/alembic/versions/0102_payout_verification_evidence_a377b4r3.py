@@ -53,6 +53,22 @@ def _create_sqlite_guards(bind):
               OR (OLD.state = 'REQUESTED' AND NEW.state IN ('PENDING', 'FINAL'))
               OR (OLD.state = 'PENDING' AND NEW.state = 'FINAL')
           )
+          OR (
+              NEW.state IS NOT OLD.state AND NEW.state = 'PENDING'
+              AND NOT EXISTS (
+                  SELECT 1 FROM {EVIDENCE_TABLE} AS evidence
+                  WHERE evidence.verification_attempt_id = OLD.id
+                    AND evidence.result_state = 'PENDING'
+              )
+          )
+          OR (
+              NEW.state IS NOT OLD.state AND NEW.state = 'FINAL'
+              AND NOT EXISTS (
+                  SELECT 1 FROM {EVIDENCE_TABLE} AS evidence
+                  WHERE evidence.verification_attempt_id = OLD.id
+                    AND evidence.result_state = 'FINAL'
+              )
+          )
         BEGIN
             SELECT RAISE(ABORT, 'verification attempt identity or state transition is invalid');
         END
@@ -70,9 +86,14 @@ def _create_sqlite_guards(bind):
         WHEN NOT EXISTS (
             SELECT 1 FROM {ATTEMPT_TABLE} AS attempt
             WHERE attempt.id = NEW.verification_attempt_id
+              AND attempt.state IN ('REQUESTED', 'PENDING')
+        ) OR EXISTS (
+            SELECT 1 FROM {EVIDENCE_TABLE} AS evidence
+            WHERE evidence.verification_attempt_id = NEW.verification_attempt_id
+              AND evidence.result_state = 'FINAL'
         )
         BEGIN
-            SELECT RAISE(ABORT, 'verification evidence attempt is invalid');
+            SELECT RAISE(ABORT, 'verification evidence attempt is closed');
         END
     """)
     bind.exec_driver_sql(f"""
@@ -126,12 +147,32 @@ def _create_postgresql_guards(bind):
                 RAISE EXCEPTION 'verification attempt identity is immutable';
             END IF;
 
-            IF NEW.state IS NOT DISTINCT FROM OLD.state
-               OR (OLD.state = 'REQUESTED' AND NEW.state IN ('PENDING', 'FINAL'))
-               OR (OLD.state = 'PENDING' AND NEW.state = 'FINAL') THEN
+            IF NEW.state IS NOT DISTINCT FROM OLD.state THEN
                 RETURN NEW;
             END IF;
-            RAISE EXCEPTION 'verification attempt state transition is invalid';
+
+            IF NOT (
+                (OLD.state = 'REQUESTED' AND NEW.state IN ('PENDING', 'FINAL'))
+                OR (OLD.state = 'PENDING' AND NEW.state = 'FINAL')
+            ) THEN
+                RAISE EXCEPTION 'verification attempt state transition is invalid';
+            END IF;
+
+            IF NEW.state = 'PENDING' AND NOT EXISTS (
+                SELECT 1 FROM {EVIDENCE_TABLE} AS evidence
+                WHERE evidence.verification_attempt_id = OLD.id
+                  AND evidence.result_state = 'PENDING'
+            ) THEN
+                RAISE EXCEPTION 'PENDING state requires pending evidence';
+            END IF;
+            IF NEW.state = 'FINAL' AND NOT EXISTS (
+                SELECT 1 FROM {EVIDENCE_TABLE} AS evidence
+                WHERE evidence.verification_attempt_id = OLD.id
+                  AND evidence.result_state = 'FINAL'
+            ) THEN
+                RAISE EXCEPTION 'FINAL state requires final evidence';
+            END IF;
+            RETURN NEW;
         END;
         $$ LANGUAGE plpgsql
     """)
@@ -143,13 +184,22 @@ def _create_postgresql_guards(bind):
     bind.exec_driver_sql(f"""
         CREATE FUNCTION pdve_guard()
         RETURNS trigger AS $$
+        DECLARE attempt_state VARCHAR(20);
         BEGIN
             IF TG_OP = 'INSERT' THEN
-                IF NOT EXISTS (
-                    SELECT 1 FROM {ATTEMPT_TABLE} AS attempt
-                    WHERE attempt.id = NEW.verification_attempt_id
+                SELECT attempt.state INTO attempt_state
+                FROM {ATTEMPT_TABLE} AS attempt
+                WHERE attempt.id = NEW.verification_attempt_id
+                FOR UPDATE;
+                IF NOT FOUND OR attempt_state NOT IN ('REQUESTED', 'PENDING') THEN
+                    RAISE EXCEPTION 'verification evidence attempt is not open';
+                END IF;
+                IF EXISTS (
+                    SELECT 1 FROM {EVIDENCE_TABLE} AS evidence
+                    WHERE evidence.verification_attempt_id = NEW.verification_attempt_id
+                      AND evidence.result_state = 'FINAL'
                 ) THEN
-                    RAISE EXCEPTION 'verification evidence attempt is invalid';
+                    RAISE EXCEPTION 'verification evidence cannot follow final evidence';
                 END IF;
                 RETURN NEW;
             END IF;

@@ -228,9 +228,17 @@ def test_attempt_allowed_transitions_and_identity_immutability(database, transit
     with database.begin() as connection:
         _insert_attempt(connection, destination_id=destination_id, state="REQUESTED", attempt_id=attempt_id,
                         idempotency_key=f"idem-{attempt_id}")
+        attempt_pk = _attempt_pk(connection, attempt_id)
         if source != "REQUESTED":
-            connection.execute(text("UPDATE payout_destination_verification_attempts SET state=:source WHERE attempt_id=:attempt_id"),
-                               {"source": source, "attempt_id": attempt_id})
+            _insert_evidence(connection, attempt_pk, state="PENDING")
+            connection.execute(text("UPDATE payout_destination_verification_attempts SET state='PENDING' WHERE attempt_id=:attempt_id"),
+                               {"attempt_id": attempt_id})
+        _insert_evidence(connection, attempt_pk, sequence=2 if source != "REQUESTED" else 1,
+                         state=target, outcome="CONFIRMED" if target == "FINAL" else None,
+                         digest="sha256:" + "7" * 64 if target == "FINAL" else DIGEST)
+        connection.execute(text("UPDATE payout_destination_verification_attempts SET state=:state WHERE attempt_id=:attempt_id"),
+                           {"state": target, "attempt_id": attempt_id})
+        # A state no-op remains valid without adding another result row.
         connection.execute(text("UPDATE payout_destination_verification_attempts SET state=:state WHERE attempt_id=:attempt_id"),
                            {"state": target, "attempt_id": attempt_id})
         with pytest.raises(IntegrityError):
@@ -249,9 +257,16 @@ def test_attempt_rejects_reverse_transitions(database, source, target):
     with database.begin() as connection:
         _insert_attempt(connection, destination_id=destination_id, state="REQUESTED", attempt_id=attempt_id,
                         idempotency_key=f"idem-{attempt_id}")
+        attempt_pk = _attempt_pk(connection, attempt_id)
         if source != "REQUESTED":
-            connection.execute(text("UPDATE payout_destination_verification_attempts SET state=:source WHERE attempt_id=:attempt_id"),
-                               {"source": source, "attempt_id": attempt_id})
+            _insert_evidence(connection, attempt_pk, state="PENDING")
+            connection.execute(text("UPDATE payout_destination_verification_attempts SET state='PENDING' WHERE attempt_id=:attempt_id"),
+                               {"attempt_id": attempt_id})
+        if source == "FINAL":
+            _insert_evidence(connection, attempt_pk, state="FINAL", outcome="NOT_CONFIRMED", sequence=2,
+                             digest="sha256:" + "8" * 64)
+            connection.execute(text("UPDATE payout_destination_verification_attempts SET state='FINAL' WHERE attempt_id=:attempt_id"),
+                               {"attempt_id": attempt_id})
         with pytest.raises(IntegrityError):
             connection.execute(text("UPDATE payout_destination_verification_attempts SET state=:target WHERE attempt_id=:attempt_id"),
                                {"target": target, "attempt_id": attempt_id})
@@ -313,6 +328,8 @@ def test_evidence_constraints_append_only_freshness_and_no_promotion(database):
         with pytest.raises(IntegrityError):
             _insert_evidence(connection, attempt_pk, sequence=6, state="FINAL", outcome="CONFIRMED", digest="sha256:" + "f" * 64)
         with pytest.raises(IntegrityError):
+            _insert_evidence(connection, attempt_pk, sequence=6, state="PENDING", digest="sha256:" + "7" * 64)
+        with pytest.raises(IntegrityError):
             connection.execute(text("UPDATE payout_destination_verification_evidence SET reason_code='changed' WHERE verification_attempt_id=:id"), {"id": attempt_pk})
         with pytest.raises(IntegrityError):
             connection.execute(text("DELETE FROM payout_destination_verification_evidence WHERE verification_attempt_id=:id"), {"id": attempt_pk})
@@ -326,12 +343,14 @@ def test_authenticity_constraints_and_provider_ids_are_nullable_nonunique(databa
     with database.begin() as connection:
         _insert_attempt(connection, destination_id=destination_id, attempt_id="auth-attempt", idempotency_key="auth-idem")
         pk = _attempt_pk(connection, "auth-attempt")
-        _insert_evidence(connection, pk, state="FINAL", outcome="NOT_CONFIRMED", digest="sha256:" + "1" * 64,
-                         authenticity="AUTHENTIC", method="authenticated-response", checked_at="2026-01-02 03:04:00+00:00",
-                         provider_event_id="reused-event")
+        _insert_evidence(connection, pk, digest="sha256:" + "1" * 64)
         with pytest.raises(IntegrityError):
             _insert_evidence(connection, pk, sequence=2, digest="sha256:" + "2" * 64,
                              authenticity="AUTHENTIC", checked_at=None)
+        _insert_evidence(connection, pk, sequence=2, state="FINAL", outcome="NOT_CONFIRMED",
+                         digest="sha256:" + "3" * 64, authenticity="AUTHENTIC",
+                         method="authenticated-response", checked_at="2026-01-02 03:04:00+00:00",
+                         provider_event_id="reused-event")
         columns = {column["name"]: column for column in inspect(connection).get_columns("payout_destination_verification_evidence")}
         for name in ("provider_request_id", "provider_response_id", "provider_event_id"):
             assert columns[name]["nullable"] is True
@@ -341,6 +360,78 @@ def test_authenticity_constraints_and_provider_ids_are_nullable_nonunique(databa
     with database.begin() as connection:
         _insert_attempt(connection, destination_id=other_destination_id, attempt_id="auth-attempt-2", idempotency_key="auth-idem-2")
         _insert_evidence(connection, _attempt_pk(connection, "auth-attempt-2"), provider_event_id="reused-event")
+
+
+@pytest.mark.parametrize("target", ["PENDING", "FINAL"])
+def test_attempt_transition_requires_matching_evidence(database, target):
+    destination_id = 81800 + (1 if target == "FINAL" else 0)
+    _insert_destination(database, destination_id)
+    attempt_id = f"requires-{target}"
+    with database.begin() as connection:
+        _insert_attempt(connection, destination_id=destination_id, attempt_id=attempt_id,
+                        idempotency_key=f"requires-idem-{target}")
+        if target == "FINAL":
+            pending_digest = "sha256:" + "4" * 64
+            _insert_evidence(connection, _attempt_pk(connection, attempt_id), digest=pending_digest)
+            connection.execute(text("UPDATE payout_destination_verification_attempts SET state='PENDING' WHERE attempt_id=:id"),
+                               {"id": attempt_id})
+        with pytest.raises(IntegrityError):
+            connection.execute(text("UPDATE payout_destination_verification_attempts SET state=:state WHERE attempt_id=:id"),
+                               {"state": target, "id": attempt_id})
+
+        attempt_pk = _attempt_pk(connection, attempt_id)
+        outcome = "CONFIRMED" if target == "FINAL" else None
+        _insert_evidence(connection, attempt_pk, sequence=2 if target == "FINAL" else 1,
+                         state=target, outcome=outcome, digest="sha256:" + ("5" if target == "FINAL" else "6") * 64)
+        connection.execute(text("UPDATE payout_destination_verification_attempts SET state=:state WHERE attempt_id=:id"),
+                           {"state": target, "id": attempt_id})
+
+
+@pytest.mark.parametrize("initial_state", ["REQUESTED", "PENDING"])
+def test_final_evidence_is_terminal_before_attempt_state_changes(database, initial_state):
+    destination_id = 81900 + (1 if initial_state == "PENDING" else 0)
+    _insert_destination(database, destination_id)
+    attempt_id = f"terminal-evidence-{initial_state}"
+    with database.begin() as connection:
+        _insert_attempt(connection, destination_id=destination_id, attempt_id=attempt_id,
+                        idempotency_key=f"terminal-idem-{initial_state}")
+        attempt_pk = _attempt_pk(connection, attempt_id)
+        if initial_state == "PENDING":
+            _insert_evidence(connection, attempt_pk, digest="sha256:" + "1" * 64)
+            connection.execute(text("UPDATE payout_destination_verification_attempts SET state='PENDING' WHERE attempt_id=:id"),
+                               {"id": attempt_id})
+        _insert_evidence(connection, attempt_pk, sequence=2 if initial_state == "PENDING" else 1,
+                         state="FINAL", outcome="CONFIRMED", digest="sha256:" + "2" * 64)
+        with pytest.raises(IntegrityError):
+            _insert_evidence(connection, attempt_pk, sequence=3, digest="sha256:" + "3" * 64)
+        with pytest.raises(IntegrityError):
+            _insert_evidence(connection, attempt_pk, sequence=3, state="FINAL", outcome="CONFIRMED",
+                             digest="sha256:" + "4" * 64)
+
+
+@pytest.mark.parametrize("evidence_state", ["PENDING", "FINAL"])
+def test_attempt_final_rejects_all_later_evidence(database, evidence_state):
+    destination_id = 82000 + (1 if evidence_state == "FINAL" else 0)
+    _insert_destination(database, destination_id)
+    attempt_id = f"closed-attempt-{evidence_state}"
+    with database.begin() as connection:
+        _insert_attempt(connection, destination_id=destination_id, attempt_id=attempt_id,
+                        idempotency_key=f"closed-idem-{evidence_state}")
+        attempt_pk = _attempt_pk(connection, attempt_id)
+        if evidence_state == "PENDING":
+            _insert_evidence(connection, attempt_pk, state="PENDING")
+            connection.execute(text("UPDATE payout_destination_verification_attempts SET state='PENDING' WHERE attempt_id=:id"),
+                               {"id": attempt_id})
+        _insert_evidence(connection, attempt_pk, sequence=2 if evidence_state == "PENDING" else 1,
+                         state="FINAL", outcome="CONFIRMED", digest="sha256:" + "9" * 64)
+        connection.execute(text("UPDATE payout_destination_verification_attempts SET state='FINAL' WHERE attempt_id=:id"),
+                           {"id": attempt_id})
+        with pytest.raises(IntegrityError):
+            _insert_evidence(connection, attempt_pk, sequence=3, state="PENDING",
+                             digest="sha256:" + "a" * 64)
+        with pytest.raises(IntegrityError):
+            _insert_evidence(connection, attempt_pk, sequence=3, state="FINAL", outcome="CONFIRMED",
+                             digest="sha256:" + "b" * 64)
 
 
 def test_0101_still_blocks_verified_transition_and_insert(database):
@@ -401,6 +492,11 @@ def test_postgresql_guard_contract_is_present_without_live_connection():
         "DROP FUNCTION IF EXISTS pdva_guard()", "DROP FUNCTION IF EXISTS pdve_guard()",
         "postgresql_where=sa.text(\"state IN ('REQUESTED', 'PENDING')\")",
         "postgresql_where=sa.text(\"result_state = 'FINAL'\")",
+        "RAISE EXCEPTION 'PENDING state requires pending evidence'",
+        "RAISE EXCEPTION 'FINAL state requires final evidence'",
+        "attempt_state NOT IN ('REQUESTED', 'PENDING')",
+        "verification evidence cannot follow final evidence",
+        "FOR UPDATE;",
     ):
         assert text_fragment in source
 
