@@ -1,6 +1,7 @@
 """SQLite persistence contracts for payout destination verification service."""
 
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from importlib.util import module_from_spec, spec_from_file_location
 from itertools import count
@@ -145,8 +146,8 @@ def _result(
         outcome=outcome,
         provider_name=provider or attempt.provider_name,
         received_at=received_at,
-        provider_request_id="request-1",
-        provider_response_id="response-1",
+        provider_request_id=f"request-{event_id}",
+        provider_response_id=f"response-{event_id}",
         provider_event_id=event_id,
         provider_timestamp=provider_timestamp,
         reason_code="ownership.confirmed" if outcome is VerificationOutcome.CONFIRMED else None,
@@ -343,6 +344,184 @@ def test_evidence_replay_is_idempotent_and_final_replay_remains_allowed(db):
     assert first.sequence == second.sequence == 1
     assert db.query(PayoutDestinationVerificationEvidence).count() == 1
     assert attempt.state == "FINAL"
+
+
+@pytest.mark.parametrize("seconds", [-30, 30])
+def test_same_delivery_replay_with_different_received_at_reuses_v1_evidence(db, seconds):
+    destination, actor = _new_destination(db)
+    attempt = _start(db, destination, actor=actor)
+    original_result = _result(attempt)
+    stored = _record(db, original_result)
+    original_digest = stored.evidence_digest
+    redelivery = replace(
+        original_result,
+        received_at=_NOW + timedelta(seconds=seconds),
+        evidence_digest=original_digest,
+    )
+
+    # v1 remains the digest of the original persisted evidence, including its
+    # local received_at; logical redelivery identity is a separate comparison.
+    recalculated_v1 = service.compute_evidence_digest(
+        attempt,
+        redelivery,
+        authenticity_status="NOT_CHECKED",
+        authenticity_method=None,
+        authenticity_checked_at=None,
+        freshness=DestinationFreshness.CURRENT,
+    )
+    assert recalculated_v1 != original_digest
+
+    replayed = _record(db, redelivery)
+    assert replayed.id == stored.id
+    assert replayed.evidence_digest == original_digest
+    assert service._timestamp(replayed.received_at) == service._timestamp(_NOW)
+    assert db.query(PayoutDestinationVerificationEvidence).count() == 1
+    assert attempt.state == "FINAL"
+    assert destination.verification_status == "UNVERIFIED"
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"outcome": VerificationOutcome.NOT_CONFIRMED},
+        {"reason_code": "ownership.not_confirmed"},
+        {"provider_timestamp": _NOW + timedelta(seconds=1)},
+    ],
+)
+def test_same_provider_correlations_with_divergent_content_conflict(db, changes):
+    destination, actor = _new_destination(db)
+    attempt = _start(db, destination, actor=actor)
+    original = _result(attempt)
+    _record(db, original)
+    changed = replace(original, **changes)
+    with pytest.raises(service.PayoutVerificationConflict):
+        _record(db, changed)
+    assert db.query(PayoutDestinationVerificationEvidence).count() == 1
+
+
+def test_changed_provider_event_id_is_not_hidden_as_same_delivery(db):
+    destination, actor = _new_destination(db)
+    attempt = _start(db, destination, actor=actor)
+    _record(db, _result(attempt))
+    with pytest.raises(service.PayoutVerificationConflict):
+        _record(db, replace(_result(attempt), provider_event_id="different-event"))
+    assert db.query(PayoutDestinationVerificationEvidence).count() == 1
+
+
+def test_shared_provider_request_can_have_distinct_async_delivery_events(db):
+    destination, actor = _new_destination(db)
+    attempt = _start(db, destination, actor=actor)
+    pending = replace(
+        _result(attempt, state=VerificationResultState.PENDING, event_id="event-pending"),
+        provider_request_id="request-shared",
+        provider_response_id="response-pending",
+    )
+    _record(db, pending)
+    final = replace(
+        _result(attempt, event_id="event-final"),
+        provider_request_id="request-shared",
+        provider_response_id="response-final",
+    )
+    stored_final = _record(db, final)
+    replay = _record(db, replace(final, received_at=_NOW + timedelta(seconds=10)))
+    assert replay.id == stored_final.id
+    assert db.query(PayoutDestinationVerificationEvidence).count() == 2
+
+
+@pytest.mark.parametrize(
+    ("status", "method"),
+    [("INVALID", "authenticated-response"), ("UNVERIFIABLE", "authenticated-response"), ("AUTHENTIC", "different-method")],
+)
+def test_authenticity_status_or_method_change_is_not_hidden_as_replay(db, status, method):
+    destination, actor = _new_destination(db)
+    attempt = _start(db, destination, actor=actor)
+    result = _result(attempt)
+    _record(db, result, status="AUTHENTIC", method="authenticated-response", checked_at=_NOW)
+    with pytest.raises(service.PayoutVerificationConflict):
+        _record(db, result, status=status, method=method, checked_at=_NOW + timedelta(seconds=1))
+    assert db.query(PayoutDestinationVerificationEvidence).count() == 1
+
+
+def test_not_checked_to_authentic_is_not_hidden_as_replay(db):
+    destination, actor = _new_destination(db)
+    attempt = _start(db, destination, actor=actor)
+    result = _result(attempt)
+    _record(db, result)
+    with pytest.raises(service.PayoutVerificationConflict):
+        _record(
+            db,
+            result,
+            status="AUTHENTIC",
+            method="authenticated-response",
+            checked_at=_NOW + timedelta(seconds=1),
+        )
+    assert db.query(PayoutDestinationVerificationEvidence).count() == 1
+
+
+def test_authenticity_checked_at_is_local_metadata_for_same_authenticated_delivery(db):
+    destination, actor = _new_destination(db)
+    attempt = _start(db, destination, actor=actor)
+    result = _result(attempt)
+    stored = _record(
+        db,
+        result,
+        status="AUTHENTIC",
+        method="authenticated-response",
+        checked_at=_NOW,
+    )
+    replayed = _record(
+        db,
+        replace(result, received_at=_NOW + timedelta(seconds=5)),
+        status="AUTHENTIC",
+        method="authenticated-response",
+        checked_at=_NOW + timedelta(seconds=5),
+    )
+    assert replayed.id == stored.id
+    assert service._timestamp(replayed.authenticity_checked_at) == service._timestamp(_NOW)
+    assert service._timestamp(replayed.received_at) == service._timestamp(_NOW)
+    assert db.query(PayoutDestinationVerificationEvidence).count() == 1
+
+
+@pytest.mark.parametrize("replace_destination", [False, True])
+def test_same_delivery_redelivery_after_revoke_or_replacement_preserves_original_evidence(
+    db, replace_destination
+):
+    destination, actor = _new_destination(db)
+    attempt = _start(db, destination, actor=actor)
+    pending = _result(attempt, state=VerificationResultState.PENDING)
+    original = _record(db, pending)
+
+    if replace_destination:
+        replacement = _replace_destination(db, destination, actor)
+        expected_status = "STALE"
+        assert replacement.verification_status == "UNVERIFIED"
+    else:
+        destination.verification_status = "REVOKED"
+        destination.revoked_at = _NOW + timedelta(minutes=1)
+        destination.revoked_by = actor
+        db.flush()
+        expected_status = "REVOKED"
+
+    replay = _record(db, replace(pending, received_at=_NOW + timedelta(minutes=2)))
+    assert replay.id == original.id
+    assert replay.freshness == "CURRENT"
+    assert db.query(PayoutDestinationVerificationEvidence).count() == 1
+
+    # A genuinely new delivery is evaluated against the destination state at
+    # processing time and records the new freshness, without consuming it.
+    new_delivery = replace(
+        _result(attempt, event_id="event-new"),
+        provider_request_id="request-new",
+        provider_response_id="response-new",
+    )
+    fresh_evidence = _record(db, new_delivery)
+    assert fresh_evidence.id != original.id
+    assert fresh_evidence.freshness == expected_status
+    assert db.query(PayoutDestinationVerificationEvidence).count() == 2
+    assert destination.verification_status == "REVOKED"
+    assert (replacement.verification_status if replace_destination else None) == (
+        "UNVERIFIED" if replace_destination else None
+    )
 
 
 def test_digest_mismatch_and_same_digest_conflicting_content_fail_closed(db):
@@ -695,6 +874,45 @@ def test_same_idempotency_concurrently_returns_one_attempt(db, engine):
         assert session.query(PayoutDestinationVerificationAttempt).filter_by(
             idempotency_key="concurrent-same-idem"
         ).count() == 1
+
+
+def test_same_delivery_concurrently_replays_with_different_received_at(db, engine):
+    destination, actor = _new_destination(db)
+    attempt = _start(db, destination, actor=actor)
+    attempt_id = attempt.attempt_id
+    base_result = _result(attempt)
+    db.commit()
+    barrier = Barrier(2)
+
+    def worker(seconds):
+        with Session(engine, expire_on_commit=False) as session:
+            barrier.wait(timeout=10)
+            evidence = _record(
+                session,
+                replace(base_result, received_at=_NOW + timedelta(seconds=seconds)),
+            )
+            evidence_id = evidence.id
+            session.commit()
+            return evidence_id
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        evidence_ids = list(pool.map(worker, (1, 2)))
+    assert evidence_ids[0] == evidence_ids[1]
+    with Session(engine) as session:
+        attempt_row = session.query(PayoutDestinationVerificationAttempt).filter_by(
+            attempt_id=attempt_id
+        ).one()
+        rows = session.query(PayoutDestinationVerificationEvidence).filter_by(
+            verification_attempt_id=attempt_row.id
+        ).all()
+        destination_row = session.get(MemberPayoutDestination, destination.id)
+        assert len(rows) == 1
+        assert service._timestamp(rows[0].received_at) in {
+            service._timestamp(_NOW + timedelta(seconds=1)),
+            service._timestamp(_NOW + timedelta(seconds=2)),
+        }
+        assert attempt_row.state == "FINAL"
+        assert destination_row.verification_status == "UNVERIFIED"
 
 
 def test_different_concurrent_attempts_for_same_destination_conflict(db, engine):

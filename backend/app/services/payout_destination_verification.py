@@ -33,6 +33,7 @@ from app.models import (
 
 
 EVIDENCE_SCHEMA_VERSION = "payout_verification_evidence_v1"
+_DELIVERY_IDENTITY_SCHEMA_VERSION = "payout_verification_delivery_v1"
 _AUTHENTICITY_STATUSES = frozenset(
     {"NOT_CHECKED", "AUTHENTIC", "INVALID", "UNVERIFIABLE"}
 )
@@ -416,6 +417,135 @@ def _evidence_matches(
     return True
 
 
+def _delivery_identity_payload(
+    attempt,
+    *,
+    result_state: str,
+    outcome: str | None,
+    reason_code: str | None,
+    provider_name: str,
+    provider_request_id: str | None,
+    provider_response_id: str | None,
+    provider_event_id: str | None,
+    provider_timestamp: datetime | None,
+    authenticity_status: str,
+    authenticity_method: str | None,
+) -> str:
+    """Canonical identity for one logical provider delivery.
+
+    ``received_at``, ``authenticity_checked_at`` and destination freshness
+    describe local handling/state at receipt time. They remain in the v1
+    persisted evidence digest, but do not identify a provider delivery.
+    Authenticity status and method remain semantic and are included.
+    """
+    payload = {
+        "attempt_id": attempt.attempt_id,
+        "authenticity_method": authenticity_method,
+        "authenticity_status": authenticity_status,
+        "destination_id": attempt.destination_id,
+        "destination_version": attempt.destination_version,
+        "outcome": outcome,
+        "provider_event_id": provider_event_id,
+        "provider_name": provider_name,
+        "provider_request_id": provider_request_id,
+        "provider_response_id": provider_response_id,
+        "provider_timestamp": _timestamp(provider_timestamp),
+        "reason_code": reason_code,
+        "result_state": result_state,
+        "schema_version": _DELIVERY_IDENTITY_SCHEMA_VERSION,
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _result_delivery_fingerprint(attempt, result, *, authenticity_status, authenticity_method) -> str:
+    payload = _delivery_identity_payload(
+        attempt,
+        result_state=result.state.value,
+        outcome=result.outcome.value if result.outcome is not None else None,
+        reason_code=result.reason_code,
+        provider_name=result.provider_name,
+        provider_request_id=result.provider_request_id,
+        provider_response_id=result.provider_response_id,
+        provider_event_id=result.provider_event_id,
+        provider_timestamp=result.provider_timestamp,
+        authenticity_status=authenticity_status,
+        authenticity_method=authenticity_method,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _evidence_delivery_fingerprint(attempt, evidence) -> str:
+    payload = _delivery_identity_payload(
+        attempt,
+        result_state=evidence.result_state,
+        outcome=evidence.outcome,
+        reason_code=evidence.reason_code,
+        provider_name=attempt.provider_name,
+        provider_request_id=evidence.provider_request_id,
+        provider_response_id=evidence.provider_response_id,
+        provider_event_id=evidence.provider_event_id,
+        provider_timestamp=evidence.provider_timestamp,
+        authenticity_status=evidence.authenticity_status,
+        authenticity_method=evidence.authenticity_method,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _shares_provider_correlation(evidence, result) -> bool:
+    """Identify reused delivery correlations without treating request IDs as events.
+
+    Providers may use one request ID for multiple asynchronous responses. An
+    event ID, then response ID, is the stronger delivery discriminator.
+    """
+    if result.provider_event_id is not None and evidence.provider_event_id is not None:
+        if result.provider_event_id == evidence.provider_event_id:
+            return True
+        if result.provider_response_id is not None and evidence.provider_response_id is not None:
+            return result.provider_response_id == evidence.provider_response_id
+        return False
+    if result.provider_response_id is not None and evidence.provider_response_id is not None:
+        return result.provider_response_id == evidence.provider_response_id
+    if result.provider_request_id is not None and evidence.provider_request_id is not None:
+        return result.provider_request_id == evidence.provider_request_id
+    return False
+
+
+def _stored_attempt_evidence(db: Session, attempt):
+    return db.execute(
+        select(PayoutDestinationVerificationEvidence)
+        .where(PayoutDestinationVerificationEvidence.verification_attempt_id == attempt.id)
+        .order_by(PayoutDestinationVerificationEvidence.sequence)
+        .execution_options(populate_existing=True)
+    ).scalars().all()
+
+
+def _find_delivery_replay(
+    db: Session,
+    *,
+    attempt,
+    result,
+    authenticity_status: str,
+    authenticity_method: str | None,
+):
+    incoming_fingerprint = _result_delivery_fingerprint(
+        attempt,
+        result,
+        authenticity_status=authenticity_status,
+        authenticity_method=authenticity_method,
+    )
+    has_conflicting_correlation = False
+    for stored in _stored_attempt_evidence(db, attempt):
+        if _evidence_delivery_fingerprint(attempt, stored) == incoming_fingerprint:
+            return stored
+        if _shares_provider_correlation(stored, result):
+            has_conflicting_correlation = True
+    if has_conflicting_correlation:
+        raise PayoutVerificationConflict(
+            "Provider delivery correlation conflicts with stored evidence."
+        )
+    return None
+
+
 def _advance_attempt(db: Session, attempt, result_state: str) -> None:
     if result_state == "PENDING":
         if attempt.state == "REQUESTED":
@@ -496,6 +626,29 @@ def record_verification_result(
     if result.provider_name != attempt.provider_name:
         raise PayoutVerificationConflict("Provider does not match the verification attempt.")
 
+    # Look for a logical redelivery before recalculating local freshness or a
+    # v1 evidence digest. Both may differ since the original delivery was
+    # stored, while the provider result itself remains the same.
+    replay = _find_delivery_replay(
+        db,
+        attempt=attempt,
+        result=result,
+        authenticity_status=auth_status,
+        authenticity_method=auth_method,
+    )
+    if replay is not None:
+        if result.evidence_digest is not None and result.evidence_digest != replay.evidence_digest:
+            raise PayoutVerificationConflict("Evidence digest does not match stored evidence.")
+        # A repeated earlier PENDING delivery must not try to move an already
+        # FINAL attempt backwards. Other recoverable states are advanced.
+        if attempt.state != "FINAL":
+            with db.begin_nested():
+                _advance_attempt(db, attempt, result.state.value)
+        return replay
+
+    if attempt.state == "FINAL":
+        raise PayoutVerificationConflict("Verification attempt is already final.")
+
     freshness = _freshness_for_attempt(
         db, attempt, locked_destination.member_id, locked_destination
     )
@@ -530,8 +683,9 @@ def record_verification_result(
             digest=digest,
         ):
             raise PayoutVerificationIntegrityError("Stored evidence conflicts with its digest.")
-        with db.begin_nested():
-            _advance_attempt(db, attempt, result.state.value)
+        if attempt.state != "FINAL":
+            with db.begin_nested():
+                _advance_attempt(db, attempt, result.state.value)
         return existing
 
     if attempt.state == "FINAL":
@@ -577,26 +731,19 @@ def record_verification_result(
             db.flush()
             _advance_attempt(db, attempt, result.state.value)
     except IntegrityError:
-        existing = db.execute(
-            select(PayoutDestinationVerificationEvidence)
-            .where(
-                PayoutDestinationVerificationEvidence.verification_attempt_id == attempt.id,
-                PayoutDestinationVerificationEvidence.evidence_digest == digest,
-            )
-            .execution_options(populate_existing=True)
-        ).scalar_one_or_none()
-        if existing is not None and _evidence_matches(
-            existing,
+        existing = _find_delivery_replay(
+            db,
             attempt=attempt,
             result=result,
             authenticity_status=auth_status,
             authenticity_method=auth_method,
-            authenticity_checked_at=auth_checked,
-            freshness=freshness,
-            digest=digest,
-        ):
-            with db.begin_nested():
-                _advance_attempt(db, attempt, result.state.value)
+        )
+        if existing is not None:
+            if result.evidence_digest is not None and result.evidence_digest != existing.evidence_digest:
+                raise PayoutVerificationConflict("Evidence digest does not match stored evidence.") from None
+            if attempt.state != "FINAL":
+                with db.begin_nested():
+                    _advance_attempt(db, attempt, result.state.value)
             return existing
         raise PayoutVerificationConflict("Verification result conflicts with stored state.") from None
     return evidence
