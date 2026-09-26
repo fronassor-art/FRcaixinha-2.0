@@ -468,10 +468,15 @@ def record_verification_result(
     ).one_or_none()
     if attempt_locator is None:
         raise PayoutVerificationNotFound("Verification attempt was not found.")
-    destination = _destination_projection(db, attempt_locator.destination_id)
-    if destination is None:
+    destination_locator = _destination_projection(db, attempt_locator.destination_id)
+    if destination_locator is None:
         raise PayoutVerificationIntegrityError("Verification destination binding is invalid.")
-    _lock_member(db, destination.member_id)
+    # The pre-lock projection is only a locator for the structurally immutable
+    # member_id. Status and version data must be refreshed after serialization.
+    _lock_member(db, destination_locator.member_id)
+    locked_destination = _destination_projection(db, attempt_locator.destination_id)
+    if locked_destination is None:
+        raise PayoutVerificationIntegrityError("Verification destination binding is invalid.")
 
     statement = select(PayoutDestinationVerificationAttempt).where(
         PayoutDestinationVerificationAttempt.attempt_id == result.attempt_id
@@ -482,15 +487,18 @@ def record_verification_result(
     if attempt is None:
         raise PayoutVerificationNotFound("Verification attempt was not found.")
     if (
-        attempt.destination_id != destination.id
-        or attempt.destination_version != destination.version
-        or attempt.key_type != destination.key_type
+        attempt.destination_id != locked_destination.id
+        or attempt.destination_version != locked_destination.version
+        or attempt.key_type != locked_destination.key_type
+        or destination_locator.member_id != locked_destination.member_id
     ):
         raise PayoutVerificationIntegrityError("Verification destination binding is invalid.")
     if result.provider_name != attempt.provider_name:
         raise PayoutVerificationConflict("Provider does not match the verification attempt.")
 
-    freshness = _freshness_for_attempt(db, attempt, destination.member_id, destination)
+    freshness = _freshness_for_attempt(
+        db, attempt, locked_destination.member_id, locked_destination
+    )
     digest = compute_evidence_digest(
         attempt,
         result,

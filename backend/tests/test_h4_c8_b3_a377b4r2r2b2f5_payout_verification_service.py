@@ -485,6 +485,67 @@ def test_revoked_without_replacement_is_recorded_as_revoked(db):
     assert destination.verification_status == "REVOKED"
 
 
+def test_concurrent_revoke_is_refreshed_after_member_lock(db, monkeypatch):
+    destination, actor = _new_destination(db)
+    attempt = _start(db, destination, actor=actor)
+    original_lock = service._lock_member
+    original_projection = service._destination_projection
+    projected_statuses = []
+
+    def projection_with_status(session, destination_id):
+        projection = original_projection(session, destination_id)
+        projected_statuses.append(projection.verification_status if projection else None)
+        return projection
+
+    def revoke_before_lock(session, member_id):
+        # Deterministically model a concurrent revoke after the locator read
+        # and before this transaction acquires its member serialization lock.
+        destination.verification_status = "REVOKED"
+        destination.revoked_at = _NOW + timedelta(minutes=1)
+        destination.revoked_by = actor
+        session.flush()
+        original_lock(session, member_id)
+
+    monkeypatch.setattr(service, "_destination_projection", projection_with_status)
+    monkeypatch.setattr(service, "_lock_member", revoke_before_lock)
+
+    evidence = _record(db, _result(attempt))
+
+    assert projected_statuses == ["UNVERIFIED", "REVOKED"]
+    assert evidence.freshness == "REVOKED"
+    assert destination.verification_status == "REVOKED"
+
+
+def test_concurrent_replacement_is_refreshed_after_member_lock(db, monkeypatch):
+    destination, actor = _new_destination(db)
+    attempt = _start(db, destination, actor=actor)
+    original_lock = service._lock_member
+    original_projection = service._destination_projection
+    projected_statuses = []
+    replacements = []
+
+    def projection_with_status(session, destination_id):
+        projection = original_projection(session, destination_id)
+        projected_statuses.append(projection.verification_status if projection else None)
+        return projection
+
+    def replace_before_lock(session, member_id):
+        # Model replacement in the window between the locator read and lock.
+        replacements.append(_replace_destination(session, destination, actor))
+        original_lock(session, member_id)
+
+    monkeypatch.setattr(service, "_destination_projection", projection_with_status)
+    monkeypatch.setattr(service, "_lock_member", replace_before_lock)
+
+    evidence = _record(db, _result(attempt))
+
+    assert projected_statuses == ["UNVERIFIED", "REVOKED"]
+    assert evidence.freshness == "STALE"
+    assert replacements[0].version == destination.version + 1
+    assert replacements[0].verification_status == "UNVERIFIED"
+    assert destination.verification_status == "REVOKED"
+
+
 def test_synthetic_verified_destination_is_not_unverified_and_result_is_audit_only(db):
     destination, actor = _new_destination(db)
     attempt = _start(db, destination, actor=actor)
