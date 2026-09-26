@@ -225,7 +225,7 @@ def test_authorized_homologation_writer_hashes_supplied_password(monkeypatch):
     monkeypatch.setitem(sys.modules, "app.core.security", fake_security)
 
     user, member = homologation_seed.get_or_create_user(
-        FakeDB(), 1, "Synthetic", "seed@example.test", "synthetic-cpf",
+        FakeDB(), 1, "Synthetic", "seed@example.test", "52998224725",
         SimpleNamespace(), secret,
     )
 
