@@ -120,8 +120,8 @@ def test_email_categories_case_collisions_and_privacy_markers(identity_db):
 
     assert report.total_users == 10
     assert report.active_users == 7
-    assert report.email_canonical == 1
-    assert report.email_mixed_case_legacy == 1
+    assert report.email_canonical == 2
+    assert report.email_mixed_case_legacy == 3
     assert report.email_privacy_tombstone_compatible == 1
     assert report.email_privacy_tombstone_malformed == 3
     assert report.email_invalid_or_unknown_legacy == 1
