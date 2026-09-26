@@ -111,7 +111,7 @@ def _looks_like_email_tombstone(value: Any) -> bool:
     if not isinstance(value, str):
         return False
     candidate = value.lower()
-    return candidate.startswith("anon-") or candidate.endswith("@anon.invalid")
+    return candidate.startswith("anon-") and candidate.endswith("@anon.invalid")
 
 
 def _normalize_email_lookup_key(raw: Any) -> str | None:

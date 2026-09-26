@@ -129,6 +129,27 @@ def test_email_categories_case_collisions_and_privacy_markers(identity_db):
     assert report.email_case_collision_users == 3
 
 
+def test_normal_anon_prefix_emails_are_classified_normally(identity_db):
+    identity_db.add_all(
+        [
+            _user(1, cpf=CPF_A, email="anon-silva@gmail.com"),
+            _user(2, cpf=CPF_B, email="Anon-Silva@Example.com"),
+            _user(3, cpf=CPF_C, email="anon-user@example.com"),
+            _user(4, cpf="legacy-four", email="ANON-USER@example.com"),
+        ]
+    )
+    identity_db.commit()
+
+    report = evaluate_legacy_identity_preflight(identity_db)
+
+    assert report.email_canonical == 2
+    assert report.email_mixed_case_legacy == 2
+    assert report.email_privacy_tombstone_compatible == 0
+    assert report.email_privacy_tombstone_malformed == 0
+    assert report.email_case_collision_groups == 1
+    assert report.email_case_collision_users == 2
+
+
 def test_report_contains_only_integer_aggregate_fields_and_no_identity_values(
     identity_db,
 ):
