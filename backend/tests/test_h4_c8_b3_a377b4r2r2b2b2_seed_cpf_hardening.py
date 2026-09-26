@@ -55,6 +55,8 @@ class FakeDB:
 
     def add(self, row):
         self.added.append(row)
+        if getattr(row, "id", None) is None:
+            row.id = len(self.added)
 
     def flush(self):
         pass
