@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from app.core.cpf import CPFValidationError, normalize_cpf
+from app.core.cpf import CPFValidationError, cpf_storage_candidates, normalize_cpf
 from app.core.config import settings
 
 
@@ -63,6 +63,4 @@ def read_required_seed_cpf(env_name: str) -> str:
 
 def seed_cpf_storage_candidates(cpf: str) -> tuple[str, str]:
     """Return the canonical and formatted accepted storage forms of a CPF."""
-    canonical = normalize_cpf(cpf)
-    formatted = f"{canonical[:3]}.{canonical[3:6]}.{canonical[6:9]}-{canonical[9:]}"
-    return canonical, formatted
+    return cpf_storage_candidates(cpf)
