@@ -1,11 +1,12 @@
 from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 from app.db.session import get_db
 from app.models import User, UserSession, LoginAttempt, PasswordResetToken
 from app.schemas.auth import RegisterIn, LoginIn, TokenOut, PasswordChangeIn, PasswordResetRequestIn, PasswordResetConfirmIn, TwoFactorVerifyIn, TwoFactorCodeIn
 from app.core.security import hash_password, verify_password, create_access_token, new_session_jti, new_reset_token, hash_reset_token
-from app.core.cpf import CPFValidationError, normalize_cpf
+from app.core.cpf import CPFValidationError, cpf_storage_candidates, normalize_cpf
 from app.core.config import settings
 from app.services.notifications_v12 import create_notification, send_email
 from app.models import UserSecurity, TrustedDevice, SecurityEvent
@@ -46,16 +47,27 @@ def register(data: RegisterIn, request: Request, db: Session = Depends(get_db)):
         cpf = normalize_cpf(data.cpf)
     except CPFValidationError:
         raise HTTPException(422, "CPF inválido.") from None
+    cpf_candidates = cpf_storage_candidates(cpf)
     if db.query(User).filter(User.email == email).first():
         raise HTTPException(409, "E-mail já cadastrado.")
-    if db.query(User).filter(User.cpf == cpf).first():
+    if db.query(User).filter(User.cpf.in_(cpf_candidates)).first():
         raise HTTPException(409, "CPF já cadastrado.")
     user = User(name=data.name.strip(), email=email, cpf=cpf, phone=data.phone,
                 password_hash=hash_password(data.password), role="USER", accepted_terms_at=_now())
-    db.add(user); db.flush()
-    create_notification(db, user.id, "WELCOME", "Bem-vindo à FRcaixinha", "Sua conta foi criada com sucesso.")
-    token = _new_session(db, user, request)
-    db.commit()
+    try:
+        db.add(user)
+        db.flush()
+        create_notification(db, user.id, "WELCOME", "Bem-vindo à FRcaixinha", "Sua conta foi criada com sucesso.")
+        token = _new_session(db, user, request)
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+
+        if db.query(User).filter(User.email == email).first():
+            raise HTTPException(409, "E-mail já cadastrado.") from None
+        if db.query(User).filter(User.cpf.in_(cpf_candidates)).first():
+            raise HTTPException(409, "CPF já cadastrado.") from None
+        raise
     return {"access_token": token, "token_type": "bearer"}
 
 @router.post("/login", response_model=TokenOut)

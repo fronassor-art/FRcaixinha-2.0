@@ -43,3 +43,10 @@ def normalize_cpf(value: str) -> str:
         raise CPFValidationError("CPF inválido.")
 
     return digits
+
+
+def cpf_storage_candidates(value: str) -> tuple[str, str]:
+    """Return the canonical and formatted accepted storage forms of a CPF."""
+    canonical = normalize_cpf(value)
+    formatted = f"{canonical[:3]}.{canonical[3:6]}.{canonical[6:9]}-{canonical[9:]}"
+    return canonical, formatted
