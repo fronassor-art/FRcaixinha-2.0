@@ -10,7 +10,8 @@ from __future__ import annotations
 import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from itertools import count
 from threading import Barrier
 
@@ -193,13 +194,18 @@ def _final_result(attempt) -> VerificationResult:
     )
 
 
-def _record_final(session: Session, result: VerificationResult):
+def _record_final(
+    session: Session,
+    result: VerificationResult,
+    *,
+    authenticity_checked_at: datetime = _NOW,
+):
     return verification_service.record_verification_result(
         session,
         result=result,
         authenticity_status="AUTHENTIC",
         authenticity_method="synthetic-ci-authenticated-response",
-        authenticity_checked_at=_NOW,
+        authenticity_checked_at=authenticity_checked_at,
     )
 
 
@@ -609,21 +615,25 @@ def test_same_final_result_concurrently_replays_under_postgresql_locks_live(
 
     event.listen(pg_engine, "before_cursor_execute", capture)
 
-    def worker():
+    def worker(worker_index: int):
         with Session(pg_engine) as session:
             barrier.wait(timeout=20)
-            evidence = _record_final(session, result)
+            evidence = _record_final(
+                session,
+                replace(result, received_at=_NOW + timedelta(seconds=worker_index)),
+                authenticity_checked_at=_NOW + timedelta(seconds=worker_index),
+            )
             evidence_id = evidence.id
             session.commit()
-            return evidence_id
+            return evidence_id, worker_index
 
     try:
         with ThreadPoolExecutor(max_workers=2) as pool:
-            evidence_ids = list(pool.map(lambda _index: worker(), range(2)))
+            evidence_ids = list(pool.map(worker, (1, 2)))
     finally:
         event.remove(pg_engine, "before_cursor_execute", capture)
 
-    assert evidence_ids[0] == evidence_ids[1]
+    assert evidence_ids[0][0] == evidence_ids[1][0]
     assert any("members" in statement for statement in lock_statements)
     assert any("payout_destination_verification_attempts" in statement for statement in lock_statements)
     with Session(pg_engine) as session:
@@ -631,10 +641,19 @@ def test_same_final_result_concurrently_replays_under_postgresql_locks_live(
             text("SELECT count(*) FROM payout_destination_verification_evidence WHERE verification_attempt_id=(SELECT id FROM payout_destination_verification_attempts WHERE attempt_id=:attempt)"),
             {"attempt": result.attempt_id},
         ).scalar_one() == 1
+        stored_received_at = session.execute(
+            text("SELECT received_at FROM payout_destination_verification_evidence WHERE verification_attempt_id=(SELECT id FROM payout_destination_verification_attempts WHERE attempt_id=:attempt)"),
+            {"attempt": result.attempt_id},
+        ).scalar_one()
+        assert stored_received_at in {_NOW + timedelta(seconds=1), _NOW + timedelta(seconds=2)}
         assert session.execute(
             text("SELECT state FROM payout_destination_verification_attempts WHERE attempt_id=:attempt"),
             {"attempt": result.attempt_id},
         ).scalar_one() == "FINAL"
+        assert session.execute(
+            text("SELECT verification_status FROM member_payout_destinations WHERE id=:destination"),
+            {"destination": identity.destination_id},
+        ).scalar_one() == "UNVERIFIED"
 
 
 @pytest.mark.parametrize(("replacement", "expected_freshness"), [(False, "REVOKED"), (True, "STALE")])
