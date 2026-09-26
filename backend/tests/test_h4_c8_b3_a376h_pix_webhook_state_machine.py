@@ -7,7 +7,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from app.api import payments as api
 from app.db.base import Base
-from app.models import Group, Loan, LoanInstallment, Member, Payment, PaymentReversal, PaymentSettlement, User, WebhookEvent
+from app.models import Contribution, Group, LedgerEntry, Loan, LoanInstallment, Member, Payment, PaymentReversal, PaymentSettlement, User, WebhookEvent
 from app.core.pix_attempt_v1 import build_loan_installment_snapshot, canonical_json, financial_date, local_expiry_utc, snapshot_hash
 from app.services.loan_installment_pix_attempts import _utc as normalize_utc
 
@@ -32,13 +32,17 @@ def test_temporary_provider_failure_keeps_webhook_retryable(monkeypatch):
 
 class EventRequest:
     headers={}
-    def __init__(self,event_id,payment_id="provider-1"): self.event_id=event_id; self.query_params={"data.id":payment_id}; self.payment_id=payment_id
-    async def json(self): return {"id":self.event_id,"type":"payment","data":{"id":self.payment_id}}
+    def __init__(self,event_id,payment_id="provider-1",event_type="payment"): self.event_id=event_id; self.query_params={"data.id":payment_id}; self.payment_id=payment_id; self.event_type=event_type
+    async def json(self): return {"id":self.event_id,"type":self.event_type,"data":{"id":self.payment_id}}
 
 def _db():
     engine=create_engine("sqlite:///:memory:");Base.metadata.create_all(engine);return sessionmaker(bind=engine)()
 def _payment(s, provider_id="provider-1", reference_type=None):
     p=Payment(provider="mercado_pago",provider_payment_id=provider_id,provider_order_id="order-"+provider_id,idempotency_key="key-"+provider_id,amount=Decimal("10.00"),status="pending",reference_type=reference_type);s.add(p);s.commit();return p
+def _contribution_payment(s, provider_id):
+    user=User(name="Webhook "+provider_id,email=provider_id+"@x.test",cpf="cpf-"+provider_id,password_hash="x");group=Group(name="Webhook "+provider_id);s.add_all([user,group]);s.flush();member=Member(user_id=user.id,group_id=group.id);s.add(member);s.flush()
+    contribution=Contribution(member_id=member.id,competence=date(2026,1,1),amount=Decimal("10.00"),paid_amount=Decimal("0.00"),status="PENDING");s.add(contribution);s.flush()
+    p=Payment(provider="mercado_pago",provider_payment_id=provider_id,provider_order_id="order-"+provider_id,idempotency_key="key-"+provider_id,amount=Decimal("10.00"),status="pending",reference_type="CONTRIBUTION",reference_id=str(contribution.id));s.add(p);s.commit();return p,contribution
 def _remote(provider_id,status="pending",**extra):
     payment={"id":provider_id,"status":status};payment.update(extra);return {"id":"order-"+provider_id,"status":status,"transactions":{"payments":[payment]}}
 
@@ -85,6 +89,26 @@ def test_approved_webhook_passes_exact_provider_confirmation_time_to_settlement(
     def settle(*args,**kwargs): seen.append(kwargs);return SimpleNamespace()
     monkeypatch.setattr(api.MercadoPagoClient,"get_order",order);monkeypatch.setattr(api,"settle_confirmed_pix_payment",settle)
     asyncio.run(api.mercado_pago_webhook(EventRequest("event-exact","exact"),s));stored=s.get(Payment,p.id);assert len(seen)==1 and seen[0]["confirmed_at"]==confirmed and seen[0]["confirmed_at"].tzinfo is not None and normalize_utc(stored.confirmed_at)==confirmed
+
+def test_processed_without_accredited_detail_does_not_settle(monkeypatch):
+    s=_db();p,contribution=_contribution_payment(s,"processed-unaccredited");monkeypatch.setattr(api,"validate_mercado_pago_signature",lambda *a,**k:True)
+    async def order(self,oid): return _remote("processed-unaccredited","processed",status_detail="pending_waiting_transfer",transaction_amount="10.00")
+    monkeypatch.setattr(api.MercadoPagoClient,"get_order",order)
+    asyncio.run(api.mercado_pago_webhook(EventRequest("event-unaccredited","processed-unaccredited"),s))
+    assert s.query(PaymentSettlement).filter_by(payment_id=p.id).count()==0
+    assert s.query(LedgerEntry).filter_by(reference_id=str(p.id)).count()==0
+    assert s.get(Contribution,contribution.id).status=="PENDING"
+
+def test_order_processed_accredited_settles_once_across_repeated_events(monkeypatch):
+    s=_db();p,contribution=_contribution_payment(s,"processed-accredited");monkeypatch.setattr(api,"validate_mercado_pago_signature",lambda *a,**k:True)
+    async def order(self,oid): return _remote("processed-accredited","processed",status_detail="accredited",transaction_amount="10.00",date_approved="2026-01-01T12:00:00Z")
+    monkeypatch.setattr(api.MercadoPagoClient,"get_order",order)
+    first=asyncio.run(api.mercado_pago_webhook(EventRequest("event-order-accredited-1","order-processed-accredited","order"),s))
+    second=asyncio.run(api.mercado_pago_webhook(EventRequest("event-order-accredited-2","order-processed-accredited","order"),s))
+    assert first["received"] and second["received"]
+    assert s.query(PaymentSettlement).filter_by(payment_id=p.id).count()==1
+    assert s.query(LedgerEntry).filter_by(reference_id=str(p.id)).count()==1
+    assert s.get(Contribution,contribution.id).status=="PAID"
 
 def test_valid_versioned_approved_webhook_settles_exactly_once(monkeypatch):
     s=_db();p,confirmed=_versioned_payment(s,"once");calls=[];monkeypatch.setattr(api,"validate_mercado_pago_signature",lambda *a,**k:True)

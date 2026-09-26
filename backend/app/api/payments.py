@@ -282,8 +282,13 @@ async def mercado_pago_webhook(request: Request, db: Session = Depends(get_db)):
             if event is None:
                 raise
 
-    if data.get("type") == "payment" and data_id:
-        payment = db.query(Payment).filter(Payment.provider == "mercado_pago", Payment.provider_payment_id == data_id).first()
+    event_type = str(data.get("type") or "").lower()
+    if event_type in {"payment", "order"} and data_id:
+        payment_query = db.query(Payment).filter(Payment.provider == "mercado_pago")
+        if event_type == "order":
+            payment = payment_query.filter(Payment.provider_order_id == data_id).first()
+        else:
+            payment = payment_query.filter(Payment.provider_payment_id == data_id).first()
         if payment is not None:
             if not payment.provider_order_id:
                 # Preserve the durable, retryable webhook evidence.
@@ -306,7 +311,10 @@ async def mercado_pago_webhook(request: Request, db: Session = Depends(get_db)):
             if status in {"refunded", "charged_back"}:
                 # Provider evidence is retained; financial reversal is explicit only.
                 payment.reconciliation_status = RECONCILIATION_REQUIRED
-            if status == "approved":
+            confirmed = status == "approved" or (
+                status == "processed" and remote_payment.get("status_detail") == "accredited"
+            )
+            if confirmed:
                 received = _remote_amount(remote_payment, remote)
                 if received is not None:
                     payment.amount_received = received
@@ -365,7 +373,7 @@ async def mercado_pago_webhook(request: Request, db: Session = Depends(get_db)):
                             if installment is not None and agreement is not None and member is not None:
                                 create_notification(db, member.user_id, "AGREEMENT_INSTALLMENT_PAID", "Parcela do acordo paga", f"A parcela {installment.number} do acordo #{agreement.id} foi confirmada.", "AGREEMENT_INSTALLMENT", str(installment.id))
             event.processed = True
-    elif data.get("type") != "payment":
+    elif event_type not in {"payment", "order"}:
         event.processed = True
     db.commit()
     return {"received": True, "reconciliable": not event.processed}

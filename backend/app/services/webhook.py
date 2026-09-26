@@ -31,8 +31,13 @@ def validate_mercado_pago_signature(
         ts_int = int(ts)
     except ValueError:
         return False
+
+    # Mercado Pago may send webhook timestamps in Unix seconds or in
+    # milliseconds. Freshness is checked in seconds, while the HMAC
+    # manifest below preserves the raw timestamp exactly as received.
+    ts_seconds = ts_int / 1000 if ts_int >= 1_000_000_000_000 else ts_int
     current = int(time.time()) if now is None else int(now)
-    if max_age_seconds >= 0 and abs(current - ts_int) > max_age_seconds:
+    if max_age_seconds >= 0 and abs(current - ts_seconds) > max_age_seconds:
         return False
     manifest_parts = []
     if data_id:

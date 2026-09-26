@@ -27,6 +27,7 @@ from app.models import (
 )
 from app.services.payment_settlement import settle_confirmed_pix_payment
 from app.services.agreements_v039 import decide_agreement
+from app.api.agreement_installment_payments import create_pix
 
 
 def _db():
@@ -99,6 +100,67 @@ def _settle(db, payment):
     db.commit()
     return settlement
 
+
+
+def test_agreement_installment_pix_persists_orders_metadata_and_reuses_pending(monkeypatch):
+    db = _db()
+    try:
+        member, agreement, rows = _agreement(db)
+        installment = rows[0]
+        user = db.get(User, member.user_id)
+        calls = []
+
+        async def fake_create(self, **kwargs):
+            calls.append(kwargs)
+            assert kwargs["amount"] == Decimal("100.00")
+            assert kwargs["external_reference"] == f"agreement_installment:{installment.id}"
+            return {
+                "id": "PAY-AGREEMENT-1",
+                "order_id": "ORDER-AGREEMENT-1",
+                "status": "pending",
+                "qr_code": "000201PIX-AGREEMENT-1",
+                "qr_code_base64": "base64-agreement-1",
+                "ticket_url": "https://pix.example/agreement-1",
+            }
+
+        monkeypatch.setattr(
+            "app.api.agreement_installment_payments.MercadoPagoClient.create_pix_payment",
+            fake_create,
+        )
+
+        first = asyncio.run(create_pix(installment.id, user, db))
+        payment = db.get(Payment, first["payment_id"])
+
+        assert payment.provider_order_id == "ORDER-AGREEMENT-1"
+        assert payment.provider_payment_id == "PAY-AGREEMENT-1"
+        assert payment.status == "pending"
+        assert payment.raw_status == "pending"
+        assert payment.qr_code == "000201PIX-AGREEMENT-1"
+        assert payment.qr_code_base64 == "base64-agreement-1"
+        assert payment.ticket_url == "https://pix.example/agreement-1"
+        assert payment.external_reference == f"agreement_installment:{installment.id}"
+        assert payment.reference_type == "AGREEMENT_INSTALLMENT"
+        assert payment.reference_id == str(installment.id)
+
+        second = asyncio.run(create_pix(installment.id, user, db))
+
+        assert len(calls) == 1
+        assert second["payment_id"] == first["payment_id"]
+        assert second["qr_code"] == first["qr_code"]
+        assert second["qr_code_base64"] == first["qr_code_base64"]
+        assert second["ticket_url"] == first["ticket_url"]
+
+        assert (
+            db.query(Payment)
+            .filter(
+                Payment.reference_type == "AGREEMENT_INSTALLMENT",
+                Payment.reference_id == str(installment.id),
+            )
+            .count()
+            == 1
+        )
+    finally:
+        db.close()
 
 def test_full_agreement_payment_without_penalty_creates_settlement_and_ledger():
     db = _db()
