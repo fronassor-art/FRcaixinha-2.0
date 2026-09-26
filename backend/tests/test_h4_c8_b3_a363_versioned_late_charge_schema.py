@@ -29,7 +29,7 @@ from app.models import LoanInstallment, LoanLateChargeEvent, PaymentSettlement
 
 REVISION = "0092_versioned_late_charge_foundation"
 PREVIOUS_REVISION = "0091_loan_calculation_version"
-HEAD_REVISION = "0101_member_payout_destination_a377b4r2"
+HEAD_REVISION = "0102_payout_verification_evidence_a377b4r3"
 EVENT_TYPES = {
     "FIXED_PENALTY_ASSESSED",
     "LATE_INTEREST_ACCRUED",

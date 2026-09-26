@@ -15,7 +15,7 @@ from app.db.base import Base
 from app.models import LoanLateChargeEvent
 
 
-HEAD_REVISION = "0101_member_payout_destination_a377b4r2"
+HEAD_REVISION = "0102_payout_verification_evidence_a377b4r3"
 REVISION = "0094_late_interest_event_contract"
 DOWN_REVISION = "0093_payment_attempt_schema_foundation"
 ADJUSTMENT_TYPES = {
