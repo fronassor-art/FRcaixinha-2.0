@@ -21,6 +21,7 @@ from app.core.cpf import CPFValidationError, normalize_cpf
 from app.core.seed_safety import (
     read_required_seed_cpf,
     read_required_seed_secret,
+    seed_cpf_storage_candidates,
     require_seed_execution,
 )
 
@@ -75,8 +76,10 @@ def get_or_create_user(db, index, name, email, cpf, income, password):
             raise RuntimeError("Existing homologation user identity is invalid.") from None
         if existing_cpf != expected_cpf:
             raise RuntimeError("Existing homologation user identity conflicts with configuration.")
-    elif db.query(User).filter(User.cpf == expected_cpf).first() is not None:
-        raise RuntimeError("Configured homologation CPF belongs to another user.")
+    else:
+        cpf_candidates = seed_cpf_storage_candidates(expected_cpf)
+        if db.query(User).filter(User.cpf.in_(cpf_candidates)).first() is not None:
+            raise RuntimeError("Configured homologation CPF belongs to another user.")
 
     if user is None:
         from app.core.security import hash_password

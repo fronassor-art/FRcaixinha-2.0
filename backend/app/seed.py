@@ -4,6 +4,7 @@ from app.core.cpf import CPFValidationError, normalize_cpf
 from app.core.seed_safety import (
     read_required_seed_cpf,
     read_required_seed_secret,
+    seed_cpf_storage_candidates,
     require_seed_execution,
 )
 
@@ -27,7 +28,8 @@ def get_or_create_admin(db, cpf, password):
             raise RuntimeError("Existing seed administrator identity conflicts with configuration.")
         return admin
 
-    if db.query(User).filter(User.cpf == cpf).first() is not None:
+    cpf_candidates = seed_cpf_storage_candidates(cpf)
+    if db.query(User).filter(User.cpf.in_(cpf_candidates)).first() is not None:
         raise RuntimeError("Configured seed administrator CPF belongs to another user.")
 
     from app.core.security import hash_password

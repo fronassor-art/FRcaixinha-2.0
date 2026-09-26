@@ -59,3 +59,10 @@ def read_required_seed_cpf(env_name: str) -> str:
         return normalize_cpf(value)
     except CPFValidationError:
         raise RuntimeError("Required seed CPF is invalid.") from None
+
+
+def seed_cpf_storage_candidates(cpf: str) -> tuple[str, str]:
+    """Return the canonical and formatted accepted storage forms of a CPF."""
+    canonical = normalize_cpf(cpf)
+    formatted = f"{canonical[:3]}.{canonical[3:6]}.{canonical[6:9]}-{canonical[9:]}"
+    return canonical, formatted

@@ -9,7 +9,7 @@ from app import seed as standard_seed
 from app import seed_homologacao as homologation_seed
 from app.core.cpf import CPFValidationError, normalize_cpf
 from app.core import seed_safety
-from app.core.seed_safety import read_required_seed_cpf
+from app.core.seed_safety import read_required_seed_cpf, seed_cpf_storage_candidates
 from app.models import Group, Member, User
 
 
@@ -37,10 +37,23 @@ class FakeQuery:
         self.lookup = None
 
     def filter(self, expression):
-        self.lookup = (self.model, expression.left.key, expression.right.value)
+        value = expression.right.value
+        if expression.operator.__name__ == "in_op":
+            value = tuple(value)
+        self.lookup = (self.model, expression.left.key, value)
         return self
 
     def first(self):
+        model, column, value = self.lookup
+        if isinstance(value, tuple):
+            return next(
+                (
+                    self.db.rows.get((model, column, candidate))
+                    for candidate in value
+                    if self.db.rows.get((model, column, candidate)) is not None
+                ),
+                None,
+            )
         return self.db.rows.get(self.lookup)
 
 
@@ -105,6 +118,19 @@ def test_required_seed_cpf_is_canonical_and_does_not_echo_invalid_value(monkeypa
         read_required_seed_cpf("TEST_SEED_CPF")
     assert marker not in str(caught.value)
     assert marker not in capsys.readouterr().out
+
+
+def test_seed_cpf_storage_candidates_are_exact_accepted_forms():
+    assert seed_cpf_storage_candidates("52998224725") == (
+        "52998224725",
+        "529.982.247-25",
+    )
+    assert seed_cpf_storage_candidates("529.982.247-25") == (
+        "52998224725",
+        "529.982.247-25",
+    )
+    with pytest.raises(CPFValidationError):
+        seed_cpf_storage_candidates("529-982-247-25")
 
 
 @pytest.mark.parametrize("value", [None, "", "   "])
@@ -241,22 +267,53 @@ def test_standard_cpf_owned_by_other_email_fails_closed():
     assert db.added == []
 
 
+@pytest.mark.parametrize(
+    ("stored_cpf", "configured_cpf"),
+    [
+        ("529.982.247-25", "52998224725"),
+        ("52998224725", "529.982.247-25"),
+    ],
+)
+def test_standard_equivalent_cpf_owned_by_other_email_fails_closed(
+    stored_cpf, configured_cpf
+):
+    owner = SimpleNamespace(cpf=stored_cpf)
+    db = FakeDB({(User, "cpf", stored_cpf): owner})
+
+    with pytest.raises(RuntimeError, match="belongs to another user") as caught:
+        standard_seed.get_or_create_admin(db, configured_cpf, "unused")
+
+    assert stored_cpf not in str(caught.value)
+    assert owner.cpf == stored_cpf
+    assert db.added == []
+
+
+def test_standard_same_email_formatted_cpf_is_reused_without_rewrite():
+    existing = SimpleNamespace(cpf="529.982.247-25", password_hash="unchanged")
+    db = FakeDB({(User, "email", "admin@frcaixinha.com"): existing})
+
+    assert standard_seed.get_or_create_admin(db, "52998224725", "unused") is existing
+
+    assert existing.cpf == "529.982.247-25"
+    assert db.added == []
+
+
 def test_homologation_existing_identity_requires_exact_cpf_and_never_rewrites():
-    existing = SimpleNamespace(id=12, cpf=VALID_CPFS[0], password_hash="unchanged")
+    existing = SimpleNamespace(id=12, cpf="529.982.247-25", password_hash="unchanged")
     db = FakeDB({(User, "email", "member@example.test"): existing})
     user, member = homologation_seed.get_or_create_user(
         db, 1, "Synthetic", "member@example.test", VALID_CPFS[0], 5000, "unused"
     )
     assert user is existing
     assert member is None
-    assert existing.cpf == VALID_CPFS[0]
+    assert existing.cpf == "529.982.247-25"
     assert db.added == []
 
     with pytest.raises(RuntimeError, match="conflicts"):
         homologation_seed.get_or_create_user(
             db, 1, "Synthetic", "member@example.test", VALID_CPFS[1], 5000, "unused"
         )
-    assert existing.cpf == VALID_CPFS[0]
+    assert existing.cpf == "529.982.247-25"
 
 
 def test_homologation_invalid_legacy_and_other_email_owner_fail_closed():
@@ -276,6 +333,20 @@ def test_homologation_invalid_legacy_and_other_email_owner_fail_closed():
         homologation_seed.get_or_create_user(
             db, 1, "Synthetic", "new@example.test", VALID_CPFS[0], 5000, "unused"
         )
+    assert db.added == []
+
+
+def test_homologation_formatted_equivalent_owned_by_other_email_fails_closed():
+    owner = SimpleNamespace(id=33, cpf="529.982.247-25")
+    db = FakeDB({(User, "cpf", owner.cpf): owner})
+
+    with pytest.raises(RuntimeError, match="belongs to another user") as caught:
+        homologation_seed.get_or_create_user(
+            db, 1, "Synthetic", "new@example.test", "52998224725", 5000, "unused"
+        )
+
+    assert owner.cpf not in str(caught.value)
+    assert owner.cpf == "529.982.247-25"
     assert db.added == []
 
 
