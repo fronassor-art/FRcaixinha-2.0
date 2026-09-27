@@ -373,8 +373,13 @@ def settle_confirmed_pix_payment(
     agreement_installment = None
     agreement = None
     if reference_type == "AGREEMENT_INSTALLMENT":
-        if payment.status != "approved":
-            raise ValueError("Pagamento de acordo precisa estar aprovado.")
+        agreement_confirmed = payment.status == "approved" or (
+            payment.status == "processed"
+            and isinstance(remote_payload, dict)
+            and remote_payload.get("status_detail") == "accredited"
+        )
+        if not agreement_confirmed:
+            raise ValueError("Pagamento de acordo sem confirmação financeira válida.")
         if not (payment.reference_id or "").isdigit():
             raise ValueError("Referência de parcela de acordo inválida.")
         # Read only to discover the parent; actual locks follow Agreement -> Installment.

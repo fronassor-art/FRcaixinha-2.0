@@ -95,8 +95,10 @@ def _payment(db, member, installment, *, amount, received=None, suffix="payment"
     return payment
 
 
-def _settle(db, payment):
-    settlement = settle_confirmed_pix_payment(db, payment, confirmation_source="TEST")
+def _settle(db, payment, *, remote_payload=None):
+    settlement = settle_confirmed_pix_payment(
+        db, payment, confirmation_source="TEST", remote_payload=remote_payload
+    )
     db.commit()
     return settlement
 
@@ -195,6 +197,94 @@ def test_full_agreement_payment_without_penalty_creates_settlement_and_ledger():
     assert ledger.account == "CAIXINHA"
     assert ledger.amount == settlement.amount_applied
     assert db.query(MemberFinancialEntry).count() == 0
+
+
+def test_processed_accredited_agreement_payment_settles_with_canonical_provider_evidence():
+    db = _db()
+    try:
+        member, agreement, rows = _agreement(
+            db, principal="90.00", penalty="10.00"
+        )
+        installment = rows[0]
+        payment = _payment(
+            db, member, installment, amount="100.00", suffix="processed-accredited"
+        )
+        payment.status = "processed"
+        payment.raw_status = "processed"
+
+        settlement = _settle(
+            db,
+            payment,
+            remote_payload={"status": "processed", "status_detail": "accredited"},
+        )
+
+        assert settlement.obligation_type == "AGREEMENT_INSTALLMENT"
+        assert settlement.amount_applied == Decimal("100.00")
+        assert settlement.principal_applied == Decimal("90.00")
+        assert settlement.penalty_applied == Decimal("10.00")
+        assert installment.paid_amount == Decimal("90.00")
+        assert installment.paid_penalty_amount == Decimal("10.00")
+        assert installment.status == "PAID"
+        assert agreement.status == "SETTLED"
+        assert payment.provider_status_detail == "accredited"
+        assert db.query(PaymentSettlement).filter_by(payment_id=payment.id).count() == 1
+        assert (
+            db.query(LedgerEntry)
+            .filter_by(
+                reference_type="AGREEMENT_INSTALLMENT_PAYMENT",
+                reference_id=str(payment.id),
+            )
+            .count()
+            == 1
+        )
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize(
+    ("status", "status_detail"),
+    [
+        ("processed", None),
+        ("processed", ""),
+        ("processed", "pending_waiting_transfer"),
+        ("processed", "other_detail"),
+        ("pending", "accredited"),
+        ("in_process", "accredited"),
+        ("rejected", "accredited"),
+        ("failed", "accredited"),
+        ("cancelled", "accredited"),
+        ("refunded", "accredited"),
+        ("charged_back", "accredited"),
+    ],
+)
+def test_unconfirmed_agreement_payment_has_no_financial_effect(status, status_detail):
+    db = _db()
+    try:
+        member, agreement, rows = _agreement(db)
+        installment = rows[0]
+        payment = _payment(
+            db, member, installment, amount="100.00", suffix=f"blocked-{status}-{status_detail}"
+        )
+        payment.status = status
+        payment.raw_status = status
+        before_revision = agreement.state_revision
+
+        with pytest.raises(ValueError, match="confirmação financeira válida"):
+            _settle(
+                db,
+                payment,
+                remote_payload={"status": status, "status_detail": status_detail},
+            )
+
+        assert db.query(PaymentSettlement).filter_by(payment_id=payment.id).count() == 0
+        assert db.query(LedgerEntry).filter_by(reference_id=str(payment.id)).count() == 0
+        assert installment.paid_amount == Decimal("0.00")
+        assert installment.paid_penalty_amount == Decimal("0.00")
+        assert installment.status == "OPEN"
+        assert agreement.status == "APPROVED"
+        assert agreement.state_revision == before_revision
+    finally:
+        db.close()
 
 
 def test_decide_agreement_increments_loan_revision_once():

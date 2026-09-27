@@ -7,7 +7,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from app.api import payments as api
 from app.db.base import Base
-from app.models import Contribution, Group, LedgerEntry, Loan, LoanInstallment, Member, Payment, PaymentReversal, PaymentSettlement, User, WebhookEvent
+from app.models import AgreementInstallment, CollectionAgreement, Contribution, Group, LedgerEntry, Loan, LoanInstallment, Member, Payment, PaymentReversal, PaymentSettlement, User, WebhookEvent
 from app.core.pix_attempt_v1 import build_loan_installment_snapshot, canonical_json, financial_date, local_expiry_utc, snapshot_hash
 from app.services.loan_installment_pix_attempts import _utc as normalize_utc
 
@@ -43,6 +43,14 @@ def _contribution_payment(s, provider_id):
     user=User(name="Webhook "+provider_id,email=provider_id+"@x.test",cpf="cpf-"+provider_id,password_hash="x");group=Group(name="Webhook "+provider_id);s.add_all([user,group]);s.flush();member=Member(user_id=user.id,group_id=group.id);s.add(member);s.flush()
     contribution=Contribution(member_id=member.id,competence=date(2026,1,1),amount=Decimal("10.00"),paid_amount=Decimal("0.00"),status="PENDING");s.add(contribution);s.flush()
     p=Payment(provider="mercado_pago",provider_payment_id=provider_id,provider_order_id="order-"+provider_id,idempotency_key="key-"+provider_id,amount=Decimal("10.00"),status="pending",reference_type="CONTRIBUTION",reference_id=str(contribution.id));s.add(p);s.commit();return p,contribution
+
+def _agreement_payment(s, provider_id):
+    user=User(name="Agreement webhook "+provider_id,email=provider_id+"@x.test",cpf="cpf-"+provider_id,password_hash="x");group=Group(name="Agreement webhook "+provider_id);s.add_all([user,group]);s.flush();member=Member(user_id=user.id,group_id=group.id);s.add(member);s.flush()
+    loan=Loan(member_id=member.id,principal=Decimal("10.00"),monthly_rate=Decimal("0"),installments=1,status="RESTRUCTURED");s.add(loan);s.flush()
+    agreement=CollectionAgreement(loan_id=loan.id,member_id=member.id,requested_by=user.id,status="APPROVED",installments=1,total_amount=Decimal("10.00"),snapshot="{}");s.add(agreement);s.flush()
+    installment=AgreementInstallment(agreement_id=agreement.id,number=1,due_date=date(2026,1,1),principal=Decimal("10.00"),penalty_amount=Decimal("0.00"),amount=Decimal("10.00"),paid_amount=Decimal("0.00"),paid_penalty_amount=Decimal("0.00"),status="OPEN");s.add(installment);s.flush()
+    payment=Payment(provider="mercado_pago",provider_order_id="order-"+provider_id,provider_payment_id=provider_id,idempotency_key="key-"+provider_id,amount=Decimal("10.00"),status="pending",raw_status="pending",reference_type="AGREEMENT_INSTALLMENT",reference_id=str(installment.id));s.add(payment);s.commit();return payment,agreement,installment
+
 def _remote(provider_id,status="pending",**extra):
     payment={"id":provider_id,"status":status};payment.update(extra);return {"id":"order-"+provider_id,"status":status,"transactions":{"payments":[payment]}}
 
@@ -109,6 +117,42 @@ def test_order_processed_accredited_settles_once_across_repeated_events(monkeypa
     assert s.query(PaymentSettlement).filter_by(payment_id=p.id).count()==1
     assert s.query(LedgerEntry).filter_by(reference_id=str(p.id)).count()==1
     assert s.get(Contribution,contribution.id).status=="PAID"
+
+def test_agreement_processed_accredited_webhook_settles_once_across_correlated_events(monkeypatch):
+    s=_db();p,agreement,installment=_agreement_payment(s,"agreement-processed-accredited");monkeypatch.setattr(api,"validate_mercado_pago_signature",lambda *a,**k:True)
+    async def order(self,oid): return _remote("agreement-processed-accredited","processed",status_detail="accredited",transaction_amount="10.00",date_approved="2026-01-01T12:00:00Z")
+    monkeypatch.setattr(api.MercadoPagoClient,"get_order",order)
+    first=asyncio.run(api.mercado_pago_webhook(EventRequest("event-agreement-processed-1",p.provider_payment_id),s))
+    s.refresh(p);s.refresh(agreement);s.refresh(installment)
+    revision_after_first=agreement.state_revision
+    paid_amount_after_first=installment.paid_amount
+    paid_penalty_after_first=installment.paid_penalty_amount
+    second=asyncio.run(api.mercado_pago_webhook(EventRequest("event-agreement-processed-2",p.provider_payment_id),s))
+    s.refresh(p);s.refresh(agreement);s.refresh(installment)
+    assert first["received"] and second["received"]
+    assert p.status=="processed" and p.provider_status_detail=="accredited"
+    assert s.query(PaymentSettlement).filter_by(payment_id=p.id).count()==1
+    assert s.query(LedgerEntry).filter_by(reference_type="AGREEMENT_INSTALLMENT_PAYMENT",reference_id=str(p.id)).count()==1
+    assert installment.status=="PAID" and agreement.status=="SETTLED"
+    assert installment.paid_amount==paid_amount_after_first==Decimal("10.00")
+    assert installment.paid_penalty_amount==paid_penalty_after_first==Decimal("0.00")
+    assert agreement.state_revision==revision_after_first
+    assert s.query(WebhookEvent).filter_by(event_id="event-agreement-processed-1").one().processed
+    assert s.query(WebhookEvent).filter_by(event_id="event-agreement-processed-2").one().processed
+
+def test_agreement_processed_without_accredited_detail_does_not_settle(monkeypatch):
+    s=_db();p,agreement,installment=_agreement_payment(s,"agreement-processed-pending");monkeypatch.setattr(api,"validate_mercado_pago_signature",lambda *a,**k:True)
+    async def order(self,oid): return _remote("agreement-processed-pending","processed",status_detail="pending_waiting_transfer",transaction_amount="10.00")
+    monkeypatch.setattr(api.MercadoPagoClient,"get_order",order)
+    result=asyncio.run(api.mercado_pago_webhook(EventRequest("event-agreement-processed-pending",p.provider_payment_id),s))
+    s.refresh(p);s.refresh(agreement);s.refresh(installment)
+    assert result["received"] and result["reconciliable"] is False
+    assert p.status=="processed"
+    assert s.query(PaymentSettlement).filter_by(payment_id=p.id).count()==0
+    assert s.query(LedgerEntry).filter_by(reference_id=str(p.id)).count()==0
+    assert installment.status=="OPEN" and installment.paid_amount==Decimal("0.00") and installment.paid_penalty_amount==Decimal("0.00")
+    assert agreement.status=="APPROVED"
+    assert s.query(WebhookEvent).filter_by(event_id="event-agreement-processed-pending").one().processed
 
 def test_valid_versioned_approved_webhook_settles_exactly_once(monkeypatch):
     s=_db();p,confirmed=_versioned_payment(s,"once");calls=[];monkeypatch.setattr(api,"validate_mercado_pago_signature",lambda *a,**k:True)
