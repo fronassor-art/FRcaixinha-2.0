@@ -36,7 +36,7 @@ async def create_pix(installment_id:int,user:User=Depends(current_user),db:Sessi
         not ag
         or not ai
         or not member
-        or member.id != ag.member_id
+        or member.user_id != user.id
         or ag.status not in ('APPROVED', 'SETTLED')
     ):
         raise HTTPException(404, 'Parcela do acordo não encontrada.')

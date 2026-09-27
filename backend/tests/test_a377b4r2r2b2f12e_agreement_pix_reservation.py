@@ -241,6 +241,135 @@ def test_reservation_is_durable_before_network_and_success_binds_same_payment(
     engine.dispose()
 
 
+def test_non_owner_cannot_create_agreement_pix_or_reach_provider(
+    tmp_path, monkeypatch
+):
+    engine, Session = _database(tmp_path)
+    db = Session()
+    owner, _, _, _, installment = _seed(db, "authorization-owner")
+    other_user, _, _, _, _ = _seed(db, "authorization-other")
+    provider_calls = []
+
+    async def forbidden_provider(self, **kwargs):
+        provider_calls.append(kwargs)
+        raise AssertionError("cross-user agreement PIX must not reach provider")
+
+    monkeypatch.setattr(
+        agreement_pix_api.MercadoPagoClient,
+        "create_pix_payment",
+        forbidden_provider,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(
+            agreement_pix_api.create_pix(installment.id, other_user, db)
+        )
+
+    assert exc_info.value.status_code == 404
+    assert exc_info.value.detail == "Parcela do acordo não encontrada."
+    assert provider_calls == []
+    assert (
+        db.query(Payment)
+        .filter_by(
+            reference_type="AGREEMENT_INSTALLMENT",
+            reference_id=str(installment.id),
+        )
+        .count()
+        == 0
+    )
+
+    # The actual owner remains authorized for the ordinary F12E path.
+    async def owner_provider(self, **kwargs):
+        return _provider_result("authorization-owner")
+
+    monkeypatch.setattr(
+        agreement_pix_api.MercadoPagoClient,
+        "create_pix_payment",
+        owner_provider,
+    )
+    owner_response = asyncio.run(
+        agreement_pix_api.create_pix(installment.id, owner, db)
+    )
+    assert owner_response["provider_payment_id"] == (
+        "agreement-provider-payment-authorization-owner"
+    )
+    assert (
+        db.query(Payment)
+        .filter_by(
+            reference_type="AGREEMENT_INSTALLMENT",
+            reference_id=str(installment.id),
+        )
+        .count()
+        == 1
+    )
+    db.close()
+    engine.dispose()
+
+
+def test_non_owner_cannot_read_or_reuse_existing_agreement_pix(
+    tmp_path, monkeypatch
+):
+    engine, Session = _database(tmp_path)
+    db = Session()
+    _, _, _, agreement, installment = _seed(db, "authorization-existing-owner")
+    other_user, _, _, _, _ = _seed(db, "authorization-existing-other")
+    payment, result = _reserved_fallback(db, installment, "authorization-existing")
+    original_values = {
+        "id": payment.id,
+        "provider_order_id": payment.provider_order_id,
+        "provider_payment_id": payment.provider_payment_id,
+        "qr_code": payment.qr_code,
+        "qr_code_base64": payment.qr_code_base64,
+        "ticket_url": payment.ticket_url,
+        "attempt_status": payment.attempt_status,
+        "reconciliation_status": payment.reconciliation_status,
+    }
+    provider_calls = []
+
+    async def forbidden_provider(self, **kwargs):
+        provider_calls.append(kwargs)
+        raise AssertionError("cross-user reuse must not reach provider")
+
+    monkeypatch.setattr(
+        agreement_pix_api.MercadoPagoClient,
+        "create_pix_payment",
+        forbidden_provider,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(
+            agreement_pix_api.create_pix(installment.id, other_user, db)
+        )
+
+    assert exc_info.value.status_code == 404
+    assert exc_info.value.detail == "Parcela do acordo não encontrada."
+    assert provider_calls == []
+    db.refresh(payment)
+    assert {
+        "id": payment.id,
+        "provider_order_id": payment.provider_order_id,
+        "provider_payment_id": payment.provider_payment_id,
+        "qr_code": payment.qr_code,
+        "qr_code_base64": payment.qr_code_base64,
+        "ticket_url": payment.ticket_url,
+        "attempt_status": payment.attempt_status,
+        "reconciliation_status": payment.reconciliation_status,
+    } == original_values
+    assert result["order_id"] == payment.provider_order_id
+    assert (
+        db.query(Payment)
+        .filter_by(
+            reference_type="AGREEMENT_INSTALLMENT",
+            reference_id=str(installment.id),
+        )
+        .count()
+        == 1
+    )
+    _no_financial_effect(db, payment, installment, agreement)
+    db.close()
+    engine.dispose()
+
+
 @pytest.mark.parametrize(
     "failure,reconciliation_status",
     [
