@@ -202,7 +202,9 @@ def test_full_agreement_payment_without_penalty_creates_settlement_and_ledger():
 def test_processed_accredited_agreement_payment_settles_with_canonical_provider_evidence():
     db = _db()
     try:
-        member, agreement, rows = _agreement(principal="90.00", penalty="10.00")
+        member, agreement, rows = _agreement(
+            db, principal="90.00", penalty="10.00"
+        )
         installment = rows[0]
         payment = _payment(
             db, member, installment, amount="100.00", suffix="processed-accredited"
@@ -258,7 +260,7 @@ def test_processed_accredited_agreement_payment_settles_with_canonical_provider_
 def test_unconfirmed_agreement_payment_has_no_financial_effect(status, status_detail):
     db = _db()
     try:
-        member, agreement, rows = _agreement()
+        member, agreement, rows = _agreement(db)
         installment = rows[0]
         payment = _payment(
             db, member, installment, amount="100.00", suffix=f"blocked-{status}-{status_detail}"
