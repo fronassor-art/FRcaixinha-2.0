@@ -465,11 +465,15 @@ class Payment(Base):
     payment_reversal: Mapped["PaymentReversal | None"] = relationship(back_populates="payment", uselist=False)
     __table_args__ = (
         CheckConstraint(
-            "provider_payment_id IS NOT NULL OR (reference_type = 'LOAN_INSTALLMENT' "
-            "AND reference_id IS NOT NULL AND attempt_status IS NOT NULL "
-            "AND idempotency_key IS NOT NULL AND calculated_for_date IS NOT NULL "
-            "AND financial_snapshot_json IS NOT NULL AND snapshot_hash IS NOT NULL "
-            "AND expires_at IS NOT NULL)",
+            "provider_payment_id IS NOT NULL OR "
+            "(reference_type = 'CONTRIBUTION' AND reference_id IS NOT NULL "
+            "AND idempotency_key IS NOT NULL AND attempt_status IS NOT NULL) OR "
+            "(reference_type = 'AGREEMENT_INSTALLMENT' AND reference_id IS NOT NULL "
+            "AND idempotency_key IS NOT NULL AND attempt_status IS NOT NULL) OR "
+            "(reference_type = 'LOAN_INSTALLMENT' AND reference_id IS NOT NULL "
+            "AND attempt_status IS NOT NULL AND idempotency_key IS NOT NULL "
+            "AND calculated_for_date IS NOT NULL AND financial_snapshot_json IS NOT NULL "
+            "AND snapshot_hash IS NOT NULL AND expires_at IS NOT NULL)",
             name="ck_payments_provider_id_or_versioned_loan_attempt",
         ),
         UniqueConstraint("provider", "provider_payment_id", name="uq_provider_payment"),
@@ -613,6 +617,7 @@ class WebhookEvent(Base):
     provider: Mapped[str] = mapped_column(String(40))
     event_id: Mapped[str] = mapped_column(String(150))
     event_type: Mapped[str | None] = mapped_column(String(100))
+    resource_id: Mapped[str | None] = mapped_column(String(150), nullable=True)
     processed: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     __table_args__ = (UniqueConstraint("provider", "event_id", name="uq_webhook_provider_event"),)
