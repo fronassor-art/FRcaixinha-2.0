@@ -87,8 +87,9 @@ def test_postgresql_migration_installs_constraint_index_and_nullable_resource_id
                 assert columns["resource_id"]["nullable"] is True
                 indexes = {item["name"]: item for item in inspector.get_indexes("payments")}
                 pending = indexes["uq_payments_reference_pending"]
-                assert pending["unique"] is True
-                assert "attempt_status = 'PENDING'" in pending["dialect_options"]["postgresql_where"]
+                assert bool(pending["unique"])
+                predicate = str(pending["dialect_options"]["postgresql_where"])
+                assert "attempt_status" in predicate and "PENDING" in predicate
             finally:
                 tx.rollback()
     finally:

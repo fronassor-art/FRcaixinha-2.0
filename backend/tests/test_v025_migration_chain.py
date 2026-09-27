@@ -19,7 +19,7 @@ def test_single_alembic_head_after_security_reconciliation():
         if line.strip()
     ]
 
-    assert heads == ["0102_payout_verification_evidence_a377b4r3"]
+    assert heads == ["0103_pix_reconciliation_schema_a377b4r4"]
 
     root = Path(__file__).parents[1] / "alembic" / "versions"
     rows = {}

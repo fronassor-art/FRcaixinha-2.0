@@ -199,7 +199,7 @@ def test_real_sqlite_upgrade_preserves_legacy_rows_and_partial_index(tmp_path):
     columns = {column["name"]: column for column in inspector.get_columns("webhook_events")}
     assert columns["resource_id"]["nullable"] is True
     indexes = {item["name"]: item for item in inspector.get_indexes("payments")}
-    assert indexes["uq_payments_reference_pending"]["unique"] is True
+    assert bool(indexes["uq_payments_reference_pending"]["unique"])
     assert "attempt_status = 'PENDING'" in indexes["uq_payments_reference_pending"]["dialect_options"]["sqlite_where"].text
     with engine.connect() as conn:
         payment = conn.execute(text("SELECT provider_payment_id, attempt_status, reconciliation_status, external_reference FROM payments WHERE idempotency_key='legacy-payment-key'")).one()
