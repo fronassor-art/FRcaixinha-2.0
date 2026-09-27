@@ -351,6 +351,198 @@ def test_replay_correlates_strictly_and_settles_contribution_once(
     engine.dispose()
 
 
+@pytest.mark.parametrize("event_type", ["order", "payment"])
+@pytest.mark.parametrize("fallback_identity", [False, True])
+def test_remote_payment_identity_mismatch_stays_replayable_without_financial_effect(
+    tmp_path, monkeypatch, event_type, fallback_identity
+):
+    engine, Session = _database(tmp_path)
+    db = Session()
+    _, contribution = _seed_contribution(db, f"identity-mismatch-{event_type}")
+    order_id = f"order-identity-{event_type}-{fallback_identity}"
+    payment = _provider_payment(
+        db,
+        f"identity-mismatch-{event_type}",
+        reference_type="CONTRIBUTION",
+        reference_id=contribution.id,
+        order_id=order_id,
+        payment_id=(order_id if fallback_identity else f"payment-identity-{event_type}"),
+    )
+    resource_id = (
+        payment.provider_order_id
+        if event_type == "order"
+        else payment.provider_payment_id
+    )
+    _valid_signature(monkeypatch)
+
+    async def get_order(self, order_id):
+        assert order_id == payment.provider_order_id
+        return {
+            "id": payment.provider_order_id,
+            "status": "approved",
+            "transactions": {
+                "payments": [
+                    {
+                        "id": "payment-B",
+                        "status": "approved",
+                        "transaction_amount": "10.00",
+                    }
+                ]
+            },
+        }
+
+    monkeypatch.setattr(api.MercadoPagoClient, "get_order", get_order)
+    response = asyncio.run(
+        api.mercado_pago_webhook(
+            _Request(f"identity-mismatch-{event_type}", resource_id, event_type), db
+        )
+    )
+    db.refresh(payment)
+    db.refresh(contribution)
+    event = db.query(WebhookEvent).filter_by(
+        event_id=f"identity-mismatch-{event_type}"
+    ).one()
+    assert response["outcome"] == "remote_identity_mismatch"
+    assert response["reconciliable"] is True
+    assert event.processed is False
+    assert payment.status == "pending"
+    assert payment.raw_status == "pending"
+    assert payment.amount_received is None
+    assert payment.reconciliation_status is None
+    assert payment.ledger_posted_at is None
+    assert db.query(PaymentSettlement).filter_by(payment_id=payment.id).count() == 0
+    assert db.query(LedgerEntry).filter_by(reference_id=str(payment.id)).count() == 0
+    assert db.query(Notification).filter_by(
+        reference_type="CONTRIBUTION", reference_id=str(contribution.id)
+    ).count() == 0
+    assert contribution.status == "PENDING"
+    assert contribution.paid_amount == Decimal("0.00")
+
+    replay = _admin_replay(db, event.event_id)
+    db.refresh(event)
+    assert replay == {"selected": 1, "processed": 0, "orphaned": 0, "unresolved": 1}
+    assert event.processed is False
+    db.close()
+    engine.dispose()
+
+
+def test_replay_retries_after_remote_identity_mismatch_then_settles_once(
+    tmp_path, monkeypatch
+):
+    engine, Session = _database(tmp_path)
+    db = Session()
+    _, contribution = _seed_contribution(db, "identity-mismatch-retry")
+    payment = _provider_payment(
+        db,
+        "identity-mismatch-retry",
+        reference_type="CONTRIBUTION",
+        reference_id=contribution.id,
+        order_id="order-identity-retry",
+        payment_id="payment-identity-retry",
+    )
+    event = WebhookEvent(
+        provider="mercado_pago",
+        event_id="identity-mismatch-retry",
+        event_type="order",
+        resource_id=payment.provider_order_id,
+        processed=False,
+    )
+    db.add(event)
+    db.commit()
+    remote_payment_id = {"value": "payment-B"}
+
+    async def get_order(self, order_id):
+        assert order_id == payment.provider_order_id
+        return {
+            "id": payment.provider_order_id,
+            "status": "approved",
+            "transactions": {
+                "payments": [
+                    {
+                        "id": remote_payment_id["value"],
+                        "status": "approved",
+                        "transaction_amount": "10.00",
+                        "date_approved": "2026-09-27T12:00:00Z",
+                    }
+                ]
+            },
+        }
+
+    monkeypatch.setattr(api.MercadoPagoClient, "get_order", get_order)
+    mismatch = _admin_replay(db, event.event_id)
+    db.refresh(event)
+    assert mismatch == {"selected": 1, "processed": 0, "orphaned": 0, "unresolved": 1}
+    assert event.processed is False
+    assert db.query(PaymentSettlement).filter_by(payment_id=payment.id).count() == 0
+
+    remote_payment_id["value"] = payment.provider_payment_id
+    matched = _admin_replay(db, event.event_id)
+    repeated = _admin_replay(db, event.event_id)
+    db.refresh(event)
+    db.refresh(payment)
+    db.refresh(contribution)
+    assert matched == {"selected": 1, "processed": 1, "orphaned": 0, "unresolved": 0}
+    assert repeated["selected"] == 0
+    assert event.processed is True
+    assert contribution.status == "PAID"
+    assert db.query(PaymentSettlement).filter_by(payment_id=payment.id).count() == 1
+    assert db.query(LedgerEntry).filter_by(
+        reference_type="CONTRIBUTION_PAYMENT", reference_id=str(payment.id)
+    ).count() == 1
+    assert db.query(Notification).filter_by(
+        reference_type="CONTRIBUTION", reference_id=str(contribution.id)
+    ).count() == 1
+    db.close()
+    engine.dispose()
+
+
+def test_order_id_payment_id_fallback_with_empty_canonical_payments_is_preserved(
+    tmp_path, monkeypatch
+):
+    engine, Session = _database(tmp_path)
+    db = Session()
+    _, contribution = _seed_contribution(db, "order-id-payment-id-fallback")
+    fallback_id = "legacy-order-payment-id"
+    payment = _provider_payment(
+        db,
+        "order-id-payment-id-fallback",
+        reference_type="CONTRIBUTION",
+        reference_id=contribution.id,
+        order_id=fallback_id,
+        payment_id=fallback_id,
+    )
+    event = WebhookEvent(
+        provider="mercado_pago",
+        event_id="order-id-payment-id-fallback",
+        event_type="order",
+        resource_id=fallback_id,
+        processed=False,
+    )
+    db.add(event)
+    db.commit()
+
+    async def get_order(self, order_id):
+        assert order_id == fallback_id
+        return {
+            "id": fallback_id,
+            "status": "approved",
+            "total_amount": "10.00",
+            "date_approved": "2026-09-27T12:00:00Z",
+            "transactions": {"payments": []},
+        }
+
+    monkeypatch.setattr(api.MercadoPagoClient, "get_order", get_order)
+    replay = _admin_replay(db, event.event_id)
+    db.refresh(event)
+    db.refresh(contribution)
+    assert replay == {"selected": 1, "processed": 1, "orphaned": 0, "unresolved": 0}
+    assert event.processed is True
+    assert contribution.status == "PAID"
+    assert db.query(PaymentSettlement).filter_by(payment_id=payment.id).count() == 1
+    db.close()
+    engine.dispose()
+
+
 def test_same_event_same_resource_is_idempotent_then_replayable(tmp_path, monkeypatch):
     engine, Session = _database(tmp_path)
     db = Session()

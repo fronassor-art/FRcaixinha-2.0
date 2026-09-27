@@ -346,6 +346,11 @@ async def mercado_pago_webhook(request: Request, db: Session = Depends(get_db)):
     return {
         "received": True,
         "reconciliable": outcome not in {"processed", "ignored"},
+        **(
+            {"outcome": "remote_identity_mismatch"}
+            if outcome == "remote_identity_mismatch"
+            else {}
+        ),
     }
 
 
@@ -404,13 +409,27 @@ async def _process_mercado_pago_event(db: Session, event_id: int) -> str:
     ):
         db.rollback()
         return "provider_error"
-    remote_payment = next(
-        (
-            item for item in remote_payments
-            if str(item.get("id")) == str(payment.provider_payment_id)
-        ),
-        None,
-    ) or {}
+    matching_remote_payments = [
+        item for item in remote_payments
+        if item.get("id") is not None
+        and str(item.get("id")) == str(payment.provider_payment_id)
+    ]
+    if remote_payments:
+        if not payment.provider_payment_id or len(matching_remote_payments) != 1:
+            db.rollback()
+            return "remote_identity_mismatch"
+        remote_payment = matching_remote_payments[0]
+    elif (
+        not payment.provider_payment_id
+        or str(payment.provider_payment_id) != str(payment.provider_order_id)
+    ):
+        # create_pix_payment historically uses order.id as id when the
+        # create response contains no payment.id. Preserve that narrow case
+        # only when the canonical Order contains no payment transactions.
+        db.rollback()
+        return "remote_identity_mismatch"
+    else:
+        remote_payment = {}
     remote_payload = dict(remote)
     remote_payload.update(remote_payment)
     status = remote_payment.get("status") or remote.get("status")
