@@ -4,8 +4,9 @@ from sqlalchemy.exc import IntegrityError
 from app.api.deps import current_user
 from app.db.session import get_db
 from app.models import User, Member, CollectionAgreement, AgreementInstallment, Payment
-from app.services.mercado_pago import MercadoPagoClient
+from app.services.mercado_pago import MercadoPagoClient, ProviderCreateAmbiguity
 from app.services.agreements_v039 import agreement_balance
+from app.services import agreement_installment_pix_attempts as pix_attempts
 
 router=APIRouter(prefix='/agreement-installments',tags=['agreement-installments'])
 
@@ -29,37 +30,96 @@ def _response(payment):
 
 @router.post('/{installment_id}/pix')
 async def create_pix(installment_id:int,user:User=Depends(current_user),db:Session=Depends(get_db)):
-    ag,ai=_owned(user,installment_id,db); due=agreement_balance(ai)
+    ag, ai = pix_attempts.lock_installment(db, installment_id)
+    member = db.get(Member, ag.member_id) if ag else None
+    if (
+        not ag
+        or not ai
+        or not member
+        or member.user_id != user.id
+        or ag.status not in ('APPROVED', 'SETTLED')
+    ):
+        raise HTTPException(404, 'Parcela do acordo não encontrada.')
+
+    due=agreement_balance(ai)
     if due<=0 or ai.status=='PAID': raise HTTPException(409,'Parcela já está paga.')
     ref='AGREEMENT_INSTALLMENT'; rid=str(ai.id)
-    pending=db.query(Payment).filter(Payment.reference_type==ref,Payment.reference_id==rid,Payment.status.in_(['pending','in_process','PENDING'])).order_by(Payment.id.desc()).first()
-    if pending: return _response(pending)
-    idem=f'frc-agreement-installment-{ai.id}'
-    external_reference=f'agreement_installment:{ai.id}'
-    try:
-        result=await MercadoPagoClient().create_pix_payment(amount=due,email=user.email,cpf=user.cpf,description=f'FRcaixinha acordo #{ag.id} parcela {ai.number}',idempotency_key=idem,external_reference=external_reference)
-    except Exception as exc: raise HTTPException(502,f'Não foi possível criar o Pix: {exc}')
-    payment=Payment(
-        provider='mercado_pago',
-        provider_order_id=str(result.get('order_id')) if result.get('order_id') else None,
-        provider_payment_id=str(result['id']),
-        idempotency_key=idem,
-        amount=due,
-        status=result.get('status','PENDING'),
-        raw_status=result.get('status'),
-        qr_code=result.get('qr_code'),
-        qr_code_base64=result.get('qr_code_base64'),
-        ticket_url=result.get('ticket_url'),
-        external_reference=external_reference,
-        reference_type=ref,
-        reference_id=rid,
+
+    pending_attempt = (
+        db.query(Payment)
+        .filter(
+            Payment.reference_type == ref,
+            Payment.reference_id == rid,
+            Payment.attempt_status == pix_attempts.PENDING,
+        )
+        .order_by(Payment.id.desc())
+        .first()
     )
-    db.add(payment)
-    try: db.commit(); db.refresh(payment)
+    usable_statuses = {'pending', 'in_process', 'PENDING'}
+    if pending_attempt is not None:
+        if (
+            pending_attempt.provider_payment_id
+            and pending_attempt.status in usable_statuses
+        ):
+            return _response(pending_attempt)
+        raise HTTPException(409, 'Criação Pix pendente de reconciliação.')
+
+    # Preserve reuse of older provider-backed pending agreement charges.
+    provider_backed_pending = (
+        db.query(Payment)
+        .filter(
+            Payment.reference_type == ref,
+            Payment.reference_id == rid,
+            Payment.provider_payment_id.is_not(None),
+            Payment.status.in_(usable_statuses),
+        )
+        .order_by(Payment.id.desc())
+        .first()
+    )
+    if provider_backed_pending is not None:
+        return _response(provider_backed_pending)
+
+    try:
+        payment, created = pix_attempts.reserve(db, ai, due)
     except IntegrityError:
-        db.rollback(); existing=db.query(Payment).filter(Payment.reference_type==ref,Payment.reference_id==rid,Payment.status.in_(['pending','in_process','PENDING'])).first()
-        if existing: return _response(existing)
-        raise HTTPException(409,'Pagamento já registrado.')
+        db.rollback()
+        raise HTTPException(409, 'Criação Pix pendente de reconciliação.')
+    if not created:
+        if payment.provider_payment_id and payment.status in usable_statuses:
+            return _response(payment)
+        raise HTTPException(409, 'Criação Pix pendente de reconciliação.')
+
+    try:
+        result = await MercadoPagoClient().create_pix_payment(
+            amount=payment.amount,
+            email=user.email,
+            cpf=user.cpf,
+            description=f'FRcaixinha acordo #{ag.id} parcela {ai.number}',
+            idempotency_key=payment.idempotency_key,
+            external_reference=payment.external_reference,
+        )
+    except ProviderCreateAmbiguity:
+        pix_attempts.mark_ambiguous(db, payment.id)
+        raise HTTPException(502, 'Não foi possível confirmar a criação do Pix.')
+    except Exception:
+        pix_attempts.mark_reconciliation_required(db, payment.id)
+        raise HTTPException(502, 'Não foi possível confirmar a criação do Pix.')
+
+    try:
+        payment = pix_attempts.bind_provider(db, payment.id, ai.id, result)
+    except Exception:
+        db.rollback()
+        payment = pix_attempts.preserve_provider_result_for_reconciliation(
+            db, payment.id, ai.id, result
+        )
+        if (
+            payment.attempt_status is None
+            and payment.provider_order_id == str(result.get('order_id'))
+            and payment.provider_payment_id == str(result.get('id'))
+            and payment.reconciliation_status is None
+        ):
+            return _response(payment)
+        raise HTTPException(502, 'Não foi possível confirmar a criação do Pix.')
     return _response(payment)
 
 @router.get('/{installment_id}/payment')

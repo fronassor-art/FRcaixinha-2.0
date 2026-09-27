@@ -836,4 +836,33 @@ def settle_confirmed_pix_payment(
         payment.attempt_status = None
         payment.reconciliation_status = None
         db.flush()
+    canonical_agreement_confirmation = (
+        confirmation_source == "WEBHOOK"
+        and isinstance(remote_payload, dict)
+        and (
+            payment.status == "approved"
+            or (
+                payment.status == "processed"
+                and remote_payload.get("status_detail") == "accredited"
+            )
+        )
+    )
+    if (
+        obligation_type == "AGREEMENT_INSTALLMENT"
+        and reference_type == "AGREEMENT_INSTALLMENT"
+        and payment.provider_order_id
+        and payment.provider_payment_id
+        and applied > ZERO
+        and canonical_agreement_confirmation
+        and payment.attempt_status == "PENDING"
+        and payment.reconciliation_status in {
+            "PROVIDER_CREATE_UNKNOWN",
+            "RECONCILIATION_REQUIRED",
+        }
+    ):
+        # Release only the agreement create-attempt reservation after the
+        # canonical financial settlement has applied a positive amount.
+        payment.attempt_status = None
+        payment.reconciliation_status = None
+        db.flush()
     return settlement
