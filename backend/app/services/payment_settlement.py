@@ -806,4 +806,34 @@ def settle_confirmed_pix_payment(
     settlement.receipt_snapshot_json = canonical_snapshot
     settlement.receipt_hash = hashlib.sha256(canonical_snapshot.encode("utf-8")).hexdigest()
     db.flush()
+    canonical_contribution_confirmation = (
+        confirmation_source == "WEBHOOK"
+        and isinstance(remote_payload, dict)
+        and (
+            payment.status == "approved"
+            or (
+                payment.status == "processed"
+                and remote_payload.get("status_detail") == "accredited"
+            )
+        )
+    )
+    if (
+        obligation_type == "CONTRIBUTION"
+        and reference_type == "CONTRIBUTION"
+        and payment.provider_order_id
+        and payment.provider_payment_id
+        and applied > ZERO
+        and canonical_contribution_confirmation
+        and payment.attempt_status == "PENDING"
+        and payment.reconciliation_status in {
+            "PROVIDER_CREATE_UNKNOWN",
+            "RECONCILIATION_REQUIRED",
+        }
+    ):
+        # Closing the create-attempt lifecycle is part of the same transaction
+        # as the confirmed Contribution settlement. A provider ID alone is not
+        # sufficient evidence to release the pending-attempt slot.
+        payment.attempt_status = None
+        payment.reconciliation_status = None
+        db.flush()
     return settlement

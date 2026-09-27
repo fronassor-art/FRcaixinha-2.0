@@ -21,6 +21,7 @@ from app.services.contribution_pix_attempts import (
     lock_contribution,
     mark_ambiguous as mark_contribution_ambiguous,
     mark_reconciliation_required as mark_contribution_reconciliation_required,
+    preserve_provider_result_for_reconciliation as preserve_contribution_provider_result,
     reserve as reserve_contribution_payment,
 )
 
@@ -207,7 +208,16 @@ async def create_pix(contribution_id: int, user: User = Depends(current_user), d
         payment = bind_contribution_provider(db, payment.id, contribution.id, result)
     except Exception:
         db.rollback()
-        mark_contribution_reconciliation_required(db, payment.id)
+        payment = preserve_contribution_provider_result(
+            db, payment.id, contribution.id, result
+        )
+        if (
+            payment.attempt_status is None
+            and payment.provider_order_id == str(result.get("order_id"))
+            and payment.provider_payment_id == str(result.get("id"))
+            and payment.reconciliation_status is None
+        ):
+            return _pix_response(payment, result)
         raise HTTPException(502, "Não foi possível confirmar a criação do Pix.")
     return _pix_response(payment, result)
 
