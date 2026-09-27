@@ -658,7 +658,7 @@ def test_nonconfirmed_canonical_status_does_not_settle_or_release_attempt(
         provider="mercado_pago", event_id=f"event-{remote_status}"
     ).one()
     assert event.processed is True
-    assert event.resource_id is None
+    assert event.resource_id == result["order_id"]
     assert db.query(PaymentSettlement).filter_by(payment_id=payment.id).count() == 0
     assert db.query(PaymentReversal).filter_by(payment_id=payment.id).count() == 0
     _no_financial_effect(db, payment, installment, agreement)
@@ -722,7 +722,7 @@ def test_canonical_confirmation_settles_and_closes_lifecycle_once(
         provider="mercado_pago", event_id=f"confirmed-payment-{remote_status}"
     ).one()
     assert event.processed is True
-    assert event.resource_id is None
+    assert event.resource_id == result["id"]
     assert db.query(Payment).filter_by(
         reference_type="AGREEMENT_INSTALLMENT",
         reference_id=str(installment.id),

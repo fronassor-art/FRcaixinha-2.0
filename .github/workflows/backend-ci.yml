@@ -58,4 +58,5 @@ jobs:
       - run: pytest -q tests/test_h4_c8_b3_a377b4r2r2b2f12b_postgresql_schema.py
       - run: pytest -q tests/test_a377b4r2r2b2f12d_contribution_pix_reservation.py
       - run: pytest -q tests/test_a377b4r2r2b2f12e_agreement_pix_reservation.py
+      - run: pytest -q tests/test_a377b4r2r2b2f12f_webhook_orphan_replay.py
       - run: pytest -q tests/test_h4_c8_b3_a377b4r2r2b2f6_live_postgresql_payout_verification.py
