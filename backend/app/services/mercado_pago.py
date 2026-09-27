@@ -100,9 +100,14 @@ class MercadoPagoClient:
                 "Mercado Pago Orders create ambiguous: "
                 f"HTTP {response.status_code}"
             )
+        if 300 <= response.status_code < 400:
+            raise ProviderCreateAmbiguity(
+                "Mercado Pago Orders create ambiguous: "
+                f"HTTP {response.status_code} redirect response"
+            )
         if not response.is_success:
             raise RuntimeError(
-                "Mercado Pago Orders create rejected: "
+                "Mercado Pago Orders create returned HTTP response: "
                 f"HTTP {response.status_code}"
             )
 
@@ -122,9 +127,32 @@ class MercadoPagoClient:
                 "Mercado Pago Orders create ambiguous: missing order id"
             )
 
-        payments = ((order.get("transactions") or {}).get("payments") or [])
+        transactions = order.get("transactions")
+        if "transactions" in order and not isinstance(transactions, dict):
+            raise ProviderCreateAmbiguity(
+                "Mercado Pago Orders create ambiguous: invalid transactions"
+            )
+
+        payments = transactions.get("payments") if transactions is not None else None
+        if transactions is not None and "payments" in transactions:
+            if not isinstance(payments, list):
+                raise ProviderCreateAmbiguity(
+                    "Mercado Pago Orders create ambiguous: invalid payments"
+                )
+        else:
+            payments = []
+
+        if payments and not isinstance(payments[0], dict):
+            raise ProviderCreateAmbiguity(
+                "Mercado Pago Orders create ambiguous: invalid payment"
+            )
         payment = payments[0] if payments else {}
-        payment_method = payment.get("payment_method") or {}
+        payment_method = payment.get("payment_method")
+        if "payment_method" in payment and not isinstance(payment_method, dict):
+            raise ProviderCreateAmbiguity(
+                "Mercado Pago Orders create ambiguous: invalid payment method"
+            )
+        payment_method = payment_method or {}
 
         payment_id = payment.get("id") or order.get("id")
 

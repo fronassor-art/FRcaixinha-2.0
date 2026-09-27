@@ -140,6 +140,58 @@ def test_create_pix_payment_without_order_id_is_ambiguous(monkeypatch, payload):
     assert "missing order id" in str(error)
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"id": "order-1", "transactions": ["invalid"]},
+        {"id": "order-1", "transactions": {"payments": ["invalid"]}},
+        {
+            "id": "order-1",
+            "transactions": {"payments": [{"payment_method": ["invalid"]}]},
+        },
+    ],
+)
+def test_create_pix_payment_malformed_success_structure_is_ambiguous_and_sanitized(
+    monkeypatch, payload
+):
+    payload["sensitive_marker"] = (
+        "response body synthetic-token payer@example.invalid 11144477735"
+    )
+    error, _ = _run_create(
+        monkeypatch,
+        _json_response(200, payload),
+        error_match=mercado_pago.ProviderCreateAmbiguity,
+    )
+
+    message = str(error)
+    assert "ambiguous" in message
+    assert "sensitive_marker" not in message
+    assert "response body" not in message
+    assert "synthetic-token" not in message
+    assert "payer@example.invalid" not in message
+    assert "11144477735" not in message
+
+
+def test_create_pix_payment_redirect_is_ambiguous_and_not_followed(monkeypatch):
+    error, requests = _run_create(
+        monkeypatch,
+        lambda request: httpx.Response(
+            302,
+            headers={"Location": "https://provider.invalid/redirect-target"},
+            text="sensitive response body synthetic-token payer@example.invalid 11144477735",
+            request=request,
+        ),
+        error_match=mercado_pago.ProviderCreateAmbiguity,
+    )
+
+    assert "HTTP 302" in str(error)
+    assert "sensitive response body" not in str(error)
+    assert "synthetic-token" not in str(error)
+    assert "payer@example.invalid" not in str(error)
+    assert "11144477735" not in str(error)
+    assert len(requests) == 1
+
+
 def test_create_pix_payment_client_error_is_not_success_or_ambiguous(monkeypatch):
     error, _ = _run_create(
         monkeypatch,
