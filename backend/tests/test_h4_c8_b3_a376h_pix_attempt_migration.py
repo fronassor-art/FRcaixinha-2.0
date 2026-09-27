@@ -21,12 +21,14 @@ def test_revision_chain_and_strong_reservation_contract():
     assert "INSERT" not in Path(module.__file__).read_text().upper()
     assert "UPDATE " not in Path(module.__file__).read_text().upper()
 
-def test_model_has_equivalent_named_check_and_nullable_provider_id():
+def test_current_model_preserves_named_check_with_evolved_contract():
     assert Payment.__table__.c.provider_payment_id.nullable
     checks={c.name: str(c.sqltext) for c in Payment.__table__.constraints if isinstance(c, CheckConstraint)}
-    assert checks[module.CHECK_NAME] == module.CHECK
+    assert module.CHECK_NAME in checks
+    # 0095 remains an immutable historical revision; 0103 broadens the model contract.
+    assert checks[module.CHECK_NAME] != module.CHECK
 
-def test_sqlite_check_allows_only_complete_versioned_reservation():
+def test_current_sqlite_check_allows_supported_placeholders_only():
     engine=create_engine("sqlite://")
     Base.metadata.create_all(engine)
     with engine.begin() as conn:
@@ -34,9 +36,11 @@ def test_sqlite_check_allows_only_complete_versioned_reservation():
         conn.execute(text("INSERT INTO payments (provider, provider_payment_id, idempotency_key, amount, status,created_at) VALUES ('x','legacy','legacy-key',1,'PENDING','2026-01-01 00:00:00')"))
         # A complete versioned reservation may have no provider ID.
         conn.execute(text("INSERT INTO payments (provider, provider_payment_id, idempotency_key, amount, status, reference_type, reference_id, attempt_status, calculated_for_date, financial_snapshot_json, snapshot_hash, expires_at, created_at) VALUES ('x',NULL,'reserve-key',1,'PENDING','LOAN_INSTALLMENT','1','PENDING','2026-01-01','{}','hash','2026-01-02 03:00:00','2026-01-01 00:00:00')"))
-        for ref in ("CONTRIBUTION", "AGREEMENT_INSTALLMENT", "LOAN_INSTALLMENT"):
+        for ref, key in (("CONTRIBUTION", "contribution-reserve"), ("AGREEMENT_INSTALLMENT", "agreement-reserve")):
+            conn.execute(text("INSERT INTO payments (provider, provider_payment_id, idempotency_key, amount, status, reference_type, reference_id, attempt_status, created_at) VALUES ('x',NULL,:key,1,'PENDING',:ref,'1','PENDING','2026-01-01 00:00:00')"), {"key": key, "ref": ref})
+        for ref, key in (("UNKNOWN_REFERENCE", "unknown-ref"), ("LOAN_INSTALLMENT", "incomplete-loan")):
             with pytest.raises(Exception):
-                conn.execute(text("INSERT INTO payments (provider, provider_payment_id, idempotency_key, amount, status, reference_type, reference_id, attempt_status, created_at) VALUES ('x',NULL,:key,1,'PENDING',:ref,'1','PENDING','2026-01-01 00:00:00')"), {"key": "bad-"+ref, "ref": ref})
+                conn.execute(text("INSERT INTO payments (provider, provider_payment_id, idempotency_key, amount, status, reference_type, reference_id, attempt_status, created_at) VALUES ('x',NULL,:key,1,'PENDING',:ref,'1','PENDING','2026-01-01 00:00:00')"), {"key": key, "ref": ref})
 
 
 def test_migration_has_fail_closed_downgrade_and_no_backfill_keywords():

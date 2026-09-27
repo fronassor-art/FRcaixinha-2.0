@@ -55,4 +55,5 @@ jobs:
       - run: python -m compileall app alembic
       - run: alembic upgrade head
       - run: alembic current
+      - run: pytest -q tests/test_h4_c8_b3_a377b4r2r2b2f12b_postgresql_schema.py
       - run: pytest -q tests/test_h4_c8_b3_a377b4r2r2b2f6_live_postgresql_payout_verification.py
