@@ -36,6 +36,7 @@ from app.models import (
     LedgerEntry,
     Loan,
     LoanInstallment,
+    MemberFinancialEntry,
     Member,
     Notification,
     Payment,
@@ -584,7 +585,10 @@ def test_replay_settles_versioned_loan_installment_once(tmp_path, monkeypatch):
     assert first["processed"] == 1 and second["selected"] == 0
     assert installment.status == "PAID"
     assert db.query(PaymentSettlement).filter_by(payment_id=payment.id).count() == 1
-    assert db.query(LedgerEntry).filter_by(reference_id=str(payment.id)).count() >= 1
+    assert db.query(MemberFinancialEntry).filter_by(
+        reference_type="LOAN_PRINCIPAL_PAYMENT",
+        reference_id=str(payment.id),
+    ).count() == 1
     assert db.query(Notification).filter_by(
         reference_type="LOAN_INSTALLMENT", reference_id=str(installment.id)
     ).count() == 1
