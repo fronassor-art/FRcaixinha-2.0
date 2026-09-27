@@ -123,6 +123,61 @@ def bind_provider(
     return payment
 
 
+def preserve_provider_result_for_reconciliation(
+    db,
+    payment_id: int,
+    contribution_id: int,
+    result: dict,
+) -> Payment:
+    """Persist known provider identity without completing a failed local bind."""
+    provider_payment_id = result.get("id") if isinstance(result, dict) else None
+    provider_order_id = result.get("order_id") if isinstance(result, dict) else None
+    if not provider_payment_id or not provider_order_id:
+        raise ValueError("Provider response lacks order or payment identity")
+
+    payment = db.get(Payment, payment_id)
+    contribution = db.get(Contribution, contribution_id)
+    if (
+        payment is None
+        or contribution is None
+        or payment.provider != "mercado_pago"
+        or payment.reference_type != "CONTRIBUTION"
+        or payment.reference_id != str(contribution_id)
+    ):
+        raise ValueError("Contribution PIX reservation is unavailable")
+
+    expected_order_id = str(provider_order_id)
+    expected_payment_id = str(provider_payment_id)
+    if payment.provider_order_id not in (None, expected_order_id):
+        raise ValueError("Contribution PIX reservation has conflicting provider order identity")
+    if payment.provider_payment_id not in (None, expected_payment_id):
+        raise ValueError("Contribution PIX reservation has conflicting provider payment identity")
+
+    # A commit may have succeeded before bind_provider raised during refresh.
+    # Keep that completed bind exactly as persisted; never downgrade it.
+    if (
+        payment.attempt_status is None
+        and payment.provider_order_id == expected_order_id
+        and payment.provider_payment_id == expected_payment_id
+    ):
+        return payment
+
+    if payment.attempt_status != PENDING:
+        raise ValueError("Contribution PIX reservation is no longer pending")
+
+    payment.provider_order_id = expected_order_id
+    payment.provider_payment_id = expected_payment_id
+    payment.status = result.get("status") or "PENDING"
+    payment.raw_status = payment.status
+    payment.qr_code = result.get("qr_code")
+    payment.qr_code_base64 = result.get("qr_code_base64")
+    payment.ticket_url = result.get("ticket_url")
+    payment.attempt_status = PENDING
+    payment.reconciliation_status = RECONCILIATION_REQUIRED
+    db.commit()
+    return payment
+
+
 def mark_ambiguous(db, payment_id: int) -> Payment | None:
     payment = db.get(Payment, payment_id)
     if payment is not None and payment.attempt_status == PENDING:

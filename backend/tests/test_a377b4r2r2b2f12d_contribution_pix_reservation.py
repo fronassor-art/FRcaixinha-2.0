@@ -21,11 +21,29 @@ from app.models import (
     LedgerEntry,
     Member,
     Payment,
+    PaymentReversal,
     PaymentSettlement,
     User,
 )
 from app.services import contribution_pix_attempts
 from app.services.mercado_pago import ProviderCreateAmbiguity
+
+
+class _WebhookRequest:
+    headers = {}
+
+    def __init__(self, event_type, event_id, resource_id):
+        self.query_params = {"data.id": resource_id}
+        self.event_type = event_type
+        self.event_id = event_id
+        self.resource_id = resource_id
+
+    async def json(self):
+        return {
+            "id": self.event_id,
+            "type": self.event_type,
+            "data": {"id": self.resource_id},
+        }
 
 
 def _database(tmp_path):
@@ -96,6 +114,18 @@ def _assert_no_financial_effect(db, contribution, payment):
     assert payment.ledger_posted_at is None
     assert db.query(PaymentSettlement).filter_by(payment_id=payment.id).count() == 0
     assert db.query(LedgerEntry).filter_by(reference_id=str(payment.id)).count() == 0
+
+
+def _reserved_fallback_payment(db, contribution, suffix):
+    payment, created = contribution_pix_attempts.reserve(
+        db, contribution.id, Decimal("25.00")
+    )
+    assert created is True
+    result = _pix_result(suffix)
+    payment = contribution_pix_attempts.preserve_provider_result_for_reconciliation(
+        db, payment.id, contribution.id, result
+    )
+    return payment, result
 
 
 def test_reservation_is_committed_before_network_and_success_binds_same_payment(
@@ -175,6 +205,153 @@ def test_reservation_is_committed_before_network_and_success_binds_same_payment(
     db.refresh(contribution)
     assert contribution.payment_id == payment.id
     _assert_no_financial_effect(db, contribution, payment)
+    db.close()
+    engine.dispose()
+
+
+def test_bind_commit_failure_preserves_provider_identity_and_blocks_repost(
+    tmp_path, monkeypatch
+):
+    engine, Session = _database(tmp_path)
+    db = Session()
+    user, _, contribution = _seed(db, "bind-commit-failure")
+    calls = []
+    placeholder_ids = []
+    commit = db.commit
+    commit_calls = 0
+
+    async def provider(self, **kwargs):
+        calls.append(kwargs)
+        observer = Session()
+        try:
+            placeholder = observer.query(Payment).filter_by(
+                reference_type="CONTRIBUTION",
+                reference_id=str(contribution.id),
+                attempt_status="PENDING",
+            ).one()
+            placeholder_ids.append(placeholder.id)
+        finally:
+            observer.close()
+        # TX1 already committed before this callback; fail the first commit
+        # after it, which is the provider bind commit. The fallback commit is
+        # then allowed to succeed.
+        def fail_first_bind_commit():
+            nonlocal commit_calls
+            commit_calls += 1
+            if commit_calls == 1:
+                raise RuntimeError("synthetic bind commit failure")
+            return commit()
+
+        monkeypatch.setattr(db, "commit", fail_first_bind_commit)
+        return _pix_result("bind-commit-failure")
+
+    monkeypatch.setattr(payments_api.MercadoPagoClient, "create_pix_payment", provider)
+    with pytest.raises(HTTPException) as bind_error:
+        asyncio.run(payments_api.create_pix(contribution.id, user, db))
+    assert bind_error.value.status_code == 502
+
+    payment = db.query(Payment).filter_by(
+        reference_type="CONTRIBUTION", reference_id=str(contribution.id)
+    ).one()
+    assert payment.id == placeholder_ids[0]
+    assert payment.provider_order_id == "provider-order-bind-commit-failure"
+    assert payment.provider_payment_id == "provider-payment-bind-commit-failure"
+    assert payment.idempotency_key == f"frc-contribution-{contribution.id}"
+    assert payment.external_reference == f"contribution-{contribution.id}"
+    assert payment.qr_code == "qr-bind-commit-failure"
+    assert payment.qr_code_base64 == "qr-base64-bind-commit-failure"
+    assert payment.ticket_url == "https://provider.invalid/ticket/bind-commit-failure"
+    assert payment.status == payment.raw_status == "pending"
+    assert payment.attempt_status == "PENDING"
+    assert payment.reconciliation_status == "RECONCILIATION_REQUIRED"
+    assert db.query(Payment).filter_by(
+        reference_type="CONTRIBUTION", reference_id=str(contribution.id)
+    ).count() == 1
+    _assert_no_financial_effect(db, contribution, payment)
+
+    async def forbidden(self, **kwargs):
+        calls.append(kwargs)
+        raise AssertionError("provider POST must not be repeated after bind failure")
+
+    monkeypatch.setattr(payments_api.MercadoPagoClient, "create_pix_payment", forbidden)
+    response = asyncio.run(payments_api.create_pix(contribution.id, user, db))
+    assert response["payment_id"] == payment.id
+    assert response["provider_payment_id"] == payment.provider_payment_id
+    assert len(calls) == 1
+    assert db.query(Payment).filter_by(
+        reference_type="CONTRIBUTION", reference_id=str(contribution.id)
+    ).count() == 1
+    db.close()
+    engine.dispose()
+
+
+def test_committed_bind_survives_refresh_failure_without_degradation(
+    tmp_path, monkeypatch
+):
+    engine, Session = _database(tmp_path)
+    db = Session()
+    user, _, contribution = _seed(db, "bind-refresh-failure")
+    calls = []
+    refresh = db.refresh
+
+    async def provider(self, **kwargs):
+        calls.append(kwargs)
+
+        def fail_bind_refresh(instance, *args, **kwargs):
+            raise RuntimeError("synthetic post-commit refresh failure")
+
+        monkeypatch.setattr(db, "refresh", fail_bind_refresh)
+        return _pix_result("bind-refresh-failure")
+
+    monkeypatch.setattr(payments_api.MercadoPagoClient, "create_pix_payment", provider)
+    response = asyncio.run(payments_api.create_pix(contribution.id, user, db))
+    assert response["provider_payment_id"] == "provider-payment-bind-refresh-failure"
+
+    payment = db.query(Payment).filter_by(
+        reference_type="CONTRIBUTION", reference_id=str(contribution.id)
+    ).one()
+    assert payment.provider_order_id == "provider-order-bind-refresh-failure"
+    assert payment.provider_payment_id == "provider-payment-bind-refresh-failure"
+    assert payment.attempt_status is None
+    assert payment.reconciliation_status is None
+    db.refresh = refresh
+    db.refresh(contribution)
+    assert contribution.payment_id == payment.id
+    assert len(calls) == 1
+    _assert_no_financial_effect(db, contribution, payment)
+    db.close()
+    engine.dispose()
+
+
+def test_fallback_persistence_failure_is_not_hidden(tmp_path, monkeypatch):
+    engine, Session = _database(tmp_path)
+    db = Session()
+    user, _, contribution = _seed(db, "fallback-failure")
+    calls = []
+
+    async def provider(self, **kwargs):
+        calls.append(kwargs)
+
+        def unavailable_commit():
+            raise RuntimeError("synthetic database write failure")
+
+        monkeypatch.setattr(db, "commit", unavailable_commit)
+        return _pix_result("fallback-failure")
+
+    monkeypatch.setattr(payments_api.MercadoPagoClient, "create_pix_payment", provider)
+    with pytest.raises(RuntimeError, match="synthetic database write failure"):
+        asyncio.run(payments_api.create_pix(contribution.id, user, db))
+    assert len(calls) == 1
+    db.rollback()
+    payment = db.query(Payment).filter_by(
+        reference_type="CONTRIBUTION", reference_id=str(contribution.id)
+    ).one()
+    assert payment.provider_order_id is None
+    assert payment.provider_payment_id is None
+    assert payment.attempt_status == "PENDING"
+    assert db.query(Payment).filter_by(
+        reference_type="CONTRIBUTION", reference_id=str(contribution.id)
+    ).count() == 1
     db.close()
     engine.dispose()
 
@@ -314,6 +491,152 @@ def test_legacy_provider_backed_contribution_payment_is_reused(
     engine.dispose()
 
 
+@pytest.mark.parametrize(
+    "event_type,resource_kind,remote_status",
+    [
+        ("order", "order", "pending"),
+        ("payment", "payment", "pending"),
+        ("order", "order", "refunded"),
+        ("payment", "payment", "charged_back"),
+    ],
+)
+def test_fallback_identity_correlates_webhook_without_early_settlement(
+    tmp_path, monkeypatch, event_type, resource_kind, remote_status
+):
+    engine, Session = _database(tmp_path)
+    db = Session()
+    _, _, contribution = _seed(db, f"fallback-webhook-{event_type}-{remote_status}")
+    payment, result = _reserved_fallback_payment(
+        db, contribution, f"fallback-webhook-{event_type}-{remote_status}"
+    )
+    resource_id = result["order_id"] if resource_kind == "order" else result["id"]
+    get_order_calls = []
+    monkeypatch.setattr(payments_api, "validate_mercado_pago_signature", lambda *a, **k: True)
+
+    async def get_order(self, order_id):
+        get_order_calls.append(order_id)
+        return {
+            "id": result["order_id"],
+            "status": remote_status,
+            "transactions": {
+                "payments": [
+                    {
+                        "id": result["id"],
+                        "status": remote_status,
+                        "transaction_amount": "25.00",
+                    }
+                ]
+            },
+        }
+
+    monkeypatch.setattr(payments_api.MercadoPagoClient, "get_order", get_order)
+    response = asyncio.run(
+        payments_api.mercado_pago_webhook(
+            _WebhookRequest(
+                event_type,
+                f"event-{event_type}-{remote_status}",
+                resource_id,
+            ),
+            db,
+        )
+    )
+    db.refresh(payment)
+    db.refresh(contribution)
+    assert response["received"] is True
+    assert get_order_calls == [result["order_id"]]
+    if resource_kind == "order":
+        assert db.query(Payment).filter_by(
+            provider_order_id=resource_id, provider="mercado_pago"
+        ).one().id == payment.id
+    else:
+        assert db.query(Payment).filter_by(
+            provider_payment_id=resource_id, provider="mercado_pago"
+        ).one().id == payment.id
+    assert payment.attempt_status == "PENDING"
+    assert payment.reconciliation_status == "RECONCILIATION_REQUIRED"
+    assert db.query(PaymentSettlement).filter_by(payment_id=payment.id).count() == 0
+    assert db.query(PaymentReversal).filter_by(payment_id=payment.id).count() == 0
+    _assert_no_financial_effect(db, contribution, payment)
+    db.close()
+    engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "remote_status,status_detail",
+    [("approved", None), ("processed", "accredited")],
+)
+def test_canonical_confirmed_fallback_settlement_closes_lifecycle_once(
+    tmp_path, monkeypatch, remote_status, status_detail
+):
+    engine, Session = _database(tmp_path)
+    db = Session()
+    _, _, contribution = _seed(db, f"fallback-settled-{remote_status}")
+    payment, result = _reserved_fallback_payment(
+        db, contribution, f"fallback-settled-{remote_status}"
+    )
+    monkeypatch.setattr(payments_api, "validate_mercado_pago_signature", lambda *a, **k: True)
+    get_order_calls = []
+
+    async def get_order(self, order_id):
+        get_order_calls.append(order_id)
+        remote_payment = {
+            "id": result["id"],
+            "status": remote_status,
+            "transaction_amount": "25.00",
+            "date_approved": "2026-09-27T12:00:00Z",
+        }
+        if status_detail is not None:
+            remote_payment["status_detail"] = status_detail
+        return {
+            "id": result["order_id"],
+            "status": remote_status,
+            "transactions": {"payments": [remote_payment]},
+        }
+
+    monkeypatch.setattr(payments_api.MercadoPagoClient, "get_order", get_order)
+    first = asyncio.run(
+        payments_api.mercado_pago_webhook(
+            _WebhookRequest("payment", f"event-confirmed-1-{remote_status}", result["id"]),
+            db,
+        )
+    )
+    db.refresh(payment)
+    db.refresh(contribution)
+    assert first["received"] is True
+    assert contribution.paid_amount == Decimal("25.00")
+    assert contribution.status == "PAID"
+    assert payment.attempt_status is None
+    assert payment.reconciliation_status is None
+    assert db.query(PaymentSettlement).filter_by(payment_id=payment.id).count() == 1
+    first_ledger_count = db.query(LedgerEntry).filter_by(
+        reference_id=str(payment.id)
+    ).count()
+    assert first_ledger_count > 0
+    assert db.query(Payment).filter_by(
+        reference_type="CONTRIBUTION",
+        reference_id=str(contribution.id),
+        attempt_status="PENDING",
+    ).count() == 0
+
+    second = asyncio.run(
+        payments_api.mercado_pago_webhook(
+            _WebhookRequest("order", f"event-confirmed-2-{remote_status}", result["order_id"]),
+            db,
+        )
+    )
+    db.refresh(payment)
+    db.refresh(contribution)
+    assert second["received"] is True
+    assert len(get_order_calls) == 2
+    assert contribution.paid_amount == Decimal("25.00")
+    assert db.query(PaymentSettlement).filter_by(payment_id=payment.id).count() == 1
+    assert db.query(LedgerEntry).filter_by(reference_id=str(payment.id)).count() == first_ledger_count
+    assert payment.attempt_status is None
+    assert payment.reconciliation_status is None
+    db.close()
+    engine.dispose()
+
+
 def test_sqlite_reservation_race_reload_returns_same_pending_winner(
     tmp_path, monkeypatch
 ):
@@ -422,4 +745,75 @@ def test_postgresql_concurrent_contribution_reservations_share_one_winner():
         verify.query(Group).filter_by(id=group.id).delete()
         verify.commit()
         verify.close()
+        engine.dispose()
+
+
+@pytest.mark.skipif(
+    not os.getenv("DATABASE_URL", "").startswith("postgresql"),
+    reason="requires the PostgreSQL CI database",
+)
+def test_postgresql_provider_identity_fallback_keeps_pending_slot():
+    engine = create_engine(os.environ["DATABASE_URL"], pool_pre_ping=True)
+    Session = sessionmaker(bind=engine, expire_on_commit=False)
+    db = Session()
+    suffix = uuid.uuid4().hex
+    user = User(
+        name=f"PG Fallback {suffix}",
+        email=f"pg-fallback-{suffix}@test.invalid",
+        cpf=_synthetic_valid_cpf(suffix),
+        password_hash="synthetic-password-hash",
+        is_active=True,
+    )
+    group = Group(name=f"PG Fallback group {suffix}")
+    db.add_all([user, group])
+    db.flush()
+    member = Member(user_id=user.id, group_id=group.id, status="ACTIVE")
+    db.add(member)
+    db.flush()
+    contribution = Contribution(
+        member_id=member.id,
+        competence=date(2026, 9, 1),
+        amount=Decimal("25.00"),
+        paid_amount=Decimal("0.00"),
+        status="PENDING",
+    )
+    db.add(contribution)
+    db.commit()
+    contribution_id = contribution.id
+    try:
+        payment, created = contribution_pix_attempts.reserve(
+            db, contribution_id, Decimal("25.00")
+        )
+        assert created is True
+        original_payment_id = payment.id
+        result = _pix_result(f"pg-fallback-{suffix}")
+        payment = contribution_pix_attempts.preserve_provider_result_for_reconciliation(
+            db, payment.id, contribution_id, result
+        )
+        assert payment.id == original_payment_id
+        assert payment.provider_order_id == result["order_id"]
+        assert payment.provider_payment_id == result["id"]
+        assert payment.attempt_status == "PENDING"
+        assert payment.reconciliation_status == "RECONCILIATION_REQUIRED"
+        assert db.query(Payment).filter_by(
+            reference_type="CONTRIBUTION",
+            reference_id=str(contribution_id),
+            attempt_status="PENDING",
+        ).count() == 1
+        assert db.query(Payment).filter_by(
+            reference_type="CONTRIBUTION", reference_id=str(contribution_id)
+        ).count() == 1
+    finally:
+        db.rollback()
+        own_payments = db.query(Payment).filter_by(
+            reference_type="CONTRIBUTION", reference_id=str(contribution_id)
+        ).all()
+        for own_payment in own_payments:
+            db.delete(own_payment)
+        db.query(Contribution).filter_by(id=contribution_id).delete()
+        db.query(Member).filter_by(id=member.id).delete()
+        db.query(User).filter_by(id=user.id).delete()
+        db.query(Group).filter_by(id=group.id).delete()
+        db.commit()
+        db.close()
         engine.dispose()
