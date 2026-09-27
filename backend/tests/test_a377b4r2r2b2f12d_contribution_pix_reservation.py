@@ -75,6 +75,19 @@ def _pix_result(suffix="success"):
     }
 
 
+def _synthetic_valid_cpf(seed):
+    """Build deterministic synthetic digits using the app's CPF checksum."""
+    base = f"{int(seed, 16) % 1_000_000_000:09d}"
+    if len(set(base)) == 1:
+        base = "123456789"
+    first_sum = sum(int(base[index]) * (10 - index) for index in range(9))
+    first_digit = 0 if first_sum % 11 < 2 else 11 - first_sum % 11
+    first_ten = base + str(first_digit)
+    second_sum = sum(int(first_ten[index]) * (11 - index) for index in range(10))
+    second_digit = 0 if second_sum % 11 < 2 else 11 - second_sum % 11
+    return first_ten + str(second_digit)
+
+
 def _assert_no_financial_effect(db, contribution, payment):
     db.refresh(contribution)
     db.refresh(payment)
@@ -109,6 +122,11 @@ def test_reservation_is_committed_before_network_and_success_binds_same_payment(
                 provider_order_id=reserved.provider_order_id,
                 attempt_status=reserved.attempt_status,
                 reconciliation_status=reserved.reconciliation_status,
+                pending_count=observer.query(Payment).filter_by(
+                    reference_type="CONTRIBUTION",
+                    reference_id=str(contribution.id),
+                    attempt_status="PENDING",
+                ).count(),
                 key=reserved.idempotency_key,
                 contribution_key=durable_contribution.pix_idempotency_key,
                 amount=reserved.amount,
@@ -133,6 +151,7 @@ def test_reservation_is_committed_before_network_and_success_binds_same_payment(
     assert seen["provider_payment_id"] is None
     assert seen["provider_order_id"] is None
     assert seen["attempt_status"] == "PENDING"
+    assert seen["pending_count"] == 1
     assert seen["reconciliation_status"] is None
     assert seen["key"] == seen["contribution_key"] == f"frc-contribution-{contribution.id}"
     assert seen["network_key"] == seen["key"]
@@ -144,6 +163,15 @@ def test_reservation_is_committed_before_network_and_success_binds_same_payment(
     assert payment.qr_code_base64 == "qr-base64-durable-success"
     assert payment.ticket_url == "https://provider.invalid/ticket/durable-success"
     assert payment.reconciliation_status is None
+    assert payment.attempt_status is None
+    assert db.query(Payment).filter_by(
+        reference_type="CONTRIBUTION",
+        reference_id=str(contribution.id),
+        attempt_status="PENDING",
+    ).count() == 0
+    assert db.query(Payment).filter_by(
+        reference_type="CONTRIBUTION", reference_id=str(contribution.id)
+    ).count() == 1
     db.refresh(contribution)
     assert contribution.payment_id == payment.id
     _assert_no_financial_effect(db, contribution, payment)
@@ -179,6 +207,7 @@ def test_ambiguous_create_persists_and_blocks_blind_repost(tmp_path, monkeypatch
     assert payment.attempt_status == "PENDING"
     assert payment.reconciliation_status == "PROVIDER_CREATE_UNKNOWN"
     assert payment.idempotency_key == f"frc-contribution-{contribution.id}"
+    first_payment_id = payment.id
     assert db.query(Payment).filter_by(reference_type="CONTRIBUTION", reference_id=str(contribution.id)).count() == 1
     _assert_no_financial_effect(db, contribution, payment)
 
@@ -192,6 +221,11 @@ def test_ambiguous_create_persists_and_blocks_blind_repost(tmp_path, monkeypatch
     assert second_error.value.status_code == 409
     assert second_error.value.detail == "Criação Pix pendente de reconciliação."
     assert len(calls) == 1
+    same_payment = db.query(Payment).filter_by(
+        reference_type="CONTRIBUTION", reference_id=str(contribution.id)
+    ).one()
+    assert same_payment.id == first_payment_id
+    assert same_payment.idempotency_key == f"frc-contribution-{contribution.id}"
     assert db.query(Payment).filter_by(reference_type="CONTRIBUTION", reference_id=str(contribution.id)).count() == 1
     db.close()
     engine.dispose()
@@ -222,6 +256,7 @@ def test_known_provider_error_requires_reconciliation_and_blocks_repost(
     assert payment.provider_payment_id is None
     assert payment.reconciliation_status == "RECONCILIATION_REQUIRED"
     first_key = payment.idempotency_key
+    first_payment_id = payment.id
 
     async def forbidden(self, **kwargs):
         calls.append(kwargs)
@@ -233,6 +268,9 @@ def test_known_provider_error_requires_reconciliation_and_blocks_repost(
     assert second_error.value.status_code == 409
     assert len(calls) == 1
     db.refresh(payment)
+    assert payment.id == first_payment_id
+    assert payment.attempt_status == "PENDING"
+    assert payment.reconciliation_status == "RECONCILIATION_REQUIRED"
     assert payment.idempotency_key == first_key
     assert db.query(Payment).filter_by(reference_type="CONTRIBUTION", reference_id=str(contribution.id)).count() == 1
     _assert_no_financial_effect(db, contribution, payment)
@@ -327,7 +365,7 @@ def test_postgresql_concurrent_contribution_reservations_share_one_winner():
     user = User(
         name=f"PG Contribution {suffix}",
         email=f"pg-contribution-{suffix}@test.invalid",
-        cpf=f"pg-cpf-{suffix}",
+        cpf=_synthetic_valid_cpf(suffix),
         password_hash="synthetic-password-hash",
         is_active=True,
     )

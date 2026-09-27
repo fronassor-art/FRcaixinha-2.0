@@ -114,6 +114,7 @@ def bind_provider(
     payment.qr_code = result.get("qr_code")
     payment.qr_code_base64 = result.get("qr_code_base64")
     payment.ticket_url = result.get("ticket_url")
+    payment.attempt_status = None
     payment.reconciliation_status = None
     contribution.payment_id = payment.id
 
