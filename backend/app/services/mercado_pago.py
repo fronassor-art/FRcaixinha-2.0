@@ -7,7 +7,7 @@ CENT = Decimal("0.01")
 
 
 class ProviderCreateAmbiguity(RuntimeError):
-    """The request may have reached Mercado Pago; retry the same key."""
+    """The create request may have produced a provider-side effect."""
 
 
 def serialize_provider_money(amount: Decimal) -> str:
@@ -83,19 +83,44 @@ class MercadoPagoClient:
             },
         }
 
-        async with httpx.AsyncClient(timeout=20) as client:
-            response = await client.post(
-                f"{self.base_url}/v1/orders",
-                json=payload,
-                headers=self._headers(idempotency_key),
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                response = await client.post(
+                    f"{self.base_url}/v1/orders",
+                    json=payload,
+                    headers=self._headers(idempotency_key),
+                )
+        except httpx.RequestError:
+            raise ProviderCreateAmbiguity(
+                "Mercado Pago Orders create ambiguous: transport failure"
+            ) from None
+
+        if response.status_code >= 500:
+            raise ProviderCreateAmbiguity(
+                "Mercado Pago Orders create ambiguous: "
+                f"HTTP {response.status_code}"
+            )
+        if not response.is_success:
+            raise RuntimeError(
+                "Mercado Pago Orders create rejected: "
+                f"HTTP {response.status_code}"
             )
 
-            if response.is_error:
-                raise RuntimeError(
-                    f"Mercado Pago {response.status_code}: {response.text}"
-                )
-
+        try:
             order = response.json()
+        except ValueError:
+            raise ProviderCreateAmbiguity(
+                "Mercado Pago Orders create ambiguous: invalid JSON response"
+            ) from None
+
+        if (
+            not isinstance(order, dict)
+            or order.get("id") is None
+            or not str(order.get("id")).strip()
+        ):
+            raise ProviderCreateAmbiguity(
+                "Mercado Pago Orders create ambiguous: missing order id"
+            )
 
         payments = ((order.get("transactions") or {}).get("payments") or [])
         payment = payments[0] if payments else {}
