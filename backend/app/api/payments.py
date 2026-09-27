@@ -11,11 +11,18 @@ from app.api.deps import current_user, require_admin
 from app.core.config import settings
 from app.db.session import get_db
 from app.models import AgreementInstallment, CollectionAgreement, Contribution, Group, LedgerEntry, Loan, LoanInstallment, Member, Payment, PaymentSettlement, User, WebhookEvent
-from app.services.mercado_pago import MercadoPagoClient
+from app.services.mercado_pago import MercadoPagoClient, ProviderCreateAmbiguity
 from app.services.notifications_v12 import create_notification
 from app.services.payment_settlement import contribution_financial_status, installment_financial_status, settle_confirmed_pix_payment
 from app.services.webhook import validate_mercado_pago_signature
 from app.services.loan_installment_pix_attempts import approve_or_reconcile, RECONCILIATION_REQUIRED
+from app.services.contribution_pix_attempts import (
+    bind_provider as bind_contribution_provider,
+    lock_contribution,
+    mark_ambiguous as mark_contribution_ambiguous,
+    mark_reconciliation_required as mark_contribution_reconciliation_required,
+    reserve as reserve_contribution_payment,
+)
 
 
 router = APIRouter(prefix="/payments", tags=["payments"])
@@ -140,65 +147,68 @@ def _remote_confirmed_at(remote_payment: dict) -> datetime | None:
 
 @router.post("/pix/{contribution_id}")
 async def create_pix(contribution_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    _, contribution = _member_contribution(user, contribution_id, db)
+    member, _ = _member_contribution(user, contribution_id, db)
+    contribution = lock_contribution(db, contribution_id)
+    if contribution is None or contribution.member_id != member.id:
+        raise HTTPException(404, "Contribuição não encontrada.")
     financial_status = _contribution_status(contribution)
     if financial_status == "PAID":
         raise HTTPException(409, "Contribuição já paga.")
     if financial_status == "CANCELLED":
         raise HTTPException(409, "Contribuição encerrada neste ciclo.")
     existing = _payment_for_contribution(db, contribution)
-    if existing and existing.status in {"pending", "in_process", "PENDING"}:
-        return _pix_response(existing)
-    if existing and existing.status not in {"cancelled", "rejected", "refunded", "charged_back"}:
-        return _pix_response(existing)
+    if existing and existing.provider_payment_id:
+        if existing.status in {"pending", "in_process", "PENDING"}:
+            return _pix_response(existing)
+        if existing.status not in {"cancelled", "rejected", "refunded", "charged_back"}:
+            return _pix_response(existing)
+    if existing and not existing.provider_payment_id:
+        # A local placeholder is not a ready-to-use PIX charge. Only the
+        # request that committed it may make its first provider call.
+        raise HTTPException(409, "Criação Pix pendente de reconciliação.")
 
-    if not contribution.pix_idempotency_key:
-        contribution.pix_idempotency_key = f"frc-contribution-{contribution.id}"
-        db.flush()
     amount_due = _contribution_open_amount(contribution)
     if amount_due <= ZERO:
         raise HTTPException(409, "Contribuição já paga.")
-    idempotency_key = contribution.pix_idempotency_key
-    external_reference = f"contribution-{contribution.id}"
-    try:
-        result = await MercadoPagoClient().create_pix_payment(
-            amount=amount_due,
-            email=user.email,
-            cpf=user.cpf,
-            description=f"FRcaixinha contribuição {contribution.competence.isoformat()}",
-            idempotency_key=idempotency_key,
-            external_reference=external_reference,
-        )
-    except Exception as exc:
-        raise HTTPException(502, f"Não foi possível criar o Pix no Mercado Pago: {exc}")
 
-    payment = Payment(
-        provider="mercado_pago",
-        provider_order_id=str(result.get("order_id")) if result.get("order_id") else None,
-        provider_payment_id=str(result["id"]),
-        idempotency_key=idempotency_key,
-        amount=amount_due,
-        status=result.get("status", "PENDING"),
-        raw_status=result.get("status"),
-        qr_code=result.get("qr_code"),
-        qr_code_base64=result.get("qr_code_base64"),
-        ticket_url=result.get("ticket_url"),
-        external_reference=external_reference,
-        reference_type="CONTRIBUTION",
-        reference_id=str(contribution.id),
-    )
-    db.add(payment)
     try:
-        db.flush()
-        contribution.payment_id = payment.id
-        db.commit()
-        db.refresh(payment)
+        payment, created = reserve_contribution_payment(db, contribution.id, amount_due)
     except IntegrityError:
         db.rollback()
         existing = _payment_for_contribution(db, contribution)
-        if existing is not None:
+        if existing is not None and existing.provider_payment_id:
             return _pix_response(existing)
-        raise HTTPException(409, "Pagamento já registrado para esta contribuição.")
+        raise HTTPException(409, "Criação Pix pendente de reconciliação.")
+
+    if not created:
+        if payment.provider_payment_id:
+            return _pix_response(payment)
+        raise HTTPException(409, "Criação Pix pendente de reconciliação.")
+
+    try:
+        result = await MercadoPagoClient().create_pix_payment(
+            amount=payment.amount,
+            email=user.email,
+            cpf=user.cpf,
+            description=f"FRcaixinha contribuição {contribution.competence.isoformat()}",
+            idempotency_key=payment.idempotency_key,
+            external_reference=payment.external_reference,
+        )
+    except ProviderCreateAmbiguity:
+        mark_contribution_ambiguous(db, payment.id)
+        raise HTTPException(502, "Não foi possível confirmar a criação do Pix.")
+    except Exception:
+        # Known HTTP errors such as 4xx have no approved retry contract. Keep
+        # the key and local reservation blocked for explicit reconciliation.
+        mark_contribution_reconciliation_required(db, payment.id)
+        raise HTTPException(502, "Não foi possível confirmar a criação do Pix.")
+
+    try:
+        payment = bind_contribution_provider(db, payment.id, contribution.id, result)
+    except Exception:
+        db.rollback()
+        mark_contribution_reconciliation_required(db, payment.id)
+        raise HTTPException(502, "Não foi possível confirmar a criação do Pix.")
     return _pix_response(payment, result)
 
 

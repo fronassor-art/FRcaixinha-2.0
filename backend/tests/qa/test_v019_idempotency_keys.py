@@ -8,8 +8,13 @@ def _read(name):
 
 
 def test_contribution_idempotency_key_is_deterministic():
-    source = _read('payments.py')
-    assert 'frc-contribution-{contribution.id}' in source
+    api_source = _read("payments.py")
+    service_source = (ROOT / "app" / "services" / "contribution_pix_attempts.py").read_text()
+    assert 'idempotency_key = f"frc-contribution-{contribution.id}"' in service_source
+    assert "idempotency_key=payment.idempotency_key" in api_source
+    assert "external_reference=payment.external_reference" in api_source
+
+
 def test_installment_idempotency_key_is_deterministic():
     api_source = _read("loan_installment_payments.py")
     service_source = (ROOT / "app" / "services" / "loan_installment_pix_attempts.py").read_text()
