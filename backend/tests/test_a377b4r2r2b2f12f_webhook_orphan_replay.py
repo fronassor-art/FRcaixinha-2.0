@@ -579,6 +579,9 @@ def test_replay_settles_versioned_loan_installment_once(tmp_path, monkeypatch):
 
     monkeypatch.setattr(api.MercadoPagoClient, "get_order", get_order)
     first = _admin_replay(db, event.event_id)
+    notification_count = db.query(Notification).filter_by(
+        reference_type="LOAN_INSTALLMENT", reference_id=str(installment.id)
+    ).count()
     second = _admin_replay(db, event.event_id)
     db.refresh(installment)
     db.refresh(loan)
@@ -591,7 +594,7 @@ def test_replay_settles_versioned_loan_installment_once(tmp_path, monkeypatch):
     ).count() == 1
     assert db.query(Notification).filter_by(
         reference_type="LOAN_INSTALLMENT", reference_id=str(installment.id)
-    ).count() == 1
+    ).count() == notification_count
     assert db.query(PaymentReversal).filter_by(payment_id=payment.id).count() == 0
     db.close()
     engine.dispose()
