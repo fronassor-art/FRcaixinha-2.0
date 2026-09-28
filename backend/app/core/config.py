@@ -3,6 +3,8 @@ from decimal import Decimal
 import os
 from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.exc import ArgumentError
+from sqlalchemy.engine import make_url
 
 
 def _read_file_env(field: str) -> str | None:
@@ -72,11 +74,42 @@ for _field in (
     if _value is not None:
         setattr(settings, _field, _value)
 
-if not settings.database_url or not settings.jwt_secret:
-    raise RuntimeError("DATABASE_URL/JWT_SECRET must be configured directly or via *_FILE secrets")
+_KNOWN_PLACEHOLDERS = {"change_me", "change_me_db_password"}
 
-if settings.app_env.lower() == "production":
-    if settings.allowed_hosts.strip() in {"", "*"}:
+
+def validate_runtime_settings(config: Settings) -> None:
+    if not config.database_url or not config.jwt_secret:
+        raise RuntimeError("DATABASE_URL/JWT_SECRET must be configured directly or via *_FILE secrets")
+
+    if config.app_env.strip().lower() != "production":
+        return
+
+    if config.allowed_hosts.strip() in {"", "*"}:
         raise RuntimeError("ALLOWED_HOSTS must be explicit in production")
-    if settings.cors_origins.strip() in {"", "*"}:
+    if config.cors_origins.strip() in {"", "*"}:
         raise RuntimeError("CORS_ORIGINS must be explicit in production")
+
+    if config.database_url.strip().casefold() in _KNOWN_PLACEHOLDERS:
+        raise RuntimeError("DATABASE_URL contains a documented placeholder in production")
+
+    try:
+        database_url = make_url(config.database_url)
+    except (ArgumentError, ValueError):
+        raise RuntimeError("DATABASE_URL must be a valid PostgreSQL URL in production") from None
+    if database_url.drivername != "postgresql+psycopg":
+        raise RuntimeError("DATABASE_URL must use the supported postgresql+psycopg driver in production")
+    if database_url.password and database_url.password.casefold() in _KNOWN_PLACEHOLDERS:
+        raise RuntimeError("DATABASE_URL contains a documented placeholder in production")
+
+    for value in (
+        config.jwt_secret,
+        config.mercado_pago_access_token,
+        config.mercado_pago_webhook_secret,
+        config.smtp_password,
+        config.payout_destination_encryption_key,
+    ):
+        if value is not None and value.strip().casefold() in _KNOWN_PLACEHOLDERS:
+            raise RuntimeError("A configured production secret contains a documented placeholder")
+
+
+validate_runtime_settings(settings)
