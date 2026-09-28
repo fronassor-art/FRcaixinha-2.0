@@ -127,13 +127,12 @@ jobs:
             if [ "$health" != healthy ]; then
               compose ps
               compose logs --no-color --tail=50 "$service" > "$RUNNER_TEMP/oci-a1-$service.log" 2>&1 || true
-              python - "$RUNNER_TEMP/oci-a1-$service.log" <<'PY'
-          import os
+              sudo python - "$RUNNER_TEMP/oci-a1-$service.log" "$FRCAIXINHA_SECRETS_DIR" <<'PY'
           from pathlib import Path
           import sys
 
           output = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")
-          root = Path(os.environ["FRCAIXINHA_SECRETS_DIR"])
+          root = Path(sys.argv[2])
           for name in ("postgres_password", "database_url", "jwt_secret", "redis_url"):
               path = root / name
               if path.is_file():
@@ -179,13 +178,12 @@ jobs:
           if [ "$health" != healthy ]; then
             compose ps
             compose logs --no-color --tail=80 web > "$RUNNER_TEMP/oci-a1-web.log" 2>&1 || true
-            python - "$RUNNER_TEMP/oci-a1-web.log" <<'PY'
-          import os
+            sudo python - "$RUNNER_TEMP/oci-a1-web.log" "$FRCAIXINHA_SECRETS_DIR" <<'PY'
           from pathlib import Path
           import sys
 
           output = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")
-          root = Path(os.environ["FRCAIXINHA_SECRETS_DIR"])
+          root = Path(sys.argv[2])
           for name in ("postgres_password", "database_url", "jwt_secret", "redis_url"):
               path = root / name
               if path.is_file():
