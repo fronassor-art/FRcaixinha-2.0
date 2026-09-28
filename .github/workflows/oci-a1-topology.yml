@@ -21,8 +21,8 @@ jobs:
   topology:
     runs-on: ubuntu-latest
     env:
-      FRCAIXINHA_DATA_ROOT: ${{ runner.temp }}/frcaixinha-data
-      FRCAIXINHA_SECRETS_DIR: ${{ runner.temp }}/frcaixinha-secrets
+      FRCAIXINHA_DATA_ROOT: /tmp/frcaixinha-oci-a1-data
+      FRCAIXINHA_SECRETS_DIR: /tmp/frcaixinha-oci-a1-secrets
     steps:
       - uses: actions/checkout@v4
         with:
