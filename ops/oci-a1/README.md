@@ -57,7 +57,13 @@ The web process runs the image's `sh ./start.sh`; the worker runs `python -m app
 
 The application web middleware uses Redis for best-effort rate limiting, and `/metrics` reads the worker heartbeat from Redis. This topology deliberately does not join web to `redis_internal`, so those two web features fall back when Redis cannot be reached. Production security and monitoring must address that before approval.
 
-Redis AOF (`appendonly yes`, `appendfsync everysec`) provides operational durability only. **PostgreSQL remains the financial source of truth.** Redis is isolated from host ports and the web network, but this package does not add Redis authentication. The G3D4 package must audit and correct financial task re-execution safety around Redis locks before any production approval. `OCI_TOPOLOGY_READY` does not mean `PRODUCTION_APPROVED`.
+Redis AOF (`appendonly yes`, `appendfsync everysec`) provides operational durability only. **PostgreSQL remains the financial source of truth.** Redis has no published host port; it belongs only to the `redis_internal` network (`internal: true`), whose only clients in this topology are the worker and Redis itself. Because Redis authentication is not implemented in this package, `protected-mode no` allows the worker to connect from its separate container. This does not make Redis public. Redis authentication/ACL hardening remains required before production approval. The G3D4 package must audit and correct financial task re-execution safety around Redis locks before any production approval. `OCI_TOPOLOGY_READY` does not mean `PRODUCTION_APPROVED`.
+
+- `REDIS_AUTHENTICATION=NOT_IMPLEMENTED`
+- `REDIS_PROTECTED_MODE=DISABLED_BY_DESIGN_INSIDE_ISOLATED_DOCKER_NETWORK`
+- `REDIS_PUBLIC_PORT=NONE`
+- `REDIS_NETWORK_CLIENTS=worker only`
+- `REDIS_FINANCIAL_SOURCE_OF_TRUTH=NO`
 
 ## Controlled startup and migration
 
