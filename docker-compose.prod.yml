@@ -1,18 +1,42 @@
+x-backend: &backend
+  image: frcaixinha-backend:production
+  build:
+    context: ./backend
+    dockerfile: Dockerfile
+
 services:
-  backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
+  web:
+    <<: *backend
     env_file:
       - .env.production
     environment:
       DATABASE_URL_FILE: /run/secrets/database_url
       JWT_SECRET_FILE: /run/secrets/jwt_secret
-      MERCADO_PAGO_ACCESS_TOKEN_FILE: /run/secrets/mercado_pago_access_token
+      WORKFLOW_EVIDENCE_STORAGE_ROOT: /var/lib/frcaixinha/workflow-evidence
     secrets:
       - database_url
       - jwt_secret
-      - mercado_pago_access_token
+    volumes:
+      - workflow_evidence:/var/lib/frcaixinha/workflow-evidence
+    restart: unless-stopped
+
+  worker:
+    <<: *backend
+    command: ["python", "-m", "app.worker.main"]
+    environment:
+      APP_ENV: ${APP_ENV:?set APP_ENV in .env.production}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:?set ALLOWED_HOSTS in .env.production}
+      CORS_ORIGINS: ${CORS_ORIGINS:?set CORS_ORIGINS in .env.production}
+      DATABASE_URL_FILE: /run/secrets/database_url
+      JWT_SECRET_FILE: /run/secrets/jwt_secret
+      REDIS_URL_FILE: /run/secrets/redis_url
+      WORKFLOW_EVIDENCE_STORAGE_ROOT: /var/lib/frcaixinha/workflow-evidence
+    secrets:
+      - database_url
+      - jwt_secret
+      - redis_url
+    volumes:
+      - workflow_evidence:/var/lib/frcaixinha/workflow-evidence
     restart: unless-stopped
 
 secrets:
@@ -20,5 +44,8 @@ secrets:
     file: ./secrets/database_url
   jwt_secret:
     file: ./secrets/jwt_secret
-  mercado_pago_access_token:
-    file: ./secrets/mercado_pago_access_token
+  redis_url:
+    file: ./secrets/redis_url
+
+volumes:
+  workflow_evidence:
