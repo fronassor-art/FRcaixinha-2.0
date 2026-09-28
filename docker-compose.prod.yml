@@ -12,6 +12,8 @@ services:
     environment:
       DATABASE_URL_FILE: /run/secrets/database_url
       JWT_SECRET_FILE: /run/secrets/jwt_secret
+      MERCADO_PAGO_ACCESS_TOKEN_FILE: ${MERCADO_PAGO_ACCESS_TOKEN_FILE:-}
+      MERCADO_PAGO_WEBHOOK_SECRET_FILE: ${MERCADO_PAGO_WEBHOOK_SECRET_FILE:-}
       WORKFLOW_EVIDENCE_STORAGE_ROOT: /var/lib/frcaixinha/workflow-evidence
     secrets:
       - database_url
