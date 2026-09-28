@@ -2,7 +2,7 @@
 import os
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from threading import Barrier
 
 import pytest
@@ -12,10 +12,12 @@ from sqlalchemy.orm import sessionmaker
 
 from app.models import SchedulerRun, SchedulerRunUnit
 from app.services.scheduler_runs import (
+    SchedulerLeaseLost,
     claim_run,
     claim_unit,
     get_or_create_run,
     get_or_create_unit,
+    mark_unit_succeeded,
 )
 
 
@@ -157,7 +159,7 @@ def test_postgresql_scheduler_run_and_unit_create_and_claim_have_one_winner():
             won = claim_unit(
                 session,
                 unit_id,
-                lease_owner=f"unit-owner-{index}-{token}",
+                lease_owner=run_owner,
                 now=scheduled_for,
                 lease_seconds=60,
             )
@@ -180,6 +182,7 @@ def test_postgresql_scheduler_run_and_unit_create_and_claim_have_one_winner():
         with ThreadPoolExecutor(max_workers=2) as pool:
             run_claims = list(pool.map(concurrent_run_claim, range(2)))
         assert sum(run_claims) == 1
+        run_owner = f"run-owner-{run_claims.index(True)}-{token}"
 
         gate = Barrier(2)
         with ThreadPoolExecutor(max_workers=2) as pool:
@@ -195,6 +198,69 @@ def test_postgresql_scheduler_run_and_unit_create_and_claim_have_one_winner():
         with ThreadPoolExecutor(max_workers=2) as pool:
             unit_claims = list(pool.map(concurrent_unit_claim, range(2)))
         assert sum(unit_claims) == 1
+    finally:
+        with Sessions() as session:
+            session.execute(
+                text("DELETE FROM scheduler_runs WHERE job_key=:job_key AND financial_date=:financial_date"),
+                {"job_key": job_key, "financial_date": financial_date},
+            )
+            session.commit()
+        engine.dispose()
+
+
+def test_postgresql_reclaimed_parent_fences_stale_unit_completion():
+    """A stale unit claimant cannot complete after another owner reclaims its run."""
+    engine = create_engine(DATABASE_URL)
+    Sessions = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+    token = uuid.uuid4().hex
+    job_key = f"g3d4a-fence-{token}"
+    scheduled_for = datetime(2027, 1, 10, 4, 5, tzinfo=timezone.utc)
+    financial_date = date(2027, 1, 10)
+    try:
+        with Sessions() as session:
+            run, _ = get_or_create_run(
+                session,
+                job_key=job_key,
+                financial_date=financial_date,
+                scheduled_for=scheduled_for,
+            )
+            run_id = run.id
+            assert claim_run(
+                session, run_id, lease_owner="worker-a", now=scheduled_for,
+                lease_seconds=10,
+            )
+            session.commit()
+
+        with Sessions() as session:
+            unit, _ = get_or_create_unit(session, run_id=run_id, unit_key="participant:42")
+            unit_id = unit.id
+            assert claim_unit(
+                session, unit_id, lease_owner="worker-a", now=scheduled_for,
+                lease_seconds=120,
+            )
+            session.commit()
+
+        with Sessions() as session:
+            assert claim_run(
+                session, run_id, lease_owner="worker-b",
+                now=scheduled_for + timedelta(seconds=10), lease_seconds=120,
+            )
+            session.commit()
+
+        with Sessions() as session:
+            with pytest.raises(SchedulerLeaseLost):
+                mark_unit_succeeded(
+                    session, unit_id, lease_owner="worker-a",
+                    completed_at=scheduled_for + timedelta(seconds=11),
+                )
+            session.rollback()
+
+        with Sessions() as session:
+            run = session.get(SchedulerRun, run_id)
+            unit = session.get(SchedulerRunUnit, unit_id)
+            assert run.status == "RUNNING" and run.lease_owner == "worker-b"
+            assert unit.status == "RUNNING" and unit.lease_owner == "worker-a"
+            assert unit.completed_at is None
     finally:
         with Sessions() as session:
             session.execute(

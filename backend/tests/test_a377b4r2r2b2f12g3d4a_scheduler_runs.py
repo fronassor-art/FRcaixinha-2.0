@@ -130,7 +130,7 @@ def test_stale_run_owner_cannot_mark_a_reclaimed_lease(db):
 
 def test_unit_creation_claim_reclaim_and_terminal_states(db):
     run = make_run(db)
-    assert claim_run(db, run.id, lease_owner="run-owner", now=NOW, lease_seconds=120)
+    assert claim_run(db, run.id, lease_owner="unit-a", now=NOW, lease_seconds=10)
     unit, created = get_or_create_unit(db, run_id=run.id, unit_key="participation:42")
     same, created_again = get_or_create_unit(db, run_id=run.id, unit_key="participation:42")
     second_unit, second_created = get_or_create_unit(db, run_id=run.id, unit_key="participation:43")
@@ -144,6 +144,10 @@ def test_unit_creation_claim_reclaim_and_terminal_states(db):
         db, unit.id, lease_owner="unit-b", now=NOW + timedelta(seconds=5), lease_seconds=10
     )
     assert unit.attempt_count == 1
+    assert claim_run(
+        db, run.id, lease_owner="unit-b", now=NOW + timedelta(seconds=10),
+        lease_seconds=120,
+    )
     assert claim_unit(
         db, unit.id, lease_owner="unit-b", now=NOW + timedelta(seconds=10), lease_seconds=10
     )
@@ -156,15 +160,144 @@ def test_unit_creation_claim_reclaim_and_terminal_states(db):
 
 def test_unit_failed_can_be_reclaimed_and_mark_failed_releases_lease(db):
     run = make_run(db)
-    claim_run(db, run.id, lease_owner="run-owner", now=NOW)
+    claim_run(db, run.id, lease_owner="unit-a", now=NOW, lease_seconds=10)
     unit, _ = get_or_create_unit(db, run_id=run.id, unit_key="item-a")
     assert claim_unit(db, unit.id, lease_owner="unit-a", now=NOW)
     mark_unit_failed(db, unit.id, lease_owner="unit-a", error_code="validation_failed", failed_at=NOW + timedelta(seconds=1))
     assert unit.status == "FAILED"
     assert unit.last_error == "validation_failed"
     assert unit.lease_owner is None and unit.lease_expires_at is None
-    assert claim_unit(db, unit.id, lease_owner="unit-b", now=NOW + timedelta(seconds=2))
+    mark_run_failed(db, run.id, lease_owner="unit-a", failed_at=NOW + timedelta(seconds=2))
+    assert claim_run(
+        db, run.id, lease_owner="unit-b", now=NOW + timedelta(seconds=3),
+        lease_seconds=120,
+    )
+    assert claim_unit(db, unit.id, lease_owner="unit-b", now=NOW + timedelta(seconds=3))
     assert unit.attempt_count == 2
+
+
+def _claimed_run_and_unit(db, *, run_lease_seconds=120, unit_lease_seconds=120):
+    run = make_run(db)
+    assert claim_run(
+        db, run.id, lease_owner="worker-a", now=NOW,
+        lease_seconds=run_lease_seconds,
+    )
+    unit, _ = get_or_create_unit(db, run_id=run.id, unit_key="participation:42")
+    assert claim_unit(
+        db, unit.id, lease_owner="worker-a", now=NOW,
+        lease_seconds=unit_lease_seconds,
+    )
+    return run, unit
+
+
+def test_unit_success_rejected_after_parent_run_reclaimed(db):
+    run, unit = _claimed_run_and_unit(db, run_lease_seconds=10, unit_lease_seconds=120)
+    assert claim_run(
+        db, run.id, lease_owner="worker-b", now=NOW + timedelta(seconds=10),
+        lease_seconds=120,
+    )
+
+    with pytest.raises(SchedulerLeaseLost):
+        mark_unit_succeeded(
+            db, unit.id, lease_owner="worker-a",
+            completed_at=NOW + timedelta(seconds=11),
+        )
+
+    assert run.status == "RUNNING" and run.lease_owner == "worker-b"
+    assert unit.status == "RUNNING" and unit.lease_owner == "worker-a"
+    assert unit.completed_at is None
+
+
+def test_unit_failure_rejected_after_parent_run_reclaimed(db):
+    run, unit = _claimed_run_and_unit(db, run_lease_seconds=10, unit_lease_seconds=120)
+    assert claim_run(
+        db, run.id, lease_owner="worker-b", now=NOW + timedelta(seconds=10),
+        lease_seconds=120,
+    )
+
+    with pytest.raises(SchedulerLeaseLost):
+        mark_unit_failed(
+            db, unit.id, lease_owner="worker-a", error_code="execution_failed",
+            failed_at=NOW + timedelta(seconds=11),
+        )
+
+    assert run.status == "RUNNING" and run.lease_owner == "worker-b"
+    assert unit.status == "RUNNING" and unit.lease_owner == "worker-a"
+    assert unit.last_error is None
+
+
+def test_unit_success_rejected_when_parent_run_lease_expired(db):
+    run, unit = _claimed_run_and_unit(db, run_lease_seconds=10, unit_lease_seconds=120)
+
+    with pytest.raises(SchedulerLeaseLost):
+        mark_unit_succeeded(
+            db, unit.id, lease_owner="worker-a",
+            completed_at=NOW + timedelta(seconds=11),
+        )
+
+    assert run.status == "RUNNING" and run.lease_owner == "worker-a"
+    assert unit.status == "RUNNING" and unit.lease_owner == "worker-a"
+    assert unit.completed_at is None
+
+
+def test_unit_failure_rejected_when_parent_run_lease_expired(db):
+    run, unit = _claimed_run_and_unit(db, run_lease_seconds=10, unit_lease_seconds=120)
+
+    with pytest.raises(SchedulerLeaseLost):
+        mark_unit_failed(
+            db, unit.id, lease_owner="worker-a", error_code="execution_failed",
+            failed_at=NOW + timedelta(seconds=11),
+        )
+
+    assert run.status == "RUNNING" and run.lease_owner == "worker-a"
+    assert unit.status == "RUNNING" and unit.lease_owner == "worker-a"
+    assert unit.last_error is None
+
+
+def test_unit_terminal_transitions_rejected_when_parent_run_is_not_running(db):
+    run, unit = _claimed_run_and_unit(db)
+    mark_run_failed(db, run.id, lease_owner="worker-a", failed_at=NOW + timedelta(seconds=1))
+
+    with pytest.raises(SchedulerLeaseLost):
+        mark_unit_succeeded(
+            db, unit.id, lease_owner="worker-a",
+            completed_at=NOW + timedelta(seconds=2),
+        )
+    with pytest.raises(SchedulerLeaseLost):
+        mark_unit_failed(
+            db, unit.id, lease_owner="worker-a", error_code="execution_failed",
+            failed_at=NOW + timedelta(seconds=2),
+        )
+
+    assert run.status == "FAILED" and run.lease_owner is None
+    assert unit.status == "RUNNING" and unit.lease_owner == "worker-a"
+    assert unit.completed_at is None and unit.last_error is None
+
+
+def test_valid_parent_and_unit_owner_can_complete(db):
+    run, unit = _claimed_run_and_unit(db)
+
+    completed = mark_unit_succeeded(
+        db, unit.id, lease_owner="worker-a", completed_at=NOW + timedelta(seconds=1)
+    )
+
+    assert completed.status == "SUCCEEDED"
+    assert completed.lease_owner is None and completed.lease_expires_at is None
+    assert run.status == "RUNNING" and run.lease_owner == "worker-a"
+
+
+def test_valid_parent_and_unit_owner_can_fail(db):
+    run, unit = _claimed_run_and_unit(db)
+
+    failed = mark_unit_failed(
+        db, unit.id, lease_owner="worker-a", error_code="execution_failed",
+        failed_at=NOW + timedelta(seconds=1),
+    )
+
+    assert failed.status == "FAILED"
+    assert failed.last_error == "execution_failed"
+    assert failed.lease_owner is None and failed.lease_expires_at is None
+    assert run.status == "RUNNING" and run.lease_owner == "worker-a"
 
 
 def test_run_cannot_succeed_while_units_are_incomplete_and_financial_date_contract_is_explicit(db):
