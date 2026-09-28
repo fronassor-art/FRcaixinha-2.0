@@ -243,10 +243,13 @@ def _locked_unit(db: Session, unit_id: int, *, lease_owner: str, now: datetime) 
     unit = db.get(SchedulerRunUnit, unit_id)
     if unit is None:
         raise LookupError("scheduler unit not found")
-    _for_update(db.query(SchedulerRun).filter(SchedulerRun.id == unit.run_id), db).one()
+    # Lock and validate the parent first so unit terminal transitions are
+    # fenced by the same active claimant that owns the run.
+    run = _for_update(db.query(SchedulerRun).filter(SchedulerRun.id == unit.run_id), db).one()
     row = _for_update(
         db.query(SchedulerRunUnit).filter(SchedulerRunUnit.id == unit_id), db
     ).one()
+    _assert_claim(run, lease_owner=lease_owner, now=now)
     _assert_claim(row, lease_owner=lease_owner, now=now)
     return row
 
