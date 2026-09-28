@@ -108,3 +108,40 @@ jobs:
           image_arch="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' frcaixinha-backend:arm64)"
           echo "Built image architecture: ${image_arch}"
           test "${image_arch}" = "linux/arm64"
+
+      - name: Run backend image command smoke
+        run: |
+          container_name="frcaixinha-backend-arm64-smoke"
+          cleanup() {
+            result=$?
+            if [ "$result" -ne 0 ]; then
+              echo "Backend image smoke failed; container logs follow:" >&2
+              docker logs "$container_name" 2>&1 || true
+            fi
+            docker rm -f "$container_name" >/dev/null 2>&1 || true
+            return "$result"
+          }
+          trap cleanup EXIT
+
+          docker run -d \
+            --name "$container_name" \
+            -e APP_ENV=test \
+            -e DATABASE_URL=sqlite:///./test.db \
+            -e JWT_SECRET=ci-only-runtime-smoke-secret \
+            frcaixinha-backend:arm64
+
+          sleep 5
+          running="$(docker inspect --format '{{.State.Running}}' "$container_name")"
+          restart_count="$(docker inspect --format '{{.RestartCount}}' "$container_name")"
+          if [ "$running" != "true" ] || [ "$restart_count" != "0" ]; then
+            echo "Container did not remain running (running=${running}, restarts=${restart_count})" >&2
+            exit 1
+          fi
+
+          logs="$(docker logs "$container_name" 2>&1)"
+          if printf '%s\n' "$logs" | grep -Fq 'To use the fastapi command, please install "fastapi[standard]"'; then
+            echo "Unexpected FastAPI CLI dependency error" >&2
+            exit 1
+          fi
+
+          docker exec "$container_name" python -c 'import urllib.request; response = urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=3); assert response.status == 200, response.status; print("health:", response.status)'
