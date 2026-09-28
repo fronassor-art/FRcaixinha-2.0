@@ -1,0 +1,135 @@
+name: OCI A1 Topology
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'ops/oci-a1/**'
+      - '.github/workflows/oci-a1-topology.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'ops/oci-a1/**'
+      - '.github/workflows/oci-a1-topology.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  topology:
+    runs-on: ubuntu-latest
+    env:
+      FRCAIXINHA_DATA_ROOT: ${{ runner.temp }}/frcaixinha-data
+      FRCAIXINHA_SECRETS_DIR: ${{ runner.temp }}/frcaixinha-secrets
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Confirm portable production compose is unchanged
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            git diff --exit-code "$PR_BASE_SHA" "$PR_HEAD_SHA" -- docker-compose.prod.yml
+          else
+            git diff --exit-code HEAD^ HEAD -- docker-compose.prod.yml
+          fi
+
+      - name: Prepare temporary validation inputs
+        run: |
+          cp ops/oci-a1/.env.oci-a1.example ops/oci-a1/.env.oci-a1
+          cp ops/oci-a1/app.env.example ops/oci-a1/app.env
+          mkdir -p "$FRCAIXINHA_DATA_ROOT/postgres" "$FRCAIXINHA_DATA_ROOT/redis" "$FRCAIXINHA_DATA_ROOT/evidence"
+          mkdir -p "$FRCAIXINHA_SECRETS_DIR"
+          touch "$FRCAIXINHA_SECRETS_DIR/postgres_password" "$FRCAIXINHA_SECRETS_DIR/database_url" "$FRCAIXINHA_SECRETS_DIR/jwt_secret" "$FRCAIXINHA_SECRETS_DIR/redis_url"
+
+      - name: Render Docker Compose without starting services
+        run: |
+          docker compose version
+          docker compose \
+            --env-file ops/oci-a1/.env.oci-a1 \
+            -f ops/oci-a1/docker-compose.oci-a1.yml \
+            config --format json > "$RUNNER_TEMP/oci-a1-compose.json"
+
+      - name: Verify OCI A1 topology contract
+        run: |
+          python - "$RUNNER_TEMP/oci-a1-compose.json" <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import sys
+
+          config = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          services = config["services"]
+          assert set(services) == {"postgres", "redis", "web", "worker"}
+          for name, service in services.items():
+              assert not service.get("ports"), f"{name} publishes a host port"
+
+          data_root = Path(os.environ["FRCAIXINHA_DATA_ROOT"]).resolve()
+          secrets_root = Path(os.environ["FRCAIXINHA_SECRETS_DIR"]).resolve()
+
+          def bind_source(service, target):
+              mounts = [mount for mount in service.get("volumes", []) if mount["target"] == target]
+              assert len(mounts) == 1 and mounts[0]["type"] == "bind", (service, target)
+              assert mounts[0].get("bind", {}).get("create_host_path") is False, target
+              return Path(mounts[0]["source"]).resolve()
+
+          assert services["postgres"]["image"] == "postgres:16-alpine"
+          assert services["redis"]["image"] == "redis:7-alpine"
+          assert bind_source(services["postgres"], "/var/lib/postgresql/data") == data_root / "postgres"
+          assert bind_source(services["redis"], "/data") == data_root / "redis"
+          evidence_target = "/var/lib/frcaixinha/workflow-evidence"
+          assert bind_source(services["web"], evidence_target) == data_root / "evidence"
+          assert bind_source(services["worker"], evidence_target) == data_root / "evidence"
+
+          image = services["web"]["image"]
+          assert image == services["worker"]["image"]
+          assert re.fullmatch(r"ghcr\.io/fronassor-art/frcaixinha-backend@sha256:[0-9a-f]{64}", image), image
+          for name in ("web", "worker"):
+              assert "build" not in services[name]
+          assert "latest" not in Path("ops/oci-a1/docker-compose.oci-a1.yml").read_text(encoding="utf-8").lower()
+
+          expected_networks = {
+              "postgres": {"db_internal"},
+              "redis": {"redis_internal"},
+              "web": {"app_egress", "db_internal"},
+              "worker": {"app_egress", "db_internal", "redis_internal"},
+          }
+          for name, expected in expected_networks.items():
+              assert set(services[name]["networks"]) == expected, name
+          assert config["networks"]["db_internal"]["internal"] is True
+          assert config["networks"]["redis_internal"]["internal"] is True
+          assert not config["networks"]["app_egress"].get("internal", False)
+
+          expected_files = {"postgres_password", "database_url", "jwt_secret", "redis_url"}
+          assert set(config["secrets"]) == expected_files
+          for name in expected_files:
+              assert Path(config["secrets"][name]["file"]).resolve() == secrets_root / name
+          def granted_secrets(service):
+              return {entry["source"] if isinstance(entry, dict) else entry for entry in service.get("secrets", [])}
+          assert granted_secrets(services["postgres"]) == {"postgres_password"}
+          assert granted_secrets(services["web"]) == {"database_url", "jwt_secret"}
+          assert granted_secrets(services["worker"]) == {"database_url", "jwt_secret", "redis_url"}
+          assert not granted_secrets(services["redis"])
+          assert services["postgres"]["environment"]["POSTGRES_PASSWORD_FILE"] == "/run/secrets/postgres_password"
+          for name in ("web", "worker"):
+              env = services[name]["environment"]
+              assert env["DATABASE_URL_FILE"] == "/run/secrets/database_url"
+              assert env["JWT_SECRET_FILE"] == "/run/secrets/jwt_secret"
+              assert env["WORKFLOW_EVIDENCE_STORAGE_ROOT"] == evidence_target
+              assert not {"DATABASE_URL", "JWT_SECRET", "REDIS_URL"} & set(env)
+              assert "alembic" not in str(services[name].get("command", "")).lower()
+              assert "alembic" not in str(services[name].get("entrypoint", "")).lower()
+          assert services["worker"]["environment"]["REDIS_URL_FILE"] == "/run/secrets/redis_url"
+          assert services["worker"]["command"] == ["python", "-m", "app.worker.main"]
+          assert "REDIS_URL_FILE" not in services["web"]["environment"]
+          redis_conf = Path("ops/oci-a1/redis.conf").read_text(encoding="utf-8")
+          assert re.search(r"(?m)^appendonly yes$", redis_conf)
+          assert re.search(r"(?m)^appendfsync everysec$", redis_conf)
+          print("OCI A1 static topology contract: PASS")
+          PY
