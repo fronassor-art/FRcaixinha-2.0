@@ -25,10 +25,9 @@ services:
   worker:
     <<: *backend
     command: ["python", "-m", "app.worker.main"]
+    env_file:
+      - .env.production
     environment:
-      APP_ENV: ${APP_ENV:?set APP_ENV in .env.production}
-      ALLOWED_HOSTS: ${ALLOWED_HOSTS:?set ALLOWED_HOSTS in .env.production}
-      CORS_ORIGINS: ${CORS_ORIGINS:?set CORS_ORIGINS in .env.production}
       DATABASE_URL_FILE: /run/secrets/database_url
       JWT_SECRET_FILE: /run/secrets/jwt_secret
       REDIS_URL_FILE: /run/secrets/redis_url

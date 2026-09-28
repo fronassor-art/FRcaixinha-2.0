@@ -24,6 +24,17 @@ def test_production_compose_declares_separate_web_and_worker_same_image():
     assert "CMD [\"sh\", \"./start.sh\"]" in (ROOT / "backend/Dockerfile").read_text()
 
 
+def test_web_and_worker_load_the_same_production_environment_file():
+    web = _service("web", "worker")
+    worker = _service("worker")
+
+    assert "env_file:\n      - .env.production" in web
+    assert "env_file:\n      - .env.production" in worker
+    assert "APP_ENV: ${APP_ENV:?" not in worker
+    assert "ALLOWED_HOSTS: ${ALLOWED_HOSTS:?" not in worker
+    assert "CORS_ORIGINS: ${CORS_ORIGINS:?" not in worker
+
+
 def test_production_compose_uses_external_database_and_redis_secrets():
     web = _service("web", "worker")
     worker = _service("worker")
@@ -54,6 +65,7 @@ def test_migrations_are_a_manual_single_release_step_not_process_startup():
     assert "alembic upgrade head" not in COMPOSE
     assert "alembic upgrade head" in DOC
     assert "run --rm --no-deps web alembic upgrade head" in DOC
+    assert "docker compose --env-file .env.production -f docker-compose.prod.yml up -d web worker" in DOC
     assert "Alembic upgrade" not in (ROOT / "backend/start.sh").read_text()
     assert "alembic" not in (ROOT / "backend/app/worker/main.py").read_text()
 
