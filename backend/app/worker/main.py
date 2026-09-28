@@ -13,6 +13,8 @@ try:
 except ImportError:
     redis = None
 
+# Redis keys are UTC operational lock identities; task financial dates come
+# from the single timezone-aware scheduled_for passed by main().
 def acquire_daily_lock():
     if redis is None:
         return True
@@ -36,17 +38,17 @@ def main():
                 redis.from_url(settings.redis_url, decode_responses=True).set("frcaixinha:worker:heartbeat", str(time.time()), ex=300)
             except Exception:
                 log.exception("worker_heartbeat_failed")
-        now = datetime.now(timezone.utc)
+        scheduled_for = datetime.now(timezone.utc)
         # Run once shortly after 00:05 UTC; lock makes it single-run across replicas.
-        if now.hour == 0 and now.minute == 5 and acquire_daily_lock():
+        if scheduled_for.hour == 0 and scheduled_for.minute == 5 and acquire_daily_lock():
             try:
-                run_daily_tasks(); WORKER_RUNS.labels("success").inc()
+                run_daily_tasks(scheduled_for=scheduled_for); WORKER_RUNS.labels("success").inc()
             except Exception:
                 WORKER_RUNS.labels("failure").inc(); log.exception("scheduled_task_failed")
         # 04:05 UTC is 01:05 in America/Belem, after the financial day changes.
-        if now.hour == 4 and now.minute == 5 and acquire_cycle_lock():
+        if scheduled_for.hour == 4 and scheduled_for.minute == 5 and acquire_cycle_lock():
             try:
-                result = run_cycle_participation_tasks(now)
+                result = run_cycle_participation_tasks(scheduled_for=scheduled_for)
                 log.info("cycle_participation_tasks_completed %s", result)
             except Exception:
                 log.exception("cycle_participation_tasks_failed")

@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from email.message import EmailMessage
 import smtplib
 from sqlalchemy.orm import Session
@@ -67,10 +67,14 @@ def deliver_email_notification(notification_id: int) -> bool:
         return False
 
 
-def queue_installment_reminders(db: Session, days_ahead: int = 3) -> int:
-    from datetime import date, timedelta
+def queue_installment_reminders(
+    db: Session,
+    days_ahead: int = 3,
+    *,
+    financial_date: date | None = None,
+) -> int:
     from app.models import LoanInstallment, Loan, Member
-    today = date.today()
+    today = financial_date or date.today()
     limit = today + timedelta(days=days_ahead)
     rows = db.query(LoanInstallment).filter(LoanInstallment.status != "PAID", LoanInstallment.due_date <= limit).all()
     created = 0

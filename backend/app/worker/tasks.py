@@ -1,5 +1,5 @@
 import logging
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from app.models import Cycle, CycleParticipation
 from app.services.cycle_foundation import ensure_contributions_for_entry
 from app.services.cycle_participation import evaluate_delinquency, materialize_active_charges
@@ -40,10 +40,10 @@ from app.models import ExecutiveRiskDecisionGovernance, ExecutiveRiskDecisionExe
 log = logging.getLogger(__name__)
 
 
-def run_cycle_participation_tasks(now: datetime | None = None) -> dict[str, int]:
+def run_cycle_participation_tasks(scheduled_for: datetime | None = None) -> dict[str, int]:
     """Materialize elapsed monthly obligations and block three-month delinquency."""
-    now = now or datetime.now(timezone.utc)
-    civil = financial_civil_date(now)
+    scheduled_for = scheduled_for or datetime.now(timezone.utc)
+    financial_date = financial_civil_date(scheduled_for)
     db = SessionLocal()
     try:
         ids = db.query(CycleParticipation.id).filter(
@@ -59,16 +59,16 @@ def run_cycle_participation_tasks(now: datetime | None = None) -> dict[str, int]
             if row is None or row.status != "ACTIVE":
                 continue
             cycle = db.get(Cycle, row.cycle_id)
-            if cycle is None or civil < cycle.start_date:
+            if cycle is None or financial_date < cycle.start_date:
                 continue
             ensure_contributions_for_entry(
-                db, member_id=row.member_id, cycle_id=row.cycle_id, entry_date=civil
+                db, member_id=row.member_id, cycle_id=row.cycle_id, entry_date=financial_date
             )
             materialize_active_charges(
-                db, member_id=row.member_id, cycle_id=row.cycle_id, effective_at=now
+                db, member_id=row.member_id, cycle_id=row.cycle_id, effective_at=scheduled_for
             )
             result = evaluate_delinquency(
-                db, member_id=row.member_id, cycle_id=row.cycle_id, effective_at=now
+                db, member_id=row.member_id, cycle_id=row.cycle_id, effective_at=scheduled_for
             )
             db.commit()
             processed += 1
@@ -80,25 +80,27 @@ def run_cycle_participation_tasks(now: datetime | None = None) -> dict[str, int]
             db.close()
     return {"processed": processed, "blocked": blocked}
 
-def run_daily_tasks():
+def run_daily_tasks(scheduled_for: datetime | None = None):
+    scheduled_for = scheduled_for or datetime.now(timezone.utc)
+    financial_date = financial_civil_date(scheduled_for)
     db = SessionLocal()
     try:
-        created = queue_installment_reminders(db, days_ahead=3)
-        penalties = accrue_overdue_penalties(db, date.today(), settings.loan_daily_penalty_rate)
-        collections = run_collection_cycle(db, date.today())
-        recovery = sync_cases(db, date.today())
+        created = queue_installment_reminders(db, days_ahead=3, financial_date=financial_date)
+        penalties = accrue_overdue_penalties(db, financial_date, settings.loan_daily_penalty_rate)
+        collections = run_collection_cycle(db, financial_date)
+        recovery = sync_cases(db, financial_date)
         workflow_escalation = sync_workflow_escalations(db, actor_id=None)
         workflow_orchestration = sync_workflow_orchestration(db, actor_id=None)
         workflow_execution = sync_execution_states(db, actor_id=None)
         workflow_integrity = verify_all(db, actor_id=None)
         workflow_incidents = sync_incidents(db, actor_id=None)
         capa_effectiveness = sync_capa_recurrence(db, actor_id=None)
-        operational_risk_row, operational_risk = persist_risk_snapshot(db, generated_by=None, snapshot_date=date.today())
+        operational_risk_row, operational_risk = persist_risk_snapshot(db, generated_by=None, snapshot_date=financial_date)
         operational_risk_alerts = sync_alerts(db, actor_id=None)
         operational_risk_response = sync_response_plans(db, actor_id=None)
-        workflow_compliance_row, workflow_compliance = persist_compliance_snapshot(db, generated_by=None, snapshot_date=date.today())
-        dashboard_row, dashboard = persist_executive_dashboard(db, None, date.today())
-        executive_risk_response_row, executive_risk_response = persist_dashboard(db, None, date.today())
+        workflow_compliance_row, workflow_compliance = persist_compliance_snapshot(db, generated_by=None, snapshot_date=financial_date)
+        dashboard_row, dashboard = persist_executive_dashboard(db, None, financial_date)
+        executive_risk_response_row, executive_risk_response = persist_dashboard(db, None, financial_date)
         governance_created = 0
         from app.models import ExecutiveRiskDecision, ExecutiveRiskDecisionGovernance
         for decision in db.query(ExecutiveRiskDecision).all():
@@ -123,9 +125,9 @@ def run_daily_tasks():
             if not before:
                 create_improvement_plan(db, rec.id, actor_id=None)
                 improvement_plans_created += 1
-        improvement_dashboard_row, improvement_dashboard = persist_improvement_dashboard(db, None, date.today())
+        improvement_dashboard_row, improvement_dashboard = persist_improvement_dashboard(db, None, financial_date)
         improvement_priority_row, improvement_priority = persist_improvement_priority(db, None)
-        improvement_balancing_row, improvement_balancing = persist_improvement_balancing(db, None, date.today())
+        improvement_balancing_row, improvement_balancing = persist_improvement_balancing(db, None, financial_date)
         execution_created = 0
         from app.models import ContinuousImprovementAssignmentDecision, ContinuousImprovementExecution
         for decision in db.query(ContinuousImprovementAssignmentDecision).filter(ContinuousImprovementAssignmentDecision.decision=='ACCEPT').all():
@@ -155,7 +157,7 @@ def run_daily_tasks():
                 except ValueError:
                     log.warning('continuous_improvement_audit_not_created execution_id=%s', execution.id)
         executive_audit_row, executive_audit = persist_executive_improvement_audit(db, None)
-        finalization = persist_finalization(db, None)
+        finalization = persist_finalization(db, None, financial_date=financial_date)
         db.commit()
         log.info('daily_tasks_completed reminders_created=%s penalties=%s penalty_total=%s', created, penalties['installments'], penalties['penalty_total'])
         return {'reminders_created': created, 'penalties': penalties, 'collections': collections, 'collection_recovery': recovery, 'workflow_escalation': workflow_escalation, 'workflow_orchestration': workflow_orchestration, 'workflow_execution': workflow_execution, 'workflow_integrity': workflow_integrity, 'workflow_compliance': {'id': workflow_compliance_row.id, 'status': workflow_compliance['status']}, 'workflow_incidents': workflow_incidents, 'capa_effectiveness': capa_effectiveness, 'operational_risk': {'id': operational_risk_row.id, 'status': operational_risk['status'], 'risk_score': operational_risk['risk_score']}, 'operational_risk_alerts': operational_risk_alerts, 'operational_risk_response': operational_risk_response, 'executive_dashboard': {'id': dashboard_row.id, 'status': dashboard['status']}, 'executive_risk_response': {'id': executive_risk_response_row.id, 'status': executive_risk_response['status']}, 'executive_risk_governance': {'created': governance_created}, 'executive_risk_execution': {'created': execution_created}, 'executive_risk_effectiveness': {'created': effectiveness_created}, 'continuous_improvement': {'created': improvement_created, 'plans_created': improvement_plans_created, 'dashboard': {'id': improvement_dashboard_row.id, 'status': improvement_dashboard['status']}, 'priority': {'id': improvement_priority_row.id, 'status': improvement_priority['counts']}, 'balancing': {'id': improvement_balancing_row.id, 'status': improvement_balancing['status'], 'unassigned': len(improvement_balancing['unassigned'])}, 'execution': {'created': execution_created}, 'certification': {'created': certification_created}, 'audit': {'created': audit_created}, 'executive_audit': {'id': executive_audit_row.id, 'status': executive_audit['status']}}}
