@@ -76,12 +76,14 @@ jobs:
           def bind_source(service, target):
               mounts = [mount for mount in service.get("volumes", []) if mount["target"] == target]
               assert len(mounts) == 1 and mounts[0]["type"] == "bind", (service, target)
-              assert mounts[0].get("bind", {}).get("create_host_path") is False, target
               return Path(mounts[0]["source"]).resolve()
 
+          compose_source = Path("ops/oci-a1/docker-compose.oci-a1.yml").read_text(encoding="utf-8")
+          assert compose_source.count("create_host_path: false") == 5
           assert services["postgres"]["image"] == "postgres:16-alpine"
           assert services["redis"]["image"] == "redis:7-alpine"
           assert bind_source(services["postgres"], "/var/lib/postgresql/data") == data_root / "postgres"
+          assert bind_source(services["redis"], "/usr/local/etc/redis/redis.conf") == Path("ops/oci-a1/redis.conf").resolve()
           assert bind_source(services["redis"], "/data") == data_root / "redis"
           evidence_target = "/var/lib/frcaixinha/workflow-evidence"
           assert bind_source(services["web"], evidence_target) == data_root / "evidence"
@@ -92,7 +94,7 @@ jobs:
           assert re.fullmatch(r"ghcr\.io/fronassor-art/frcaixinha-backend@sha256:[0-9a-f]{64}", image), image
           for name in ("web", "worker"):
               assert "build" not in services[name]
-          assert "latest" not in Path("ops/oci-a1/docker-compose.oci-a1.yml").read_text(encoding="utf-8").lower()
+          assert "latest" not in compose_source.lower()
 
           expected_networks = {
               "postgres": {"db_internal"},
