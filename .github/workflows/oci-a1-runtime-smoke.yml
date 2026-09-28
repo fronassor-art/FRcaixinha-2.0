@@ -178,6 +178,22 @@ jobs:
           done
           if [ "$health" != healthy ]; then
             compose ps
+            compose logs --no-color --tail=80 web > "$RUNNER_TEMP/oci-a1-web.log" 2>&1 || true
+            python - "$RUNNER_TEMP/oci-a1-web.log" <<'PY'
+          import os
+          from pathlib import Path
+          import sys
+
+          output = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")
+          root = Path(os.environ["FRCAIXINHA_SECRETS_DIR"])
+          for name in ("postgres_password", "database_url", "jwt_secret", "redis_url"):
+              path = root / name
+              if path.is_file():
+                  secret = path.read_text(encoding="utf-8").strip()
+                  if secret:
+                      output = output.replace(secret, "[REDACTED]")
+          sys.stdout.write(output)
+          PY
             exit 1
           fi
           compose exec -T web python - <<'PY'
@@ -226,11 +242,11 @@ jobs:
 
       - name: Verify shared POSIX evidence and Redis AOF
         run: |
-          python - <<'PY'
-          import os
+          sudo python - "$FRCAIXINHA_DATA_ROOT/evidence" <<'PY'
           from pathlib import Path
+          import sys
 
-          evidence = Path(os.environ["FRCAIXINHA_DATA_ROOT"]) / "evidence"
+          evidence = Path(sys.argv[1])
           assert (evidence / ".smoke-web").read_text(encoding="utf-8") == "web\n"
           assert (evidence / ".smoke-worker").read_text(encoding="utf-8") == "worker\n"
           print("EVIDENCE_SHARED_HOST_VISIBILITY=PASS")
@@ -251,10 +267,11 @@ jobs:
               -f ops/oci-a1/docker-compose.oci-a1.yml \
               down --remove-orphans || cleanup_status=1
           fi
-          rm -f "$RUNNER_TEMP/frcaixinha-data/evidence/.smoke-web" \
+          sudo rm -f "$RUNNER_TEMP/frcaixinha-data/evidence/.smoke-web" \
             "$RUNNER_TEMP/frcaixinha-data/evidence/.smoke-worker" \
             "$RUNNER_TEMP/oci-a1-postgres.log" "$RUNNER_TEMP/oci-a1-redis.log" \
-            "$RUNNER_TEMP/oci-a1-alembic-current.txt" "$RUNNER_TEMP/oci-a1-runtime-compose.json"
+            "$RUNNER_TEMP/oci-a1-web.log" "$RUNNER_TEMP/oci-a1-alembic-current.txt" \
+            "$RUNNER_TEMP/oci-a1-runtime-compose.json"
           docker ps
           if docker ps --format '{{.Names}}' | grep -q '^frcaixinha-oci-a1-'; then
             echo "OCI A1 smoke containers remain after cleanup"
