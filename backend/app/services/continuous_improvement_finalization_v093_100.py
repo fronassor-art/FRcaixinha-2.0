@@ -92,11 +92,12 @@ def _persist(db, model, data, actor_id, snapshot_date=None, release_version=None
         db.flush()
     db.add(AuditLog(actor_user_id=actor_id,action='CONTINUOUS_IMPROVEMENT_FINALIZATION_SNAPSHOT_CREATED',entity_type=model.__name__,entity_id=str(row.id),details=canonical({'status':row.status,'snapshot_hash':row.snapshot_hash}))); return row,data
 
-def persist_all(db:Session, actor_id:int|None=None):
+def persist_all(db:Session, actor_id:int|None=None, *, financial_date:date|None=None):
+    financial_date = financial_date or date.today()
     d=[(ContinuousImprovementDashboardExecutiveSnapshot,build_dashboard(db)),(ContinuousImprovementActionQueueSnapshot,build_queue(db)),(ContinuousImprovementKpiSnapshot,build_kpi(db)),(ContinuousImprovementSlaSnapshot,build_sla(db)),(ContinuousImprovementComplianceSnapshot,build_compliance(db)),(ContinuousImprovementExportSnapshot,build_export(db)),(ContinuousImprovementProductionReadinessSnapshot,build_readiness(db))]
     rows={}
     for model,data in d:
-        row,_=_persist(db,model,data,actor_id,date.today()); rows[model.__name__]=row.id
+        row,_=_persist(db,model,data,actor_id,financial_date); rows[model.__name__]=row.id
     rel,_=_persist(db,ContinuousImprovementProgramReleaseSnapshot,build_release(db),actor_id,release_version='1.0.0'); rows['release_id']=rel.id
     return rows
 
