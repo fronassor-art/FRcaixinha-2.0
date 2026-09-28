@@ -84,8 +84,8 @@ def _stub_daily_services(monkeypatch, calls):
     monkeypatch.setattr(tasks, "persist_improvement_audit", lambda *a, **k: None)
     monkeypatch.setattr(tasks, "persist_executive_improvement_audit", lambda *a, **k: _row_data())
 
-    def finalization(db, actor_id=None, *, snapshot_date=None):
-        calls["finalization"].append(snapshot_date)
+    def finalization(db, actor_id=None, *, financial_date=None):
+        calls["finalization"].append(financial_date)
         return {}
 
     monkeypatch.setattr(tasks, "persist_finalization", finalization)
