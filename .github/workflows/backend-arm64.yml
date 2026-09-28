@@ -1,0 +1,110 @@
+name: Backend ARM64 CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  arm64:
+    runs-on: ubuntu-24.04-arm
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: frcaixinha_test
+          POSTGRES_PASSWORD: frcaixinha_test
+          POSTGRES_DB: frcaixinha_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U frcaixinha_test -d frcaixinha_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: sqlite:///./test.db
+      JWT_SECRET: testsecret
+      APP_ENV: test
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Verify native ARM64 runner and Python
+        run: |
+          uname -m
+          python -c 'import platform; machine = platform.machine().lower(); print(machine); assert machine in {"aarch64", "arm64"}, f"Expected ARM64, got {machine}"'
+          python -c 'import sys; print(sys.version); assert sys.version_info[:2] == (3, 13), f"Expected Python 3.13, got {sys.version_info[:2]}"'
+          case "$(uname -m)" in
+            aarch64|arm64) ;;
+            *) echo "Expected native ARM64 runner" >&2; exit 1 ;;
+          esac
+          python --version
+
+      - name: Install backend requirements
+        run: pip install -r requirements.txt
+
+      - name: Compile backend
+        run: python -m compileall app alembic
+
+      - name: Full backend suite (SQLite)
+        run: pytest -q tests
+
+      - name: Upgrade PostgreSQL schema and report current revision
+        env:
+          DATABASE_URL: postgresql+psycopg://frcaixinha_test:frcaixinha_test@127.0.0.1:5432/frcaixinha_test
+          JWT_SECRET: test-only-arm64-secret
+          APP_ENV: test
+        run: |
+          alembic upgrade head
+          alembic current | tee /tmp/frcaixinha-alembic-current.txt
+          grep -q '0103_pix_reconciliation_schema_a377b4r4' /tmp/frcaixinha-alembic-current.txt
+
+      - name: PostgreSQL schema contract
+        env:
+          DATABASE_URL: postgresql+psycopg://frcaixinha_test:frcaixinha_test@127.0.0.1:5432/frcaixinha_test
+          JWT_SECRET: test-only-arm64-secret
+          APP_ENV: test
+        run: pytest -q tests/test_h4_c8_b3_a377b4r2r2b2f12b_postgresql_schema.py
+
+      - name: PostgreSQL contribution reservation
+        env:
+          DATABASE_URL: postgresql+psycopg://frcaixinha_test:frcaixinha_test@127.0.0.1:5432/frcaixinha_test
+          JWT_SECRET: test-only-arm64-secret
+          APP_ENV: test
+        run: pytest -q tests/test_a377b4r2r2b2f12d_contribution_pix_reservation.py
+
+      - name: PostgreSQL agreement reservation
+        env:
+          DATABASE_URL: postgresql+psycopg://frcaixinha_test:frcaixinha_test@127.0.0.1:5432/frcaixinha_test
+          JWT_SECRET: test-only-arm64-secret
+          APP_ENV: test
+        run: pytest -q tests/test_a377b4r2r2b2f12e_agreement_pix_reservation.py
+
+      - name: PostgreSQL webhook orphan replay
+        env:
+          DATABASE_URL: postgresql+psycopg://frcaixinha_test:frcaixinha_test@127.0.0.1:5432/frcaixinha_test
+          JWT_SECRET: test-only-arm64-secret
+          APP_ENV: test
+        run: pytest -q tests/test_a377b4r2r2b2f12f_webhook_orphan_replay.py
+
+      - name: PostgreSQL payout verification
+        env:
+          DATABASE_URL: postgresql+psycopg://frcaixinha_test:frcaixinha_test@127.0.0.1:5432/frcaixinha_test
+          JWT_SECRET: test-only-arm64-secret
+          APP_ENV: test
+        run: pytest -q tests/test_h4_c8_b3_a377b4r2r2b2f6_live_postgresql_payout_verification.py
+
+      - name: Build backend image natively for ARM64
+        run: |
+          docker build --pull -t frcaixinha-backend:arm64 .
+          image_arch="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' frcaixinha-backend:arm64)"
+          echo "Built image architecture: ${image_arch}"
+          test "${image_arch}" = "linux/arm64"
