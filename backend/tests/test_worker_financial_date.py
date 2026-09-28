@@ -104,13 +104,23 @@ def test_worker_daily_uses_one_explicit_financial_date(monkeypatch):
     _stub_daily_services(monkeypatch, calls)
     scheduled_for = datetime(2026, 9, 28, 0, 5, tzinfo=timezone.utc)
 
-    # Simulate the process civil date moving after this run was scheduled.
-    class ShiftedDate:
-        @classmethod
-        def today(cls):
-            return date(2026, 9, 29)
+    # Simulate the process clock moving after this run was scheduled.
+    class ShiftedClock:
+        current = datetime(2026, 9, 28, 0, 5, tzinfo=timezone.utc)
 
-    monkeypatch.setattr(tasks, "date", ShiftedDate)
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current
+
+    monkeypatch.setattr(tasks, "datetime", ShiftedClock)
+
+    reminders = tasks.queue_installment_reminders
+
+    def advance_clock(db, **kwargs):
+        ShiftedClock.current = datetime(2026, 9, 29, 0, 5, tzinfo=timezone.utc)
+        return reminders(db, **kwargs)
+
+    monkeypatch.setattr(tasks, "queue_installment_reminders", advance_clock)
     tasks.run_daily_tasks(scheduled_for=scheduled_for)
 
     expected = date(2026, 9, 27)  # 00:05 UTC is still 21:05 in America/Belem.
@@ -129,12 +139,12 @@ def test_worker_daily_financial_date_is_stable_for_same_scheduled_for(monkeypatc
         calls = _daily_calls()
         _stub_daily_services(monkeypatch, calls)
 
-        class ShiftedDate:
+        class ShiftedClock:
             @classmethod
-            def today(cls):
-                return process_date
+            def now(cls, tz=None):
+                return datetime.combine(process_date, datetime.min.time(), tzinfo=timezone.utc)
 
-        monkeypatch.setattr(tasks, "date", ShiftedDate)
+        monkeypatch.setattr(tasks, "datetime", ShiftedClock)
         tasks.run_daily_tasks(scheduled_for=scheduled_for)
         seen.append(calls["penalties"][0])
 
