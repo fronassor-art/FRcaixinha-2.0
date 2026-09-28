@@ -1,0 +1,132 @@
+name: frcaixinha-oci-a1
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${FRCAIXINHA_POSTGRES_DB:?Set FRCAIXINHA_POSTGRES_DB}
+      POSTGRES_USER: ${FRCAIXINHA_POSTGRES_USER:?Set FRCAIXINHA_POSTGRES_USER}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    volumes:
+      - type: bind
+        source: ${FRCAIXINHA_DATA_ROOT:?Set FRCAIXINHA_DATA_ROOT}/postgres
+        target: /var/lib/postgresql/data
+        bind:
+          create_host_path: false
+    networks:
+      - db_internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    volumes:
+      - type: bind
+        source: ./redis.conf
+        target: /usr/local/etc/redis/redis.conf
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${FRCAIXINHA_DATA_ROOT:?Set FRCAIXINHA_DATA_ROOT}/redis
+        target: /data
+        bind:
+          create_host_path: false
+    networks:
+      - redis_internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  web:
+    image: ${FRCAIXINHA_BACKEND_IMAGE:?Set an approved GHCR image digest}
+    pull_policy: always
+    restart: unless-stopped
+    env_file:
+      - ./app.env
+    environment:
+      DATABASE_URL_FILE: /run/secrets/database_url
+      JWT_SECRET_FILE: /run/secrets/jwt_secret
+      WORKFLOW_EVIDENCE_STORAGE_ROOT: /var/lib/frcaixinha/workflow-evidence
+    secrets:
+      - database_url
+      - jwt_secret
+    volumes:
+      - type: bind
+        source: ${FRCAIXINHA_DATA_ROOT:?Set FRCAIXINHA_DATA_ROOT}/evidence
+        target: /var/lib/frcaixinha/workflow-evidence
+        bind:
+          create_host_path: false
+    networks:
+      - app_egress
+      - db_internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  worker:
+    image: ${FRCAIXINHA_BACKEND_IMAGE:?Set an approved GHCR image digest}
+    pull_policy: always
+    restart: unless-stopped
+    command: ["python", "-m", "app.worker.main"]
+    env_file:
+      - ./app.env
+    environment:
+      DATABASE_URL_FILE: /run/secrets/database_url
+      JWT_SECRET_FILE: /run/secrets/jwt_secret
+      REDIS_URL_FILE: /run/secrets/redis_url
+      WORKFLOW_EVIDENCE_STORAGE_ROOT: /var/lib/frcaixinha/workflow-evidence
+    secrets:
+      - database_url
+      - jwt_secret
+      - redis_url
+    volumes:
+      - type: bind
+        source: ${FRCAIXINHA_DATA_ROOT:?Set FRCAIXINHA_DATA_ROOT}/evidence
+        target: /var/lib/frcaixinha/workflow-evidence
+        bind:
+          create_host_path: false
+    networks:
+      - app_egress
+      - db_internal
+      - redis_internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+secrets:
+  postgres_password:
+    file: ${FRCAIXINHA_SECRETS_DIR:?Set FRCAIXINHA_SECRETS_DIR}/postgres_password
+  database_url:
+    file: ${FRCAIXINHA_SECRETS_DIR:?Set FRCAIXINHA_SECRETS_DIR}/database_url
+  jwt_secret:
+    file: ${FRCAIXINHA_SECRETS_DIR:?Set FRCAIXINHA_SECRETS_DIR}/jwt_secret
+  redis_url:
+    file: ${FRCAIXINHA_SECRETS_DIR:?Set FRCAIXINHA_SECRETS_DIR}/redis_url
+
+networks:
+  app_egress:
+    driver: bridge
+  db_internal:
+    driver: bridge
+    internal: true
+  redis_internal:
+    driver: bridge
+    internal: true
