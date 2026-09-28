@@ -105,7 +105,7 @@ def test_container_start_script_uses_port_and_falls_back_to_8000(tmp_path):
     backend = Path(__file__).resolve().parents[1]
     stub_dir = tmp_path / "bin"
     stub_dir.mkdir()
-    stub = stub_dir / "fastapi"
+    stub = stub_dir / "uvicorn"
     stub.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n', encoding="utf-8")
     stub.chmod(0o755)
     env = os.environ.copy()
@@ -117,7 +117,7 @@ def test_container_start_script_uses_port_and_falls_back_to_8000(tmp_path):
         check=True, capture_output=True, text=True,
     )
     assert default_run.stdout.splitlines() == [
-        "run", "app/main.py", "--host", "0.0.0.0", "--port", "8000"
+        "app.main:app", "--host", "0.0.0.0", "--port", "8000"
     ]
 
     env["PORT"] = "9123"
@@ -125,4 +125,6 @@ def test_container_start_script_uses_port_and_falls_back_to_8000(tmp_path):
         ["sh", str(backend / "start.sh")], cwd=backend, env=env,
         check=True, capture_output=True, text=True,
     )
-    assert port_run.stdout.splitlines()[-2:] == ["--port", "9123"]
+    assert port_run.stdout.splitlines() == [
+        "app.main:app", "--host", "0.0.0.0", "--port", "9123"
+    ]
