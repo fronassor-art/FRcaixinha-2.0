@@ -2,7 +2,7 @@
 
 This directory defines a provider-specific Compose topology for one ARM64 OCI Ampere A1 VM. It complements the cloud-neutral `docker-compose.prod.yml`; it does not replace that contract or provision OCI resources. The backend image is pulled from GHCR by an approved `@sha256:` digest. The initial digest in `.env.oci-a1.example` was checked for anonymous pull access; each future release needs its own approved digest.
 
-This topology is **not production approved**. Ingress, HTTPS, backups, restore tests, OCI Vault materialization, runtime smoke tests, and the G3D4 Redis/worker financial replay safety audit remain open. PostgreSQL and Redis have no published ports. Web also has no published port until a separate ingress package is approved.
+This topology is **not production approved**. Ingress, HTTPS, backups, restore tests, OCI Vault materialization, and the G3D4 Redis/worker financial replay safety audit remain open. PostgreSQL and Redis have no published ports. Web also has no published port until a separate ingress package is approved.
 
 ## Host layout and prerequisites
 
@@ -64,6 +64,12 @@ Redis AOF (`appendonly yes`, `appendfsync everysec`) provides operational durabi
 - `REDIS_PUBLIC_PORT=NONE`
 - `REDIS_NETWORK_CLIENTS=worker only`
 - `REDIS_FINANCIAL_SOURCE_OF_TRUTH=NO`
+
+## Native ARM64 runtime smoke CI
+
+The OCI A1 Runtime Smoke workflow runs on a native ARM64 GitHub runner. It anonymously downloads the complete approved GHCR image by digest and checks the local image architecture. It starts PostgreSQL 16 and Redis 7 with temporary bind mounts, performs the manual Alembic upgrade, checks the exact current revision, starts web in production mode, and checks readiness plus a read-only PostgreSQL query. A one-shot process using the worker service's image, settings, networks, and secrets checks PostgreSQL and Redis connectivity. Web and the one-shot worker each write to the same mounted POSIX evidence directory, and the host verifies both files. The gate also checks Redis AOF settings and that no service publishes a host port. Cleanup removes containers and the temporary probe files even after failure.
+
+The smoke test does not start the worker scheduler or run financial tasks. Its synthetic secrets and temporary permissions exist only inside CI; they are not a production setup recipe. A green runtime smoke does not provision OCI, implement HTTPS or backups, or remove the G3D4 requirement. It does not make this topology production approved.
 
 ## Controlled startup and migration
 
