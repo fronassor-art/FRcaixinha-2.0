@@ -1,0 +1,278 @@
+name: OCI A1 Runtime Smoke
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'ops/oci-a1/**'
+      - '.github/workflows/oci-a1-runtime-smoke.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'ops/oci-a1/**'
+      - '.github/workflows/oci-a1-runtime-smoke.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  runtime-smoke:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify native ARM64 and prepare temporary inputs
+        run: |
+          test "$(uname -m)" = aarch64
+          echo "Native architecture: $(uname -m)"
+          export FRCAIXINHA_DATA_ROOT="$RUNNER_TEMP/frcaixinha-data"
+          export FRCAIXINHA_SECRETS_DIR="$RUNNER_TEMP/frcaixinha-secrets"
+          echo "FRCAIXINHA_DATA_ROOT=$FRCAIXINHA_DATA_ROOT" >> "$GITHUB_ENV"
+          echo "FRCAIXINHA_SECRETS_DIR=$FRCAIXINHA_SECRETS_DIR" >> "$GITHUB_ENV"
+          mkdir -p "$FRCAIXINHA_DATA_ROOT/postgres" "$FRCAIXINHA_DATA_ROOT/redis" \
+            "$FRCAIXINHA_DATA_ROOT/evidence" "$FRCAIXINHA_DATA_ROOT/backup-staging" \
+            "$FRCAIXINHA_SECRETS_DIR"
+          chmod 0711 "$FRCAIXINHA_SECRETS_DIR"
+          cp ops/oci-a1/.env.oci-a1.example ops/oci-a1/.env.oci-a1
+          cat > ops/oci-a1/app.env <<'ENV'
+          APP_ENV=production
+          ALLOWED_HOSTS=localhost,127.0.0.1,web
+          CORS_ORIGINS=http://localhost
+          LOG_LEVEL=INFO
+          ENV
+          umask 077
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import secrets
+
+          root = Path(os.environ["FRCAIXINHA_SECRETS_DIR"])
+          password = secrets.token_hex(24)
+          values = {
+              "postgres_password": password,
+              "database_url": f"postgresql+psycopg://frcaixinha:{password}@postgres:5432/frcaixinha",
+              "jwt_secret": secrets.token_hex(32),
+              "redis_url": "redis://redis:6379/0",
+          }
+          for name, value in values.items():
+              (root / name).write_text(value + "\n", encoding="utf-8")
+          print("Synthetic CI secret files created; values withheld")
+          PY
+
+      - name: Pull approved GHCR image anonymously and prepare bind ownership
+        run: |
+          image_ref="$(sed -n 's/^FRCAIXINHA_BACKEND_IMAGE=//p' ops/oci-a1/.env.oci-a1)"
+          test "$image_ref" = "ghcr.io/fronassor-art/frcaixinha-backend@sha256:bf5d5208d833b427eded64e0a59966d98f52931c1065510e5b8db7a7002b41af"
+          docker compose --env-file ops/oci-a1/.env.oci-a1 \
+            -f ops/oci-a1/docker-compose.oci-a1.yml pull postgres redis
+          docker pull "$image_ref"
+          image_platform="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image_ref")"
+          test "$image_platform" = linux/arm64
+          echo "GHCR anonymous full image pull: PASS; local image platform: $image_platform"
+
+          postgres_uid="$(docker run --rm --entrypoint sh postgres:16-alpine -c 'id -u postgres')"
+          postgres_gid="$(docker run --rm --entrypoint sh postgres:16-alpine -c 'id -g postgres')"
+          redis_uid="$(docker run --rm --entrypoint sh redis:7-alpine -c 'id -u redis')"
+          redis_gid="$(docker run --rm --entrypoint sh redis:7-alpine -c 'id -g redis')"
+          backend_uid="$(docker run --rm --entrypoint sh "$image_ref" -c 'id -u')"
+          backend_gid="$(docker run --rm --entrypoint sh "$image_ref" -c 'id -g')"
+          test "$backend_uid" != 0
+          sudo chown "$postgres_uid:$postgres_gid" "$FRCAIXINHA_DATA_ROOT/postgres" "$FRCAIXINHA_SECRETS_DIR/postgres_password"
+          sudo chown "$redis_uid:$redis_gid" "$FRCAIXINHA_DATA_ROOT/redis"
+          sudo chown "$backend_uid:$backend_gid" "$FRCAIXINHA_DATA_ROOT/evidence" \
+            "$FRCAIXINHA_SECRETS_DIR/database_url" "$FRCAIXINHA_SECRETS_DIR/jwt_secret" \
+            "$FRCAIXINHA_SECRETS_DIR/redis_url"
+          sudo chmod 0700 "$FRCAIXINHA_DATA_ROOT/postgres" "$FRCAIXINHA_DATA_ROOT/redis" "$FRCAIXINHA_DATA_ROOT/evidence"
+          sudo chmod 0600 "$FRCAIXINHA_SECRETS_DIR/postgres_password" "$FRCAIXINHA_SECRETS_DIR/database_url" \
+            "$FRCAIXINHA_SECRETS_DIR/jwt_secret" "$FRCAIXINHA_SECRETS_DIR/redis_url"
+          echo "CI-only bind ownership prepared from image user IDs"
+
+      - name: Validate Compose and absence of published ports
+        run: |
+          docker compose --env-file ops/oci-a1/.env.oci-a1 \
+            -f ops/oci-a1/docker-compose.oci-a1.yml config --quiet
+          docker compose --env-file ops/oci-a1/.env.oci-a1 \
+            -f ops/oci-a1/docker-compose.oci-a1.yml config --format json \
+            > "$RUNNER_TEMP/oci-a1-runtime-compose.json"
+          python - "$RUNNER_TEMP/oci-a1-runtime-compose.json" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          config = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          services = config["services"]
+          assert set(services) == {"postgres", "redis", "web", "worker"}
+          for name, service in services.items():
+              assert not service.get("ports"), f"{name} publishes a host port"
+          assert services["web"]["image"] == services["worker"]["image"]
+          print("PUBLIC_PORTS=NONE")
+          PY
+
+      - name: Start PostgreSQL and Redis and await health
+        run: |
+          compose() { docker compose --env-file ops/oci-a1/.env.oci-a1 -f ops/oci-a1/docker-compose.oci-a1.yml "$@"; }
+          compose up -d postgres redis
+          for service in postgres redis; do
+            container_id="$(compose ps -q "$service")"
+            test -n "$container_id"
+            health=starting
+            for attempt in {1..45}; do
+              health="$(docker inspect --format '{{.State.Health.Status}}' "$container_id")"
+              if [ "$health" = healthy ]; then break; fi
+              if [ "$health" = unhealthy ]; then break; fi
+              sleep 2
+            done
+            if [ "$health" != healthy ]; then
+              compose ps
+              compose logs --no-color --tail=50 "$service" > "$RUNNER_TEMP/oci-a1-$service.log" 2>&1 || true
+              sudo python - "$RUNNER_TEMP/oci-a1-$service.log" "$FRCAIXINHA_SECRETS_DIR" <<'PY'
+          from pathlib import Path
+          import sys
+
+          output = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")
+          root = Path(sys.argv[2])
+          for name in ("postgres_password", "database_url", "jwt_secret", "redis_url"):
+              path = root / name
+              if path.is_file():
+                  secret = path.read_text(encoding="utf-8").strip()
+                  if secret:
+                      output = output.replace(secret, "[REDACTED]")
+          sys.stdout.write(output)
+          PY
+              exit 1
+            fi
+            echo "$service health: healthy"
+          done
+
+      - name: Run Alembic migration manually using approved image
+        run: |
+          compose() { docker compose --env-file ops/oci-a1/.env.oci-a1 -f ops/oci-a1/docker-compose.oci-a1.yml "$@"; }
+          compose run --rm --no-deps web alembic upgrade head
+          compose run --rm --no-deps web alembic current > "$RUNNER_TEMP/oci-a1-alembic-current.txt"
+          python - "$RUNNER_TEMP/oci-a1-alembic-current.txt" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+
+          output = Path(sys.argv[1]).read_text(encoding="utf-8")
+          expected = "0103_pix_reconciliation_schema_a377b4r4"
+          assert re.search(rf"(?m)^{expected}(?: \(head\))?$", output), output
+          print(f"MANUAL_MIGRATION=PASS; ALEMBIC_CURRENT={expected}")
+          PY
+
+      - name: Start web and prove readiness, database and evidence write
+        run: |
+          compose() { docker compose --env-file ops/oci-a1/.env.oci-a1 -f ops/oci-a1/docker-compose.oci-a1.yml "$@"; }
+          compose up -d --no-deps web
+          container_id="$(compose ps -q web)"
+          test -n "$container_id"
+          health=starting
+          for attempt in {1..45}; do
+            health="$(docker inspect --format '{{.State.Health.Status}}' "$container_id")"
+            if [ "$health" = healthy ]; then break; fi
+            if [ "$health" = unhealthy ]; then break; fi
+            sleep 2
+          done
+          if [ "$health" != healthy ]; then
+            compose ps
+            compose logs --no-color --tail=80 web > "$RUNNER_TEMP/oci-a1-web.log" 2>&1 || true
+            sudo python - "$RUNNER_TEMP/oci-a1-web.log" "$FRCAIXINHA_SECRETS_DIR" <<'PY'
+          from pathlib import Path
+          import sys
+
+          output = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")
+          root = Path(sys.argv[2])
+          for name in ("postgres_password", "database_url", "jwt_secret", "redis_url"):
+              path = root / name
+              if path.is_file():
+                  secret = path.read_text(encoding="utf-8").strip()
+                  if secret:
+                      output = output.replace(secret, "[REDACTED]")
+          sys.stdout.write(output)
+          PY
+            exit 1
+          fi
+          compose exec -T web python - <<'PY'
+          from pathlib import Path
+          import urllib.request
+          from sqlalchemy import text
+          from app.db.session import engine
+
+          with urllib.request.urlopen("http://127.0.0.1:8000/health/ready", timeout=5) as response:
+              assert response.status == 200
+          with engine.connect() as connection:
+              assert connection.execute(text("SELECT 1")).scalar_one() == 1
+          evidence = Path("/var/lib/frcaixinha/workflow-evidence/.smoke-web")
+          evidence.write_text("web\n", encoding="utf-8")
+          print("WEB_HEALTH=PASS; WEB_READY_HTTP=200; WEB_POSTGRES_SELECT1=PASS; EVIDENCE_WEB_WRITE=PASS")
+          PY
+
+      - name: Probe worker dependencies one-shot without scheduler
+        run: |
+          # The command after "worker" overrides app.worker.main; no scheduled task loop starts.
+          docker compose --env-file ops/oci-a1/.env.oci-a1 \
+            -f ops/oci-a1/docker-compose.oci-a1.yml \
+            run --rm --no-deps -T worker python - <<'PY'
+          from pathlib import Path
+          import redis
+          from sqlalchemy import create_engine, text
+          from app.core.config import settings
+
+          assert settings.app_env == "production"
+          engine = create_engine(settings.database_url, pool_pre_ping=True)
+          try:
+              with engine.connect() as connection:
+                  assert connection.execute(text("SELECT 1")).scalar_one() == 1
+          finally:
+              engine.dispose()
+          client = redis.Redis.from_url(settings.redis_url)
+          try:
+              assert client.ping() is True
+          finally:
+              client.close()
+          evidence = Path("/var/lib/frcaixinha/workflow-evidence/.smoke-worker")
+          evidence.write_text("worker\n", encoding="utf-8")
+          print("WORKER_CONFIG_LOAD=PASS; WORKER_POSTGRES_CONNECTIVITY=PASS; WORKER_REDIS_CONNECTIVITY=PASS")
+          print("EVIDENCE_WORKER_WRITE=PASS; WORKER_MAIN_LOOP_STARTED=NO; FINANCIAL_SCHEDULED_TASKS_EXECUTED=NO")
+          PY
+
+      - name: Verify shared POSIX evidence and Redis AOF
+        run: |
+          sudo python - "$FRCAIXINHA_DATA_ROOT/evidence" <<'PY'
+          from pathlib import Path
+          import sys
+
+          evidence = Path(sys.argv[1])
+          assert (evidence / ".smoke-web").read_text(encoding="utf-8") == "web\n"
+          assert (evidence / ".smoke-worker").read_text(encoding="utf-8") == "worker\n"
+          print("EVIDENCE_SHARED_HOST_VISIBILITY=PASS")
+          PY
+          compose() { docker compose --env-file ops/oci-a1/.env.oci-a1 -f ops/oci-a1/docker-compose.oci-a1.yml "$@"; }
+          appendonly="$(compose exec -T redis redis-cli --raw CONFIG GET appendonly | tail -n 1)"
+          appendfsync="$(compose exec -T redis redis-cli --raw CONFIG GET appendfsync | tail -n 1)"
+          test "$appendonly" = yes
+          test "$appendfsync" = everysec
+          echo "REDIS_APPENDONLY=yes; REDIS_APPENDFSYNC=everysec"
+
+      - name: Always remove smoke containers, network and temporary probes
+        if: always()
+        run: |
+          cleanup_status=0
+          if [ -f ops/oci-a1/.env.oci-a1 ] && [ -f ops/oci-a1/app.env ]; then
+            docker compose --env-file ops/oci-a1/.env.oci-a1 \
+              -f ops/oci-a1/docker-compose.oci-a1.yml \
+              down --remove-orphans || cleanup_status=1
+          fi
+          sudo rm -f "$RUNNER_TEMP/frcaixinha-data/evidence/.smoke-web" \
+            "$RUNNER_TEMP/frcaixinha-data/evidence/.smoke-worker" \
+            "$RUNNER_TEMP/oci-a1-postgres.log" "$RUNNER_TEMP/oci-a1-redis.log" \
+            "$RUNNER_TEMP/oci-a1-web.log" "$RUNNER_TEMP/oci-a1-alembic-current.txt" \
+            "$RUNNER_TEMP/oci-a1-runtime-compose.json"
+          docker ps
+          if docker ps --format '{{.Names}}' | grep -q '^frcaixinha-oci-a1-'; then
+            echo "OCI A1 smoke containers remain after cleanup"
+            cleanup_status=1
+          fi
+          exit "$cleanup_status"
