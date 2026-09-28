@@ -1,10 +1,22 @@
 """PostgreSQL contract for the migrated F12B PIX persistence schema."""
 import os
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from datetime import date, datetime, timezone
+from threading import Barrier
 
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import sessionmaker
+
+from app.models import SchedulerRun, SchedulerRunUnit
+from app.services.scheduler_runs import (
+    claim_run,
+    claim_unit,
+    get_or_create_run,
+    get_or_create_unit,
+)
 
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
@@ -93,4 +105,101 @@ def test_postgresql_migration_installs_constraint_index_and_nullable_resource_id
             finally:
                 tx.rollback()
     finally:
+        engine.dispose()
+
+
+def test_postgresql_scheduler_run_and_unit_create_and_claim_have_one_winner():
+    """Exercise scheduler uniqueness and row-lock claims with independent PG sessions."""
+    engine = create_engine(DATABASE_URL, pool_size=5, max_overflow=0)
+    Sessions = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+    token = uuid.uuid4().hex
+    job_key = f"g3d4a-{token}"
+    financial_date = date(2027, 1, 10)
+    scheduled_for = datetime(2027, 1, 10, 4, 5, tzinfo=timezone.utc)
+
+    def concurrent_run_create(_index):
+        gate.wait(timeout=10)
+        with Sessions() as session:
+            row, created = get_or_create_run(
+                session,
+                job_key=job_key,
+                financial_date=financial_date,
+                scheduled_for=scheduled_for,
+            )
+            run_id = row.id
+            session.commit()
+            return run_id, created
+
+    def concurrent_run_claim(index):
+        gate.wait(timeout=10)
+        with Sessions() as session:
+            won = claim_run(
+                session,
+                run_id,
+                lease_owner=f"run-owner-{index}-{token}",
+                now=scheduled_for,
+                lease_seconds=60,
+            )
+            session.commit()
+            return won
+
+    def concurrent_unit_create(_index):
+        gate.wait(timeout=10)
+        with Sessions() as session:
+            row, created = get_or_create_unit(session, run_id=run_id, unit_key="participant:42")
+            unit_id = row.id
+            session.commit()
+            return unit_id, created
+
+    def concurrent_unit_claim(index):
+        gate.wait(timeout=10)
+        with Sessions() as session:
+            won = claim_unit(
+                session,
+                unit_id,
+                lease_owner=f"unit-owner-{index}-{token}",
+                now=scheduled_for,
+                lease_seconds=60,
+            )
+            session.commit()
+            return won
+
+    unit_id = None
+    try:
+        gate = Barrier(2)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            run_results = list(pool.map(concurrent_run_create, range(2)))
+        assert run_results[0][0] == run_results[1][0]
+        assert sorted(created for _, created in run_results) == [False, True]
+        run_id = run_results[0][0]
+
+        with Sessions() as session:
+            assert session.query(SchedulerRun).filter_by(job_key=job_key, financial_date=financial_date).count() == 1
+
+        gate = Barrier(2)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            run_claims = list(pool.map(concurrent_run_claim, range(2)))
+        assert sum(run_claims) == 1
+
+        gate = Barrier(2)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            unit_results = list(pool.map(concurrent_unit_create, range(2)))
+        assert unit_results[0][0] == unit_results[1][0]
+        assert sorted(created for _, created in unit_results) == [False, True]
+        unit_id = unit_results[0][0]
+
+        with Sessions() as session:
+            assert session.query(SchedulerRunUnit).filter_by(run_id=run_id, unit_key="participant:42").count() == 1
+
+        gate = Barrier(2)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            unit_claims = list(pool.map(concurrent_unit_claim, range(2)))
+        assert sum(unit_claims) == 1
+    finally:
+        with Sessions() as session:
+            session.execute(
+                text("DELETE FROM scheduler_runs WHERE job_key=:job_key AND financial_date=:financial_date"),
+                {"job_key": job_key, "financial_date": financial_date},
+            )
+            session.commit()
         engine.dispose()

@@ -2288,6 +2288,75 @@ class ContinuousImprovementProgramReleaseSnapshot(Base):
     generated_by: Mapped[int | None] = mapped_column(ForeignKey('users.id'), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
 
+
+class SchedulerRun(Base):
+    """Durable claim and completion record for one job on one financial date."""
+
+    __tablename__ = "scheduler_runs"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    job_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    financial_date: Mapped[date] = mapped_column(Date, nullable=False)
+    scheduled_for: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="PENDING")
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    lease_owner: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=now_utc)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=now_utc)
+    __table_args__ = (
+        UniqueConstraint("job_key", "financial_date", name="uq_scheduler_runs_job_financial_date"),
+        CheckConstraint("status IN ('PENDING', 'RUNNING', 'SUCCEEDED', 'FAILED')", name="ck_scheduler_runs_status"),
+        CheckConstraint("attempt_count >= 0", name="ck_scheduler_runs_attempt_nonnegative"),
+        CheckConstraint(
+            "(status = 'RUNNING' AND lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL) OR "
+            "(status != 'RUNNING' AND lease_owner IS NULL AND lease_expires_at IS NULL)",
+            name="ck_scheduler_runs_lease_state",
+        ),
+        CheckConstraint(
+            "(status = 'SUCCEEDED' AND completed_at IS NOT NULL) OR "
+            "(status != 'SUCCEEDED' AND completed_at IS NULL)",
+            name="ck_scheduler_runs_completion_state",
+        ),
+        Index("ix_scheduler_runs_status_lease", "status", "lease_expires_at"),
+    )
+
+
+class SchedulerRunUnit(Base):
+    """Durable checkpoint for one generic unit within a scheduler run."""
+
+    __tablename__ = "scheduler_run_units"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("scheduler_runs.id", ondelete="CASCADE"), nullable=False)
+    unit_key: Mapped[str] = mapped_column(String(120), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="PENDING")
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    lease_owner: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=now_utc)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=now_utc)
+    __table_args__ = (
+        UniqueConstraint("run_id", "unit_key", name="uq_scheduler_run_units_run_unit"),
+        CheckConstraint("status IN ('PENDING', 'RUNNING', 'SUCCEEDED', 'FAILED')", name="ck_scheduler_run_units_status"),
+        CheckConstraint("attempt_count >= 0", name="ck_scheduler_run_units_attempt_nonnegative"),
+        CheckConstraint(
+            "(status = 'RUNNING' AND lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL) OR "
+            "(status != 'RUNNING' AND lease_owner IS NULL AND lease_expires_at IS NULL)",
+            name="ck_scheduler_run_units_lease_state",
+        ),
+        CheckConstraint(
+            "(status = 'SUCCEEDED' AND completed_at IS NOT NULL) OR "
+            "(status != 'SUCCEEDED' AND completed_at IS NULL)",
+            name="ck_scheduler_run_units_completion_state",
+        ),
+        Index("ix_scheduler_run_units_run_status_lease", "run_id", "status", "lease_expires_at"),
+    )
+
 class MemberFinancialAccount(Base):
     __tablename__ = "member_financial_accounts"
 

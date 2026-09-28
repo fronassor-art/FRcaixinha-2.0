@@ -19,7 +19,7 @@ def test_single_alembic_head_after_security_reconciliation():
         if line.strip()
     ]
 
-    assert heads == ["0103_pix_reconciliation_schema_a377b4r4"]
+    assert heads == ["0104_scheduler_runs_g3d4a"]
 
     root = Path(__file__).parents[1] / "alembic" / "versions"
     rows = {}

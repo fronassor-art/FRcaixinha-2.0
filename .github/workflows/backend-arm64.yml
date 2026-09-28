@@ -65,7 +65,7 @@ jobs:
         run: |
           alembic upgrade head
           alembic current | tee /tmp/frcaixinha-alembic-current.txt
-          grep -q '0103_pix_reconciliation_schema_a377b4r4' /tmp/frcaixinha-alembic-current.txt
+          grep -q '0104_scheduler_runs_g3d4a' /tmp/frcaixinha-alembic-current.txt
 
       - name: PostgreSQL schema contract
         env:

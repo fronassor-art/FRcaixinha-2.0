@@ -38,7 +38,7 @@ from app.models import (
 from app.services import payout_destination_verification as verification_service
 
 
-ALEMBIC_HEAD = "0103_pix_reconciliation_schema_a377b4r4"
+ALEMBIC_HEAD = "0104_scheduler_runs_g3d4a"
 _NOW = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
 _IDS = count(7_100_000)
 
