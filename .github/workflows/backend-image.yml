@@ -1,0 +1,118 @@
+name: Backend Container Image
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'backend/**'
+      - '.github/workflows/backend-image.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'backend/**'
+      - '.github/workflows/backend-image.yml'
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/fronassor-art/frcaixinha-backend
+
+jobs:
+  build-pr:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build amd64 and arm64 images without publishing
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: false
+          cache-from: type=gha,scope=backend-image-pr
+          cache-to: type=gha,mode=max,scope=backend-image-pr
+
+  publish-main:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: type=raw,value=sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/fronassor-art/FRcaixinha-2.0
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Build and publish multi-architecture image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: true
+          sbom: true
+          cache-from: type=gha,scope=backend-image-main
+          cache-to: type=gha,mode=max,scope=backend-image-main
+
+      - name: Verify published manifest platforms
+        env:
+          IMAGE: ${{ env.IMAGE }}
+          TAG: sha-${{ github.sha }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          immutable_ref="${IMAGE}@${DIGEST}"
+          docker buildx imagetools inspect --raw "${immutable_ref}" > /tmp/backend-manifest.json
+          jq -e 'any(.manifests[]; .platform.os == "linux" and .platform.architecture == "amd64")' /tmp/backend-manifest.json >/dev/null
+          jq -e 'any(.manifests[]; .platform.os == "linux" and .platform.architecture == "arm64")' /tmp/backend-manifest.json >/dev/null
+
+          {
+            echo "## Published backend image"
+            echo
+            echo "IMAGE=${IMAGE}"
+            echo "TAG=${TAG}"
+            echo "DIGEST=${DIGEST}"
+            echo "IMMUTABLE_REF=${immutable_ref}"
+            echo
+            echo "Verified platforms: linux/amd64, linux/arm64"
+          } >> "${GITHUB_STEP_SUMMARY}"
