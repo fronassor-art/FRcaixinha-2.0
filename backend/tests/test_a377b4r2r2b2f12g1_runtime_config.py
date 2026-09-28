@@ -28,6 +28,16 @@ def test_production_accepts_supported_postgresql_driver():
     validate_runtime_settings(production_settings())
 
 
+@pytest.mark.parametrize("optional_value", [None, ""])
+def test_production_accepts_unconfigured_optional_mercado_pago(optional_value):
+    validate_runtime_settings(
+        production_settings(
+            mercado_pago_access_token=optional_value,
+            mercado_pago_webhook_secret=optional_value,
+        )
+    )
+
+
 def test_production_rejects_sqlite():
     with pytest.raises(RuntimeError, match=r"postgresql\+psycopg"):
         validate_runtime_settings(production_settings(database_url="sqlite:///prod.db"))
