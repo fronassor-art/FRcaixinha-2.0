@@ -64,7 +64,7 @@ jobs:
       - name: Pull approved GHCR image anonymously and prepare bind ownership
         run: |
           image_ref="$(sed -n 's/^FRCAIXINHA_BACKEND_IMAGE=//p' ops/oci-a1/.env.oci-a1)"
-          test "$image_ref" = "ghcr.io/fronassor-art/frcaixinha-backend@sha256:d252b8f1e9da032086e56c53e60c8103f43540aa289b954e0e52a2e5ea31519c"
+          test "$image_ref" = "ghcr.io/fronassor-art/frcaixinha-backend@sha256:bf5d5208d833b427eded64e0a59966d98f52931c1065510e5b8db7a7002b41af"
           docker compose --env-file ops/oci-a1/.env.oci-a1 \
             -f ops/oci-a1/docker-compose.oci-a1.yml pull postgres redis
           docker pull "$image_ref"
