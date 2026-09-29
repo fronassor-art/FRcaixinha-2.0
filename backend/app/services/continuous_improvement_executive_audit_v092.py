@@ -8,7 +8,7 @@ from app.models import (ContinuousImprovementRecommendation, ContinuousImproveme
     ContinuousImprovementCertification, ContinuousImprovementAuditSnapshot,
     ContinuousImprovementExecutiveAuditSnapshot, AuditLog)
 from app.services.continuous_improvement_audit_v091 import build_cycle, digest
-from app.services.continuous_improvement_evidence_v089 import verify_execution_evidence, verify_chain
+from app.services.continuous_improvement_evidence_v089 import inspect_execution_evidence, verify_chain
 
 def now(): return datetime.now(timezone.utc)
 def canonical(v): return json.dumps(v, sort_keys=True, separators=(',', ':'), ensure_ascii=False, default=str)
@@ -34,7 +34,7 @@ def build_report(db: Session):
     for e in executions:
         cert = next((c for c in certs if c.execution_id == e.id), None)
         audit = next((a for a in audits if a.execution_id == e.id), None)
-        evidence = verify_execution_evidence(db, e.id, None)
+        evidence = inspect_execution_evidence(db, e.id)
         checks = {
             'execution_verified': e.status == 'VERIFIED',
             'evidence_integrity': bool(evidence.get('valid')),
