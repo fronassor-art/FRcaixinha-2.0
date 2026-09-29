@@ -173,6 +173,62 @@ def mark_run_succeeded(
     return row
 
 
+def lock_run_for_execution(
+    db: Session,
+    run_id: int,
+    *,
+    lease_owner: str,
+) -> datetime:
+    """Validate and lock a claimed run for one atomic execution transaction.
+
+    Callers must keep this Session transaction open through all effects and
+    the terminal transition. On PostgreSQL the row lock blocks reclaim until
+    that transaction commits or rolls back.
+    """
+    row = _for_update(db.query(SchedulerRun).filter(SchedulerRun.id == run_id), db).one_or_none()
+    if row is None:
+        raise SchedulerLeaseLost("scheduler run no longer exists")
+    # A transaction may have waited for this row until after its lease
+    # expired, so validate using a fresh clock reading after FOR UPDATE.
+    validated_at = _utc(datetime.now(timezone.utc))
+    _assert_claim(row, lease_owner=lease_owner, now=validated_at)
+    return validated_at
+
+
+def mark_run_succeeded_after_locked_execution(
+    db: Session,
+    run_id: int,
+    *,
+    lease_owner: str,
+    lease_validated_at: datetime,
+    completed_at: datetime | None = None,
+) -> SchedulerRun:
+    """Complete after lock_run_for_execution in the same open transaction.
+
+    The lease is checked at the instant the row lock was first validated.
+    Holding that lock prevents a concurrent reclaim from changing ownership
+    while effects run, including when execution exceeds the lease duration.
+    """
+    validated_at = _utc(lease_validated_at)
+    now = _utc(completed_at)
+    row = _for_update(db.query(SchedulerRun).filter(SchedulerRun.id == run_id), db).one()
+    _assert_claim(row, lease_owner=lease_owner, now=validated_at)
+    incomplete = db.query(SchedulerRunUnit.id).filter(
+        SchedulerRunUnit.run_id == run_id,
+        SchedulerRunUnit.status != "SUCCEEDED",
+    ).first()
+    if incomplete is not None:
+        raise ValueError("scheduler run has incomplete units")
+    row.status = "SUCCEEDED"
+    row.lease_owner = None
+    row.lease_expires_at = None
+    row.completed_at = now
+    row.last_error = None
+    row.updated_at = now
+    db.flush()
+    return row
+
+
 def mark_run_failed(
     db: Session,
     run_id: int,

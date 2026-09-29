@@ -43,6 +43,21 @@ def _row_data(status="OK", **extra):
 
 def _stub_daily_services(monkeypatch, calls):
     monkeypatch.setattr(tasks, "SessionLocal", _Session)
+    run = SimpleNamespace(id=1, status="PENDING")
+
+    def claim(_db, _run_id, **kwargs):
+        run.status = "RUNNING"
+        return True
+
+    def succeeded(_db, _run_id, **kwargs):
+        run.status = "SUCCEEDED"
+        return run
+
+    monkeypatch.setattr(tasks.scheduler_runs, "get_or_create_run", lambda *a, **k: (run, False))
+    monkeypatch.setattr(tasks.scheduler_runs, "claim_run", claim)
+    monkeypatch.setattr(tasks, "lock_run_for_execution", lambda *a, **k: datetime.now(timezone.utc))
+    monkeypatch.setattr(tasks.scheduler_runs, "mark_run_succeeded_after_locked_execution", succeeded)
+    monkeypatch.setattr(tasks.scheduler_runs, "mark_run_failed", lambda *a, **k: run)
 
     def reminders(db, days_ahead=3, *, financial_date=None):
         calls["reminders"].append(financial_date)
