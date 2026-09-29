@@ -5,12 +5,32 @@ on:
     branches:
       - main
     paths:
+      - 'backend/app/worker/**'
+      - 'backend/app/services/**'
+      - 'backend/app/core/**'
+      - 'backend/app/api/metrics.py'
+      - 'backend/app/models/**'
+      - 'backend/app/db/**'
+      - 'backend/requirements.txt'
+      - 'backend/Dockerfile'
+      - 'backend/start.sh'
+      - 'backend/alembic/**'
       - 'ops/oci-a1/**'
       - '.github/workflows/oci-a1-runtime-smoke.yml'
   push:
     branches:
       - main
     paths:
+      - 'backend/app/worker/**'
+      - 'backend/app/services/**'
+      - 'backend/app/core/**'
+      - 'backend/app/api/metrics.py'
+      - 'backend/app/models/**'
+      - 'backend/app/db/**'
+      - 'backend/requirements.txt'
+      - 'backend/Dockerfile'
+      - 'backend/start.sh'
+      - 'backend/alembic/**'
       - 'ops/oci-a1/**'
       - '.github/workflows/oci-a1-runtime-smoke.yml'
 
@@ -241,7 +261,13 @@ jobs:
               if line.startswith("frcaixinha_worker_heartbeat_timestamp_seconds ")
           )
           assert time.time() - float(heartbeat.split()[-1]) < 90, heartbeat
+          process_start = next(
+              line for line in payload.splitlines()
+              if line.startswith("frcaixinha_worker_process_start_timestamp_seconds ")
+          )
+          assert 0 < float(process_start.split()[-1]) <= time.time(), process_start
           print("WORKER_MAIN_LOOP_STARTED=YES; WORKER_LOOP_REMAINED_ALIVE=YES; WORKER_METRICS_REACHABLE=YES")
+          print("WORKER_PROCESS_START_METRIC=PASS")
           print("WORKER_REDIS_HEARTBEAT=PASS; WORKER_POSTGRES_CONNECTIVITY=PASS")
           PY
           compose exec -T web python - <<'PY'

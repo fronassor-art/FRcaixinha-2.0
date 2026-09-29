@@ -10,12 +10,23 @@ from app.core.metrics import (
     WORKER_DISPATCH_SKIPPED,
     WORKER_HEARTBEAT,
     WORKER_POSTGRES_FAILURES,
+    WORKER_PROCESS_START_TIMESTAMP,
     WORKER_REDIS_FAIL_OPEN,
     WORKER_RUNS,
 )
 
 configure_logging()
 log = logging.getLogger("worker")
+
+
+def _set_worker_process_started_at(timestamp: float | None = None) -> None:
+    """Publish a process-local start reference before the exporter is served."""
+    WORKER_PROCESS_START_TIMESTAMP.set(time.time() if timestamp is None else timestamp)
+
+
+# Module initialization is the worker entrypoint's process-local activation
+# reference. The API exporter imports the same metric but never sets it.
+_set_worker_process_started_at()
 
 try:
     import redis
