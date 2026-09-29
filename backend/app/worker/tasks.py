@@ -410,7 +410,7 @@ def _execute_daily_effects(db, financial_date):
                 create_improvement_plan(db, rec.id, actor_id=None)
                 improvement_plans_created += 1
         improvement_dashboard_row, improvement_dashboard = persist_improvement_dashboard(db, None, financial_date)
-        improvement_priority_row, improvement_priority = persist_improvement_priority(db, None)
+        improvement_priority_row, improvement_priority = persist_improvement_priority(db, None, snapshot_date=financial_date)
         improvement_balancing_row, improvement_balancing = persist_improvement_balancing(db, None, financial_date)
         execution_created = 0
         from app.models import ContinuousImprovementAssignmentDecision, ContinuousImprovementExecution
