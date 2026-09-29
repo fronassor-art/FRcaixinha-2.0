@@ -11,7 +11,9 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
 from app.db.base import Base
-from app.models import AuditLog, SchedulerRun
+from app.models import AuditLog, ContinuousImprovementPrioritySnapshot, SchedulerRun
+from app.services.continuous_improvement_priority_v085 import persist as persist_priority_snapshot
+from app.services.late_charge_v1 import financial_civil_date
 from app.services import scheduler_runs
 from app.worker import tasks
 
@@ -125,6 +127,23 @@ def test_daily_run_happy_path_is_durable_and_effects_share_success_commit(monkey
     assert (run.job_key, run.financial_date, run.status) == (JOB_KEY, FINANCIAL_DATE, "SUCCEEDED")
     assert run.attempt_count == 1
     assert effects == 1
+
+
+def test_daily_priority_snapshot_uses_run_financial_date_at_utc_belem_boundary(monkeypatch, sessions):
+    _patch_daily_services(monkeypatch, sessions, _effect)
+    monkeypatch.setattr(tasks, "persist_improvement_priority", persist_priority_snapshot)
+
+    result = tasks.run_daily_tasks(scheduled_for=SCHEDULED_FOR)
+
+    expected_date = financial_civil_date(SCHEDULED_FOR)
+    assert expected_date == date(2026, 9, 27)
+    with sessions() as db:
+        run = db.query(SchedulerRun).filter_by(job_key=JOB_KEY).one()
+        priority_snapshot = db.query(ContinuousImprovementPrioritySnapshot).one()
+        assert run.financial_date == expected_date
+        assert run.status == "SUCCEEDED"
+        assert priority_snapshot.snapshot_date == run.financial_date
+        assert result["executed"] is True
 
 
 def test_same_date_duplicate_does_not_repeat_effect(monkeypatch, sessions):

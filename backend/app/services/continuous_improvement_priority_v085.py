@@ -1,6 +1,6 @@
 from __future__ import annotations
 import hashlib,json
-from datetime import datetime,timezone
+from datetime import date,datetime,timezone
 from sqlalchemy.orm import Session
 from app.models import ContinuousImprovementRecommendation, ContinuousImprovementPlan, ContinuousImprovementMeasurement, OperationalRiskTrendSnapshot, ContinuousImprovementPrioritySnapshot, AuditLog
 
@@ -43,8 +43,8 @@ def build_queue(db:Session):
     items.sort(key=lambda x:(-x['priority_score'],x['recommendation_id']))
     return {'schema':'v0.85','generated_at':now().isoformat(),'risk_score':risk_score,'items':items,'counts':{p:sum(x['priority']==p for x in items) for p in ['CRITICAL','HIGH','MEDIUM','LOW']}}
 
-def persist(db:Session,actor_id:int|None=None):
-    data=build_queue(db); h=digest(data); today=now().date()
+def persist(db:Session,actor_id:int|None=None,*,snapshot_date:date|None=None):
+    data=build_queue(db); h=digest(data); today=snapshot_date if snapshot_date is not None else now().date()
     row=db.query(ContinuousImprovementPrioritySnapshot).filter_by(snapshot_date=today).first()
     if row: row.status='CRITICAL' if data['counts']['CRITICAL'] else ('ATTENTION' if data['counts']['HIGH'] else 'PASS'); row.snapshot_json=canonical(data); row.snapshot_hash=h; row.generated_by=actor_id; row.updated_at=now()
     else:
