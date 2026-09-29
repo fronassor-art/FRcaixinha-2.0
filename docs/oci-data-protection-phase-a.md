@@ -63,7 +63,7 @@ must retain and verify the entire set when uploading it.
 - `FRCAIXINHA_ISOLATED_RESTORE=YES`, `APP_ENV=test`;
 - PostgreSQL 16 on a loopback host, with an **empty, existing** database named
   `frcaixinha_restore_*`;
-- an empty evidence directory and a private age identity file.
+- an empty mode-0700 evidence directory and a mode-0600 age identity file.
 
 The tool checks encrypted file sizes and SHA-256 before decrypting, validates
 the custom archive, restores with `pg_restore --exit-on-error

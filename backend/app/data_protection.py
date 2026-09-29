@@ -343,7 +343,9 @@ def restore_isolated(directory: Path, evidence_root: Path, identity: Path) -> di
     """Restore only to a fresh loopback PostgreSQL database with an explicit test marker."""
     env = _pg_env()
     _assert_restore_target(env)
-    if not identity.is_file() or evidence_root.is_symlink() or not evidence_root.is_dir() or any(evidence_root.iterdir()):
+    if (not identity.is_file() or identity.stat().st_mode & 0o077
+            or evidence_root.is_symlink() or not evidence_root.is_dir()
+            or evidence_root.stat().st_mode & 0o077 or any(evidence_root.iterdir())):
         raise BackupError("restore_inputs_invalid")
     manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
     if manifest.get("manifest_version") != MANIFEST_VERSION or manifest.get("status") != "COMPLETE_LOCAL":
@@ -367,6 +369,7 @@ def restore_isolated(directory: Path, evidence_root: Path, identity: Path) -> di
             target = evidence_root.joinpath(*relative.parts)
             target.parent.mkdir(parents=True, exist_ok=True)
             _decrypt(encrypted, target, identity)
+            target.chmod(0o600)
             if target.stat().st_size != ref["size"] or _sha256(target) != ref["sha256"]:
                 raise BackupError("restored_evidence_mismatch")
         _run(["pg_restore", "--exit-on-error", "--single-transaction", "--no-owner", "--no-acl",

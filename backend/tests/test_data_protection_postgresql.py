@@ -76,7 +76,8 @@ def test_backup_restore_postgresql_16_custom_archive_and_read_only_validation(se
         monkeypatch.setenv("FRCAIXINHA_ISOLATED_RESTORE", "YES")
         monkeypatch.setenv("APP_ENV", "test")
         restored_evidence = tmp_path / "restored-evidence"
-        restored_evidence.mkdir()
+        restored_evidence.mkdir(mode=0o700)
+        restored_evidence.chmod(0o700)
         result = protection.restore_isolated(directory, restored_evidence, identity)
         assert result["alembic_head"] == protection.EXPECTED_HEAD
         assert result["ledger"] == "PASS"
@@ -140,7 +141,8 @@ def test_archive_corruption_and_truncation_rejected_before_restore(setup, tmp_pa
         monkeypatch.setenv("FRCAIXINHA_ISOLATED_RESTORE", "YES")
         monkeypatch.setenv("APP_ENV", "test")
         restored_evidence = tmp_path / "restored-evidence"
-        restored_evidence.mkdir()
+        restored_evidence.mkdir(mode=0o700)
+        restored_evidence.chmod(0o700)
         original = archive.read_bytes()
         for payload in (original[:-1], original[:-1] + bytes([original[-1] ^ 1])):
             archive.write_bytes(payload)
@@ -195,10 +197,12 @@ def test_referenced_evidence_round_trip_with_real_database(setup, tmp_path, monk
         monkeypatch.setenv("FRCAIXINHA_ISOLATED_RESTORE", "YES")
         monkeypatch.setenv("APP_ENV", "test")
         target_root = tmp_path / "restored-evidence"
-        target_root.mkdir()
+        target_root.mkdir(mode=0o700)
+        target_root.chmod(0o700)
         result = protection.restore_isolated(directory, target_root, identity)
         assert result["evidence_files"] == 1
         assert (target_root / key).read_bytes() == payload
+        assert (target_root / key).stat().st_mode & 0o077 == 0
         with protection._pg_connect(protection._pg_env()) as conn:
             assert conn.execute("SELECT sha256 FROM workflow_execution_evidence_files WHERE id=%s", (file_id,)).fetchone()[0] == hashlib.sha256(payload).hexdigest()
     finally:
