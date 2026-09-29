@@ -9,7 +9,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
 from app.db.base import Base
@@ -473,7 +473,6 @@ def test_postgresql_two_workers_same_cycle_run_commit_effect_once(monkeypatch):
 
         def traced_claim(db, run_id, *, lease_owner, now=None, lease_seconds=300):
             if getattr(owner_context, "second", False):
-                from sqlalchemy import text
                 second_pid.append(db.execute(text("SELECT pg_backend_pid()")).scalar_one())
                 second_claim_started.set()
             return actual_claim(
