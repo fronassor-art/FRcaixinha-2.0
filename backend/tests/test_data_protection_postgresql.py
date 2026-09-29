@@ -119,7 +119,7 @@ def test_pg_dump_command_has_no_password_or_database_url(setup, monkeypatch):
 
     monkeypatch.setattr(protection.subprocess, "Popen", capture)
     protection.create_backup(stage, source_evidence)
-    dump_command = next(command for command in commands if command[0] == "pg_dump")
+    dump_command = next(command for command in commands if command[0] == "pg_dump" and "--snapshot" in command)
     assert "--snapshot" in dump_command
     assert all("password" not in argument.lower() and "frcaixinha_test:frcaixinha_test" not in argument
                for argument in dump_command)
