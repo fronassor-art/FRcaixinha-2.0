@@ -21,11 +21,48 @@ groups:
         annotations:
           summary: "P95 da API acima de 1,5s"
       - alert: FRcaixinhaWorkerStale
-        expr: time() - frcaixinha_worker_heartbeat_timestamp_seconds > 180
+        expr: time() - frcaixinha_worker_heartbeat_timestamp_seconds{job="frcaixinha-worker"} > 180
         for: 3m
         labels: {severity: critical}
         annotations:
           summary: "Worker do FRcaixinha sem heartbeat"
+      - alert: FRcaixinhaWorkerMetricsDown
+        expr: up{job="frcaixinha-worker"} == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: "Endpoint de métricas do worker indisponível"
+      - alert: FRcaixinhaSchedulerRunFailed
+        expr: frcaixinha_scheduler_runs_failed > 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "Existe SchedulerRun FAILED"
+      - alert: FRcaixinhaSchedulerLeaseExpired
+        expr: frcaixinha_scheduler_runs_expired_lease > 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "Existe SchedulerRun RUNNING com lease expirada"
+      - alert: FRcaixinhaSchedulerRunPending
+        expr: frcaixinha_scheduler_runs_pending > 0
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Existe SchedulerRun PENDING por mais de cinco minutos"
+      - alert: FRcaixinhaSchedulerMetricsDatabaseDown
+        expr: frcaixinha_scheduler_metrics_database_up == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: "Métricas de SchedulerRun não conseguiram consultar PostgreSQL"
+      - alert: FRcaixinhaSchedulerJobNoRecentSuccess
+        expr: (frcaixinha_scheduler_runs_last_succeeded_timestamp_seconds > 0) and on(job_key) (time() - frcaixinha_scheduler_runs_last_succeeded_timestamp_seconds > 108000) and on() (frcaixinha_scheduler_metrics_database_up == 1)
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Job diário sem SUCCEEDED por mais de 30 horas"
+          description: "Janela de 30h = intervalo diário de 24h + 6h de tolerância operacional; alerta só após o primeiro SUCCEEDED."
       - alert: FRcaixinhaOverdueInstallments
         expr: frcaixinha_installments_overdue > 0
         for: 15m

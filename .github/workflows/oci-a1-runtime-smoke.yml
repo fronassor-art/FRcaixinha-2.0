@@ -36,6 +36,7 @@ jobs:
             "$FRCAIXINHA_SECRETS_DIR"
           chmod 0711 "$FRCAIXINHA_SECRETS_DIR"
           cp ops/oci-a1/.env.oci-a1.example ops/oci-a1/.env.oci-a1
+          echo "FRCAIXINHA_BACKEND_IMAGE=frcaixinha-backend:runtime-smoke" >> "$GITHUB_ENV"
           cat > ops/oci-a1/app.env <<'ENV'
           APP_ENV=production
           ALLOWED_HOSTS=localhost,127.0.0.1,web
@@ -61,16 +62,15 @@ jobs:
           print("Synthetic CI secret files created; values withheld")
           PY
 
-      - name: Pull approved GHCR image anonymously and prepare bind ownership
+      - name: Build candidate ARM64 image and prepare bind ownership
         run: |
-          image_ref="$(sed -n 's/^FRCAIXINHA_BACKEND_IMAGE=//p' ops/oci-a1/.env.oci-a1)"
-          test "$image_ref" = "ghcr.io/fronassor-art/frcaixinha-backend@sha256:bf5d5208d833b427eded64e0a59966d98f52931c1065510e5b8db7a7002b41af"
+          image_ref=frcaixinha-backend:runtime-smoke
           docker compose --env-file ops/oci-a1/.env.oci-a1 \
             -f ops/oci-a1/docker-compose.oci-a1.yml pull postgres redis
-          docker pull "$image_ref"
+          docker build --pull -t "$image_ref" -f backend/Dockerfile backend
           image_platform="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image_ref")"
           test "$image_platform" = linux/arm64
-          echo "GHCR anonymous full image pull: PASS; local image platform: $image_platform"
+          echo "Candidate image build: PASS; local image platform: $image_platform"
 
           postgres_uid="$(docker run --rm --entrypoint sh postgres:16-alpine -c 'id -u postgres')"
           postgres_gid="$(docker run --rm --entrypoint sh postgres:16-alpine -c 'id -g postgres')"
@@ -113,7 +113,7 @@ jobs:
       - name: Start PostgreSQL and Redis and await health
         run: |
           compose() { docker compose --env-file ops/oci-a1/.env.oci-a1 -f ops/oci-a1/docker-compose.oci-a1.yml "$@"; }
-          compose up -d postgres redis
+          compose up --pull never -d postgres redis
           for service in postgres redis; do
             container_id="$(compose ps -q "$service")"
             test -n "$container_id"
@@ -146,18 +146,18 @@ jobs:
             echo "$service health: healthy"
           done
 
-      - name: Run Alembic migration manually using approved image
+      - name: Run Alembic migration manually using candidate image
         run: |
           compose() { docker compose --env-file ops/oci-a1/.env.oci-a1 -f ops/oci-a1/docker-compose.oci-a1.yml "$@"; }
-          compose run --rm --no-deps web alembic upgrade head
-          compose run --rm --no-deps web alembic current > "$RUNNER_TEMP/oci-a1-alembic-current.txt"
+          compose run --pull never --rm --no-deps web alembic upgrade head
+          compose run --pull never --rm --no-deps web alembic current > "$RUNNER_TEMP/oci-a1-alembic-current.txt"
           python - "$RUNNER_TEMP/oci-a1-alembic-current.txt" <<'PY'
           from pathlib import Path
           import re
           import sys
 
           output = Path(sys.argv[1]).read_text(encoding="utf-8")
-          expected = "0103_pix_reconciliation_schema_a377b4r4"
+          expected = "0104_scheduler_runs_g3d4a"
           assert re.search(rf"(?m)^{expected}(?: \(head\))?$", output), output
           print(f"MANUAL_MIGRATION=PASS; ALEMBIC_CURRENT={expected}")
           PY
@@ -165,7 +165,7 @@ jobs:
       - name: Start web and prove readiness, database and evidence write
         run: |
           compose() { docker compose --env-file ops/oci-a1/.env.oci-a1 -f ops/oci-a1/docker-compose.oci-a1.yml "$@"; }
-          compose up -d --no-deps web
+          compose up --pull never -d --no-deps web
           container_id="$(compose ps -q web)"
           test -n "$container_id"
           health=starting
@@ -209,34 +209,102 @@ jobs:
           print("WEB_HEALTH=PASS; WEB_READY_HTTP=200; WEB_POSTGRES_SELECT1=PASS; EVIDENCE_WEB_WRITE=PASS")
           PY
 
-      - name: Probe worker dependencies one-shot without scheduler
+      - name: Start the real worker loop with Redis healthy
         run: |
-          # The command after "worker" overrides app.worker.main; no scheduled task loop starts.
-          docker compose --env-file ops/oci-a1/.env.oci-a1 \
-            -f ops/oci-a1/docker-compose.oci-a1.yml \
-            run --rm --no-deps -T worker python - <<'PY'
-          from pathlib import Path
-          import redis
-          from sqlalchemy import create_engine, text
-          from app.core.config import settings
+          python - <<'PY'
+          from datetime import datetime, timezone
+          import time
 
-          assert settings.app_env == "production"
-          engine = create_engine(settings.database_url, pool_pre_ping=True)
-          try:
-              with engine.connect() as connection:
-                  assert connection.execute(text("SELECT 1")).scalar_one() == 1
-          finally:
-              engine.dispose()
-          client = redis.Redis.from_url(settings.redis_url)
-          try:
-              assert client.ping() is True
-          finally:
-              client.close()
-          evidence = Path("/var/lib/frcaixinha/workflow-evidence/.smoke-worker")
-          evidence.write_text("worker\n", encoding="utf-8")
-          print("WORKER_CONFIG_LOAD=PASS; WORKER_POSTGRES_CONNECTIVITY=PASS; WORKER_REDIS_CONNECTIVITY=PASS")
-          print("EVIDENCE_WORKER_WRITE=PASS; WORKER_MAIN_LOOP_STARTED=NO; FINANCIAL_SCHEDULED_TASKS_EXECUTED=NO")
+          while True:
+              now = datetime.now(timezone.utc)
+              if now.hour not in (0, 4) or now.minute not in (4, 5):
+                  break
+              time.sleep(1)
+          print("WORKER_SMOKE_DISPATCH_WINDOW=SAFE")
           PY
+          compose() { docker compose --env-file ops/oci-a1/.env.oci-a1 -f ops/oci-a1/docker-compose.oci-a1.yml "$@"; }
+          compose up --pull never -d --no-deps worker
+          worker_id="$(compose ps -q worker)"
+          test -n "$worker_id"
+          sleep 5
+          test "$(docker inspect --format '{{.State.Running}}' "$worker_id")" = true
+          compose exec -T worker python -c 'from sqlalchemy import text; from app.db.session import engine; c=engine.connect(); assert c.execute(text("SELECT 1")).scalar_one() == 1; c.close(); print("WORKER_POSTGRES_CONNECTIVITY=PASS")'
+          compose exec -T redis redis-cli --raw GET frcaixinha:worker:heartbeat | grep -q .
+          compose exec -T web python - <<'PY'
+          import time
+          import urllib.request
+
+          with urllib.request.urlopen("http://worker:8001/metrics", timeout=5) as response:
+              payload = response.read().decode()
+          heartbeat = next(
+              line for line in payload.splitlines()
+              if line.startswith("frcaixinha_worker_heartbeat_timestamp_seconds ")
+          )
+          assert time.time() - float(heartbeat.split()[-1]) < 90, heartbeat
+          print("WORKER_MAIN_LOOP_STARTED=YES; WORKER_LOOP_REMAINED_ALIVE=YES; WORKER_METRICS_REACHABLE=YES")
+          print("WORKER_REDIS_HEARTBEAT=PASS; WORKER_POSTGRES_CONNECTIVITY=PASS")
+          PY
+          compose exec -T web python - <<'PY'
+          from app.db.session import SessionLocal
+          from app.models import SchedulerRun
+
+          with SessionLocal() as db:
+              assert db.query(SchedulerRun.id).count() == 0
+          print("SCHEDULER_RUNS_CREATED=0; FINANCIAL_TASK_DISPATCHED=NO")
+          PY
+          compose exec -T worker python -c 'from pathlib import Path; Path("/var/lib/frcaixinha/workflow-evidence/.smoke-worker").write_text("worker\n", encoding="utf-8")'
+          compose stop worker
+
+      - name: Start the real worker loop while Redis is unavailable
+        run: |
+          python - <<'PY'
+          from datetime import datetime, timezone
+          import time
+
+          while True:
+              now = datetime.now(timezone.utc)
+              if now.hour not in (0, 4) or now.minute not in (4, 5):
+                  break
+              time.sleep(1)
+          print("WORKER_SMOKE_DISPATCH_WINDOW=SAFE")
+          PY
+          compose() { docker compose --env-file ops/oci-a1/.env.oci-a1 -f ops/oci-a1/docker-compose.oci-a1.yml "$@"; }
+          compose stop redis
+          compose up --pull never -d --no-deps worker
+          worker_id="$(compose ps -q worker)"
+          test -n "$worker_id"
+          sleep 5
+          test "$(docker inspect --format '{{.State.Running}}' "$worker_id")" = true
+          compose exec -T web python - <<'PY'
+          import time
+          import urllib.request
+
+          with urllib.request.urlopen("http://worker:8001/metrics", timeout=5) as response:
+              payload = response.read().decode()
+          heartbeat = next(
+              line for line in payload.splitlines()
+              if line.startswith("frcaixinha_worker_heartbeat_timestamp_seconds ")
+          )
+          assert time.time() - float(heartbeat.split()[-1]) < 90, heartbeat
+          print("REDIS_UNAVAILABLE=YES; WORKER_MAIN_LOOP_STARTED=YES; WORKER_LOOP_REMAINED_ALIVE=YES")
+          print("WORKER_METRICS_REACHABLE=YES; FINANCIAL_TASK_DISPATCHED=NO")
+          PY
+          compose exec -T worker python -c 'from sqlalchemy import text; from app.db.session import engine; c=engine.connect(); assert c.execute(text("SELECT 1")).scalar_one() == 1; c.close(); print("WORKER_POSTGRES_CONNECTIVITY_WITH_REDIS_DOWN=PASS")'
+          compose exec -T web python - <<'PY'
+          from app.db.session import SessionLocal
+          from app.models import SchedulerRun
+
+          with SessionLocal() as db:
+              assert db.query(SchedulerRun.id).count() == 0
+          print("SCHEDULER_RUNS_CREATED_WITH_REDIS_DOWN=0; FINANCIAL_TASK_DISPATCHED=NO")
+          PY
+          compose stop worker
+          compose up --pull never -d --no-deps redis
+          for attempt in {1..30}; do
+            if compose exec -T redis redis-cli ping 2>/dev/null | grep -q PONG; then break; fi
+            sleep 1
+          done
+          compose exec -T redis redis-cli ping | grep -q PONG
 
       - name: Verify shared POSIX evidence and Redis AOF
         run: |
@@ -247,6 +315,7 @@ jobs:
           evidence = Path(sys.argv[1])
           assert (evidence / ".smoke-web").read_text(encoding="utf-8") == "web\n"
           assert (evidence / ".smoke-worker").read_text(encoding="utf-8") == "worker\n"
+          print("FINANCIAL_EFFECTS_EXECUTED=NO; WORKER_LOOP_RUNTIME=PASS")
           print("EVIDENCE_SHARED_HOST_VISIBILITY=PASS")
           PY
           compose() { docker compose --env-file ops/oci-a1/.env.oci-a1 -f ops/oci-a1/docker-compose.oci-a1.yml "$@"; }
