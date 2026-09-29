@@ -1,9 +1,11 @@
 import logging
+import uuid
 from datetime import datetime, timezone
 from app.models import Cycle, CycleParticipation
 from app.services.cycle_foundation import ensure_contributions_for_entry
 from app.services.cycle_participation import evaluate_delinquency, materialize_active_charges
 from app.services.late_charge_v1 import financial_civil_date
+from app.services import scheduler_runs
 from app.db.session import SessionLocal
 from app.services.notifications_v12 import queue_installment_reminders
 from app.services.loan_engine_v17 import accrue_overdue_penalties
@@ -38,6 +40,13 @@ from app.services.continuous_improvement_finalization_v093_100 import persist_al
 from app.models import ExecutiveRiskDecisionGovernance, ExecutiveRiskDecisionExecution
 
 log = logging.getLogger(__name__)
+DAILY_JOB_KEY = "worker_daily_tasks"
+DAILY_RUN_LEASE_SECONDS = 300
+lock_run_for_execution = scheduler_runs.lock_run_for_execution
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def run_cycle_participation_tasks(scheduled_for: datetime | None = None) -> dict[str, int]:
@@ -81,9 +90,69 @@ def run_cycle_participation_tasks(scheduled_for: datetime | None = None) -> dict
     return {"processed": processed, "blocked": blocked}
 
 def run_daily_tasks(scheduled_for: datetime | None = None):
-    scheduled_for = scheduled_for or datetime.now(timezone.utc)
+    scheduled_for = scheduled_for or _utc_now()
     financial_date = financial_civil_date(scheduled_for)
+    lease_owner = f"daily:{uuid.uuid4().hex}"
     db = SessionLocal()
+    try:
+        run, _ = scheduler_runs.get_or_create_run(
+            db,
+            job_key=DAILY_JOB_KEY,
+            financial_date=financial_date,
+            scheduled_for=scheduled_for,
+        )
+        run_id = run.id
+        if not scheduler_runs.claim_run(
+            db,
+            run_id,
+            lease_owner=lease_owner,
+            now=_utc_now(),
+            lease_seconds=DAILY_RUN_LEASE_SECONDS,
+        ):
+            status = run.status
+            db.rollback()
+            log.info("daily_tasks_not_claimed run_id=%s status=%s", run_id, status)
+            return {"scheduler_run": status, "executed": False}
+
+        # Persist the claim before opening the long execution transaction.
+        db.commit()
+        try:
+            lease_validated_at = lock_run_for_execution(db, run_id, lease_owner=lease_owner)
+            result = _execute_daily_effects(db, financial_date)
+            scheduler_runs.mark_run_succeeded_after_locked_execution(
+                db,
+                run_id,
+                lease_owner=lease_owner,
+                lease_validated_at=lease_validated_at,
+                completed_at=_utc_now(),
+            )
+            db.commit()
+            result["scheduler_run"] = "SUCCEEDED"
+            result["executed"] = True
+            return result
+        except Exception:
+            db.rollback()
+            try:
+                scheduler_runs.mark_run_failed(
+                    db,
+                    run_id,
+                    lease_owner=lease_owner,
+                    error_code="execution_failed",
+                    failed_at=_utc_now(),
+                )
+                db.commit()
+            except scheduler_runs.SchedulerLeaseLost:
+                db.rollback()
+            except Exception:
+                db.rollback()
+                log.exception("daily_scheduler_failure_checkpoint_failed run_id=%s", run_id)
+            log.exception("daily_tasks_failed run_id=%s", run_id)
+            raise
+    finally:
+        db.close()
+
+
+def _execute_daily_effects(db, financial_date):
     try:
         created = queue_installment_reminders(db, days_ahead=3, financial_date=financial_date)
         penalties = accrue_overdue_penalties(db, financial_date, settings.loan_daily_penalty_rate)
@@ -158,10 +227,8 @@ def run_daily_tasks(scheduled_for: datetime | None = None):
                     log.warning('continuous_improvement_audit_not_created execution_id=%s', execution.id)
         executive_audit_row, executive_audit = persist_executive_improvement_audit(db, None)
         finalization = persist_finalization(db, None, financial_date=financial_date)
-        db.commit()
         log.info('daily_tasks_completed reminders_created=%s penalties=%s penalty_total=%s', created, penalties['installments'], penalties['penalty_total'])
         return {'reminders_created': created, 'penalties': penalties, 'collections': collections, 'collection_recovery': recovery, 'workflow_escalation': workflow_escalation, 'workflow_orchestration': workflow_orchestration, 'workflow_execution': workflow_execution, 'workflow_integrity': workflow_integrity, 'workflow_compliance': {'id': workflow_compliance_row.id, 'status': workflow_compliance['status']}, 'workflow_incidents': workflow_incidents, 'capa_effectiveness': capa_effectiveness, 'operational_risk': {'id': operational_risk_row.id, 'status': operational_risk['status'], 'risk_score': operational_risk['risk_score']}, 'operational_risk_alerts': operational_risk_alerts, 'operational_risk_response': operational_risk_response, 'executive_dashboard': {'id': dashboard_row.id, 'status': dashboard['status']}, 'executive_risk_response': {'id': executive_risk_response_row.id, 'status': executive_risk_response['status']}, 'executive_risk_governance': {'created': governance_created}, 'executive_risk_execution': {'created': execution_created}, 'executive_risk_effectiveness': {'created': effectiveness_created}, 'continuous_improvement': {'created': improvement_created, 'plans_created': improvement_plans_created, 'dashboard': {'id': improvement_dashboard_row.id, 'status': improvement_dashboard['status']}, 'priority': {'id': improvement_priority_row.id, 'status': improvement_priority['counts']}, 'balancing': {'id': improvement_balancing_row.id, 'status': improvement_balancing['status'], 'unassigned': len(improvement_balancing['unassigned'])}, 'execution': {'created': execution_created}, 'certification': {'created': certification_created}, 'audit': {'created': audit_created}, 'executive_audit': {'id': executive_audit_row.id, 'status': executive_audit['status']}}}
     except Exception:
-        db.rollback(); log.exception('daily_tasks_failed'); raise
-    finally:
-        db.close()
+        log.exception('daily_effects_failed')
+        raise
