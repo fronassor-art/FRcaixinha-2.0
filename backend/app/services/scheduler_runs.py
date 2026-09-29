@@ -190,7 +190,7 @@ def lock_run_for_execution(
         raise SchedulerLeaseLost("scheduler run no longer exists")
     # A transaction may have waited for this row until after its lease
     # expired, so validate using a fresh clock reading after FOR UPDATE.
-    validated_at = _utc()
+    validated_at = _utc(datetime.now(timezone.utc))
     _assert_claim(row, lease_owner=lease_owner, now=validated_at)
     return validated_at
 
