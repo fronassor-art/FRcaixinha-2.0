@@ -278,4 +278,8 @@ def test_cycle_run_uses_belem_civil_date_for_utc_boundaries(monkeypatch, schedul
     )
 
     tasks.run_cycle_participation_tasks(scheduled_for=scheduled_for)
-    assert calls == [expected]
+    assert calls == [
+        expected,
+        ("charges", scheduled_for),
+        ("delinquency", scheduled_for),
+    ]
