@@ -56,8 +56,17 @@ groups:
         labels: {severity: critical}
         annotations:
           summary: "Métricas de SchedulerRun não conseguiram consultar PostgreSQL"
+      - alert: FRcaixinhaSchedulerJobNeverSucceeded
+        # A worker may start just after a slot. The next daily slot is less
+        # than 24h away; 6h extra matches the established operational grace.
+        expr: (frcaixinha_scheduler_runs_last_succeeded_timestamp_seconds{job="frcaixinha-api",job_key=~"worker_daily_tasks|worker_cycle_participation_daily"} == 0) and on() (time() - frcaixinha_worker_process_start_timestamp_seconds{job="frcaixinha-worker"} > 108000) and on() (frcaixinha_scheduler_metrics_database_up{job="frcaixinha-api"} == 1) and on() (up{job="frcaixinha-worker"} == 1)
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Job do scheduler nunca concluiu uma run SUCCEEDED"
+          description: "Não há sucesso durável após a primeira oportunidade diária (intervalo <24h) mais 6h de tolerância operacional. O heartbeat confirma somente que o loop está vivo."
       - alert: FRcaixinhaSchedulerJobNoRecentSuccess
-        expr: (frcaixinha_scheduler_runs_last_succeeded_timestamp_seconds > 0) and on(job_key) (time() - frcaixinha_scheduler_runs_last_succeeded_timestamp_seconds > 108000) and on() (frcaixinha_scheduler_metrics_database_up == 1)
+        expr: (frcaixinha_scheduler_runs_last_succeeded_timestamp_seconds{job="frcaixinha-api"} > 0) and on(job_key) (time() - frcaixinha_scheduler_runs_last_succeeded_timestamp_seconds{job="frcaixinha-api"} > 108000) and on() (frcaixinha_scheduler_metrics_database_up{job="frcaixinha-api"} == 1)
         for: 5m
         labels: {severity: warning}
         annotations:

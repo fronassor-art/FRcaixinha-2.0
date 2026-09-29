@@ -1,5 +1,9 @@
 from prometheus_client import Counter, Gauge, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
+# Both scheduler jobs recur daily. From any worker start, the next slot is
+# less than 24 hours away; add the existing six-hour operational tolerance.
+WORKER_FIRST_SUCCESS_GRACE_SECONDS = 24 * 60 * 60 + 6 * 60 * 60
+
 HTTP_REQUESTS = Counter('frcaixinha_http_requests_total','Total HTTP requests',['method','path','status'])
 HTTP_LATENCY = Histogram('frcaixinha_http_request_duration_seconds','HTTP request latency',['method','path'])
 PIX_CREATED = Counter('frcaixinha_pix_created_total','Pix payment attempts created',['kind'])
@@ -13,6 +17,10 @@ INSTALLMENTS_OVERDUE = Gauge('frcaixinha_installments_overdue','Current overdue 
 WORKER_HEARTBEAT = Gauge(
     'frcaixinha_worker_heartbeat_timestamp_seconds',
     'Worker process last loop iteration Unix timestamp',
+)
+WORKER_PROCESS_START_TIMESTAMP = Gauge(
+    'frcaixinha_worker_process_start_timestamp_seconds',
+    'Unix timestamp when this worker process initialized its entrypoint',
 )
 WORKER_RUNS = Counter(
     'frcaixinha_worker_runs_total',
