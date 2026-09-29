@@ -22,6 +22,12 @@ class _Query:
     def first(self):
         return None
 
+    def populate_existing(self):
+        return self
+
+    def one_or_none(self):
+        return None
+
 
 class _Session:
     def query(self, *args, **kwargs):
@@ -106,6 +112,78 @@ def _stub_daily_services(monkeypatch, calls):
     monkeypatch.setattr(tasks, "persist_finalization", finalization)
 
 
+def _stub_cycle_scheduler(monkeypatch, calls, participation, cycle):
+    units = []
+    run = SimpleNamespace(id=17)
+
+    class Rows(_Query):
+        def __init__(self, rows):
+            self.rows = rows
+
+        def all(self):
+            return list(self.rows)
+
+    class ParticipationRow(_Query):
+        def one_or_none(self):
+            return participation
+
+    class CycleSession(_Session):
+        def query(self, *models, **kwargs):
+            model = models[0]
+            if model is tasks.SchedulerRunUnit:
+                return Rows(units)
+            if model is tasks.SchedulerRunUnit.status:
+                return Rows([(unit.status,) for unit in units])
+            if model is tasks.CycleParticipation.id:
+                return Rows([(5, 8)])
+            if model is tasks.CycleParticipation:
+                return ParticipationRow()
+            raise AssertionError(f"unexpected query model: {model}")
+
+        def get(self, model, identity):
+            return cycle if model is tasks.Cycle else None
+
+    def new_unit(_db, *, run_id, unit_key):
+        unit = SimpleNamespace(id=len(units) + 1, unit_key=unit_key, status="PENDING")
+        units.append(unit)
+        return unit, True
+
+    def claim_unit(_db, unit_id, **kwargs):
+        unit = next(unit for unit in units if unit.id == unit_id)
+        unit.status = "RUNNING"
+        return True
+
+    def mark_unit_succeeded(_db, unit_id, **kwargs):
+        unit = next(unit for unit in units if unit.id == unit_id)
+        unit.status = "SUCCEEDED"
+        return unit
+
+    monkeypatch.setattr(tasks, "SessionLocal", CycleSession)
+    monkeypatch.setattr(tasks.scheduler_runs, "get_or_create_run", lambda *a, **k: (run, False))
+    monkeypatch.setattr(tasks.scheduler_runs, "claim_run", lambda *a, **k: True)
+    monkeypatch.setattr(tasks.scheduler_runs, "lock_run_for_execution", lambda *a, **k: datetime.now(timezone.utc))
+    monkeypatch.setattr(tasks.scheduler_runs, "renew_run_lease", lambda *a, **k: None)
+    monkeypatch.setattr(tasks.scheduler_runs, "get_or_create_unit", new_unit)
+    monkeypatch.setattr(tasks.scheduler_runs, "claim_unit", claim_unit)
+    monkeypatch.setattr(tasks.scheduler_runs, "lock_unit_for_execution", lambda *a, **k: datetime.now(timezone.utc))
+    monkeypatch.setattr(tasks.scheduler_runs, "mark_unit_succeeded_after_locked_execution", mark_unit_succeeded)
+    monkeypatch.setattr(tasks.scheduler_runs, "mark_run_succeeded_after_locked_execution", lambda *a, **k: run)
+    monkeypatch.setattr(tasks.scheduler_runs, "mark_run_failed", lambda *a, **k: run)
+    monkeypatch.setattr(
+        tasks, "ensure_contributions_for_entry",
+        lambda db, **kwargs: calls.append(("contribution", kwargs["entry_date"])),
+    )
+    monkeypatch.setattr(
+        tasks, "materialize_active_charges",
+        lambda db, **kwargs: calls.append(("charges", kwargs["effective_at"])),
+    )
+    monkeypatch.setattr(
+        tasks, "evaluate_delinquency",
+        lambda db, **kwargs: calls.append(("delinquency", kwargs["effective_at"]))
+        or SimpleNamespace(status="OK"),
+    )
+
+
 def _daily_calls():
     names = (
         "reminders", "penalties", "collections", "recovery", "risk", "compliance",
@@ -170,31 +248,7 @@ def test_worker_cycle_daily_uses_financial_civil_date(monkeypatch):
     calls = []
     participation = SimpleNamespace(status="ACTIVE", cycle_id=8, member_id=13)
     cycle = SimpleNamespace(start_date=date(2026, 1, 1))
-
-    class CycleQuery(_Query):
-        def all(self):
-            return [(5,)]
-
-    class CycleSession(_Session):
-        def query(self, *args, **kwargs):
-            return CycleQuery()
-
-        def get(self, model, identity):
-            return participation if identity == 5 else cycle
-
-    monkeypatch.setattr(tasks, "SessionLocal", CycleSession)
-    monkeypatch.setattr(
-        tasks, "ensure_contributions_for_entry",
-        lambda db, **kwargs: calls.append(("contribution", kwargs["entry_date"])),
-    )
-    monkeypatch.setattr(
-        tasks, "materialize_active_charges",
-        lambda db, **kwargs: calls.append(("charges", kwargs["effective_at"])),
-    )
-    monkeypatch.setattr(
-        tasks, "evaluate_delinquency",
-        lambda db, **kwargs: calls.append(("delinquency", kwargs["effective_at"])) or SimpleNamespace(status="OK"),
-    )
+    _stub_cycle_scheduler(monkeypatch, calls, participation, cycle)
 
     scheduled_for = datetime(2026, 9, 28, 0, 5, tzinfo=timezone.utc)
     tasks.run_cycle_participation_tasks(scheduled_for=scheduled_for)
@@ -217,22 +271,15 @@ def test_cycle_run_uses_belem_civil_date_for_utc_boundaries(monkeypatch, schedul
     calls = []
     participation = SimpleNamespace(status="ACTIVE", cycle_id=8, member_id=13)
     cycle = SimpleNamespace(start_date=date(2026, 1, 1))
-
-    class CycleQuery(_Query):
-        def all(self):
-            return [(5,)]
-
-    class CycleSession(_Session):
-        def query(self, *args, **kwargs):
-            return CycleQuery()
-
-        def get(self, model, identity):
-            return participation if identity == 5 else cycle
-
-    monkeypatch.setattr(tasks, "SessionLocal", CycleSession)
-    monkeypatch.setattr(tasks, "ensure_contributions_for_entry", lambda db, **kwargs: calls.append(kwargs["entry_date"]))
-    monkeypatch.setattr(tasks, "materialize_active_charges", lambda *a, **k: None)
-    monkeypatch.setattr(tasks, "evaluate_delinquency", lambda *a, **k: SimpleNamespace(status="OK"))
+    _stub_cycle_scheduler(monkeypatch, calls, participation, cycle)
+    monkeypatch.setattr(
+        tasks, "ensure_contributions_for_entry",
+        lambda db, **kwargs: calls.append(kwargs["entry_date"]),
+    )
 
     tasks.run_cycle_participation_tasks(scheduled_for=scheduled_for)
-    assert calls == [expected]
+    assert calls == [
+        expected,
+        ("charges", scheduled_for),
+        ("delinquency", scheduled_for),
+    ]

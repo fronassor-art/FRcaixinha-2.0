@@ -1,7 +1,7 @@
 import logging
 import uuid
 from datetime import datetime, timezone
-from app.models import Cycle, CycleParticipation
+from app.models import Cycle, CycleParticipation, SchedulerRunUnit
 from app.services.cycle_foundation import ensure_contributions_for_entry
 from app.services.cycle_participation import evaluate_delinquency, materialize_active_charges
 from app.services.late_charge_v1 import financial_civil_date
@@ -42,6 +42,8 @@ from app.models import ExecutiveRiskDecisionGovernance, ExecutiveRiskDecisionExe
 log = logging.getLogger(__name__)
 DAILY_JOB_KEY = "worker_daily_tasks"
 DAILY_RUN_LEASE_SECONDS = 300
+DAILY_CYCLE_JOB_KEY = "worker_cycle_participation_daily"
+CYCLE_RUN_LEASE_SECONDS = 300
 lock_run_for_execution = scheduler_runs.lock_run_for_execution
 
 
@@ -50,44 +52,257 @@ def _utc_now() -> datetime:
 
 
 def run_cycle_participation_tasks(scheduled_for: datetime | None = None) -> dict[str, int]:
-    """Materialize elapsed monthly obligations and block three-month delinquency."""
+    """Process a durable participation snapshot with one transaction per unit."""
     scheduled_for = scheduled_for or datetime.now(timezone.utc)
     financial_date = financial_civil_date(scheduled_for)
+    lease_owner = f"cycle:{uuid.uuid4().hex}"
     db = SessionLocal()
     try:
-        ids = db.query(CycleParticipation.id).filter(
-            CycleParticipation.status == "ACTIVE"
-        ).order_by(CycleParticipation.id).all()
-    finally:
-        db.close()
-    processed = blocked = 0
-    for (participation_id,) in ids:
-        db = SessionLocal()
+        run, _ = scheduler_runs.get_or_create_run(
+            db,
+            job_key=DAILY_CYCLE_JOB_KEY,
+            financial_date=financial_date,
+            scheduled_for=scheduled_for,
+        )
+        run_id = run.id
+        if not scheduler_runs.claim_run(
+            db,
+            run_id,
+            lease_owner=lease_owner,
+            now=_utc_now(),
+            lease_seconds=CYCLE_RUN_LEASE_SECONDS,
+        ):
+            db.rollback()
+            log.info("cycle_scheduler_run_not_claimed run_id=%s", run_id)
+            return {"processed": 0, "blocked": 0}
+        # Claim state is durable before snapshot and unit work starts.
+        db.commit()
+
         try:
-            row = db.get(CycleParticipation, participation_id)
-            if row is None or row.status != "ACTIVE":
-                continue
-            cycle = db.get(Cycle, row.cycle_id)
-            if cycle is None or financial_date < cycle.start_date:
-                continue
-            ensure_contributions_for_entry(
-                db, member_id=row.member_id, cycle_id=row.cycle_id, entry_date=financial_date
+            lease_validated_at = scheduler_runs.lock_run_for_execution(
+                db, run_id, lease_owner=lease_owner,
             )
-            materialize_active_charges(
-                db, member_id=row.member_id, cycle_id=row.cycle_id, effective_at=scheduled_for
-            )
-            result = evaluate_delinquency(
-                db, member_id=row.member_id, cycle_id=row.cycle_id, effective_at=scheduled_for
-            )
+            units = db.query(SchedulerRunUnit).filter_by(
+                run_id=run_id,
+            ).order_by(SchedulerRunUnit.id).all()
+            if not units:
+                # The first committed unit set is the immutable run snapshot.
+                # Empty snapshots are finalized atomically so later arrivals
+                # cannot be added to an already-observed empty run.
+                snapshot = db.query(
+                    CycleParticipation.id, CycleParticipation.cycle_id,
+                ).filter(
+                    CycleParticipation.status == "ACTIVE",
+                ).order_by(CycleParticipation.id).all()
+                for participation_id, cycle_id in snapshot:
+                    scheduler_runs.get_or_create_unit(
+                        db,
+                        run_id=run_id,
+                        unit_key=f"cycle:{cycle_id}:participation:{participation_id}",
+                    )
+                units = db.query(SchedulerRunUnit).filter_by(
+                    run_id=run_id,
+                ).order_by(SchedulerRunUnit.id).all()
+            if not units:
+                scheduler_runs.mark_run_succeeded_after_locked_execution(
+                    db,
+                    run_id,
+                    lease_owner=lease_owner,
+                    lease_validated_at=lease_validated_at,
+                    completed_at=_utc_now(),
+                )
+                db.commit()
+                return {"processed": 0, "blocked": 0}
+            unit_snapshot = [(unit.id, unit.unit_key) for unit in units]
             db.commit()
-            processed += 1
-            blocked += result.status == "BLOCKED_DELINQUENCY"
         except Exception:
             db.rollback()
-            log.exception("cycle_participation_task_failed participation_id=%s", participation_id)
-        finally:
-            db.close()
-    return {"processed": processed, "blocked": blocked}
+            try:
+                scheduler_runs.mark_run_failed(
+                    db, run_id, lease_owner=lease_owner,
+                    error_code="execution_failed", failed_at=_utc_now(),
+                )
+                db.commit()
+            except scheduler_runs.SchedulerLeaseLost:
+                db.rollback()
+            except Exception:
+                db.rollback()
+                log.error(
+                    "cycle_scheduler_snapshot_failure_checkpoint_failed "
+                    "run_id=%s error_code=execution_failed",
+                    run_id,
+                )
+            raise
+
+        processed = blocked = 0
+        lost_owner = False
+        for unit_id, unit_key in unit_snapshot:
+            try:
+                # Renew only a still-valid lease between unit transactions.
+                # Expired/reclaimed ownership is never revived.
+                scheduler_runs.renew_run_lease(
+                    db,
+                    run_id,
+                    lease_owner=lease_owner,
+                    lease_seconds=CYCLE_RUN_LEASE_SECONDS,
+                )
+                db.commit()
+            except scheduler_runs.SchedulerLeaseLost:
+                db.rollback()
+                lost_owner = True
+                break
+
+            if not scheduler_runs.claim_unit(
+                db,
+                unit_id,
+                lease_owner=lease_owner,
+                now=_utc_now(),
+                lease_seconds=CYCLE_RUN_LEASE_SECONDS,
+            ):
+                unit = db.get(SchedulerRunUnit, unit_id)
+                succeeded = unit is not None and unit.status == "SUCCEEDED"
+                db.rollback()
+                if succeeded:
+                    continue
+                try:
+                    scheduler_runs.lock_run_for_execution(
+                        db, run_id, lease_owner=lease_owner,
+                    )
+                    db.rollback()
+                except scheduler_runs.SchedulerLeaseLost:
+                    db.rollback()
+                    lost_owner = True
+                    break
+                # The parent is ours, but this unit did not become claimable.
+                # Process other units and let final durable state mark the run
+                # FAILED while any unit remains incomplete.
+                continue
+            db.commit()
+
+            try:
+                lease_validated_at = scheduler_runs.lock_unit_for_execution(
+                    db, unit_id, lease_owner=lease_owner,
+                )
+                try:
+                    prefix, cycle_id_value, kind, participation_id_value = unit_key.split(":")
+                    if prefix != "cycle" or kind != "participation":
+                        raise ValueError("invalid cycle participation unit key")
+                    cycle_id = int(cycle_id_value)
+                    participation_id = int(participation_id_value)
+                except (ValueError, TypeError):
+                    raise ValueError("invalid cycle participation unit key")
+                row = db.query(CycleParticipation).filter(
+                    CycleParticipation.id == participation_id,
+                ).populate_existing().one_or_none()
+                did_process = False
+                result = None
+                if row is not None and row.status == "ACTIVE":
+                    cycle = db.get(Cycle, cycle_id) if row.cycle_id == cycle_id else None
+                    if cycle is not None and financial_date >= cycle.start_date:
+                        ensure_contributions_for_entry(
+                            db,
+                            member_id=row.member_id,
+                            cycle_id=row.cycle_id,
+                            entry_date=financial_date,
+                        )
+                        materialize_active_charges(
+                            db,
+                            member_id=row.member_id,
+                            cycle_id=row.cycle_id,
+                            effective_at=scheduled_for,
+                        )
+                        result = evaluate_delinquency(
+                            db,
+                            member_id=row.member_id,
+                            cycle_id=row.cycle_id,
+                            effective_at=scheduled_for,
+                        )
+                        did_process = True
+                scheduler_runs.mark_unit_succeeded_after_locked_execution(
+                    db,
+                    unit_id,
+                    lease_owner=lease_owner,
+                    lease_validated_at=lease_validated_at,
+                    completed_at=_utc_now(),
+                )
+                db.commit()
+                if did_process:
+                    processed += 1
+                    blocked += result.status == "BLOCKED_DELINQUENCY"
+            except Exception:
+                db.rollback()
+                try:
+                    scheduler_runs.mark_unit_failed(
+                        db,
+                        unit_id,
+                        lease_owner=lease_owner,
+                        error_code="execution_failed",
+                        failed_at=_utc_now(),
+                    )
+                    db.commit()
+                except scheduler_runs.SchedulerLeaseLost:
+                    db.rollback()
+                    lost_owner = True
+                    log.warning(
+                        "cycle_scheduler_unit_owner_lost run_id=%s unit_id=%s",
+                        run_id, unit_id,
+                    )
+                    break
+                except Exception:
+                    db.rollback()
+                    log.error(
+                        "cycle_scheduler_unit_failure_checkpoint_failed "
+                        "run_id=%s unit_id=%s error_code=execution_failed",
+                        run_id,
+                        unit_id,
+                    )
+                log.error(
+                    "cycle_participation_task_failed run_id=%s unit_id=%s "
+                    "error_code=execution_failed",
+                    run_id,
+                    unit_id,
+                )
+
+        if lost_owner:
+            return {"processed": processed, "blocked": blocked}
+
+        try:
+            scheduler_runs.renew_run_lease(
+                db,
+                run_id,
+                lease_owner=lease_owner,
+                lease_seconds=CYCLE_RUN_LEASE_SECONDS,
+            )
+            db.commit()
+            lease_validated_at = scheduler_runs.lock_run_for_execution(
+                db, run_id, lease_owner=lease_owner,
+            )
+            unit_states = db.query(SchedulerRunUnit.status).filter_by(
+                run_id=run_id,
+            ).all()
+            if all(status == "SUCCEEDED" for (status,) in unit_states):
+                scheduler_runs.mark_run_succeeded_after_locked_execution(
+                    db,
+                    run_id,
+                    lease_owner=lease_owner,
+                    lease_validated_at=lease_validated_at,
+                    completed_at=_utc_now(),
+                )
+            else:
+                scheduler_runs.mark_run_failed(
+                    db,
+                    run_id,
+                    lease_owner=lease_owner,
+                    error_code="execution_failed",
+                    failed_at=_utc_now(),
+                )
+            db.commit()
+        except scheduler_runs.SchedulerLeaseLost:
+            db.rollback()
+            log.warning("cycle_scheduler_run_owner_lost run_id=%s", run_id)
+        return {"processed": processed, "blocked": blocked}
+    finally:
+        db.close()
 
 def run_daily_tasks(scheduled_for: datetime | None = None):
     scheduled_for = scheduled_for or _utc_now()
