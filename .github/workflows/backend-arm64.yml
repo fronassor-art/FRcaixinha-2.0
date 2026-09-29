@@ -37,6 +37,21 @@ jobs:
           cache: pip
           cache-dependency-path: backend/requirements.txt
 
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.6'
+
+      - name: Install PostgreSQL 16 client and pinned age tools
+        env:
+          GOBIN: ${{ runner.temp }}/age-bin
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-16
+          mkdir -p "$GOBIN"
+          go install filippo.io/age/cmd/age@v1.2.1
+          go install filippo.io/age/cmd/age-keygen@v1.2.1
+          echo "$GOBIN" >> "$GITHUB_PATH"
+
       - name: Verify native ARM64 runner and Python
         run: |
           uname -m
@@ -108,6 +123,13 @@ jobs:
           JWT_SECRET: test-only-arm64-secret
           APP_ENV: test
         run: pytest -q tests/test_h4_c8_b3_a377b4r2r2b2f6_live_postgresql_payout_verification.py
+
+      - name: PostgreSQL encrypted backup and isolated restore
+        env:
+          DATABASE_URL: postgresql+psycopg://frcaixinha_test:frcaixinha_test@127.0.0.1:5432/frcaixinha_test
+          JWT_SECRET: test-only-arm64-secret
+          APP_ENV: test
+        run: pytest -q tests/test_data_protection_core.py tests/test_data_protection_postgresql.py
 
       - name: Build backend image natively for ARM64
         run: |
