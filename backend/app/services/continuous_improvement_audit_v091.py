@@ -7,7 +7,7 @@ from app.models import (User, ContinuousImprovementRecommendation, ContinuousImp
     ContinuousImprovementExecutionEvidenceFile, ContinuousImprovementEvidenceIntegrityEvent,
     ContinuousImprovementCertification, ContinuousImprovementAuditSnapshot, AuditLog)
 from app.services.continuous_improvement_certification_v090 import build_package
-from app.services.continuous_improvement_evidence_v089 import verify_execution_evidence, verify_chain
+from app.services.continuous_improvement_evidence_v089 import inspect_execution_evidence, verify_chain
 
 def now(): return datetime.now(timezone.utc)
 def canonical(v): return json.dumps(v, sort_keys=True, separators=(',', ':'), ensure_ascii=False, default=str)
@@ -18,7 +18,7 @@ def build_cycle(db: Session, execution_id:int):
     package=build_package(db, execution_id)
     ex=db.get(ContinuousImprovementExecution, execution_id)
     cert=db.query(ContinuousImprovementCertification).filter_by(execution_id=execution_id).first()
-    evidence=verify_execution_evidence(db, execution_id, None)
+    evidence=inspect_execution_evidence(db, execution_id)
     chain=verify_chain(db)
     checks={
       'execution_verified': ex.status=='VERIFIED',

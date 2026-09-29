@@ -29,6 +29,7 @@ def validate(filename,ctype):
     if c not in allowed: raise ValueError('mime_type_not_allowed')
     return name,c
 def _eligible(db,uid):
+    if uid is None: return False
     u=db.get(__import__('app.models',fromlist=['User']).User,uid)
     return bool(u and u.role=='ADMIN' and u.is_active)
 def _last_event(db):
@@ -86,13 +87,12 @@ def get_file(db,file_id):
     if not path.is_file(): raise ValueError('physical_file_missing')
     return row,path
 
-def verify_execution_evidence(db,execution_id,actor_id):
+def _inspect_execution_evidence(db,execution_id):
     execution=db.get(ContinuousImprovementExecution,execution_id)
     if not execution: raise ValueError('execution_not_found')
-    if not _eligible(db,actor_id): raise ValueError('actor_not_eligible')
     rows=db.query(ContinuousImprovementExecutionEvidenceFile).filter_by(execution_id=execution_id).order_by(ContinuousImprovementExecutionEvidenceFile.id.asc()).all()
-    if not rows: raise ValueError('evidence_file_required')
     counts={'PASS':0,'MISMATCH':0,'MISSING':0,'REVOKED':0}
+    observations=[]
     for row in rows:
         if row.revoked_at: status='REVOKED'; observed=None
         else:
@@ -103,11 +103,28 @@ def verify_execution_evidence(db,execution_id,actor_id):
                 with path.open('rb') as f:
                     for chunk in iter(lambda:f.read(1024*1024),b''): h.update(chunk)
                 observed=h.hexdigest(); status='PASS' if observed==row.sha256 else 'MISMATCH'
-        counts[status]+=1; _event(db,row,status,observed,actor_id,None if status=='PASS' else 'Arquivo não corresponde ao hash registrado.')
+        counts[status]+=1
+        observations.append((row,status,observed,None if status=='PASS' else 'Arquivo não corresponde ao hash registrado.'))
     items,mh=_manifest(db,execution_id)
-    ok=counts['MISMATCH']==0 and counts['MISSING']==0 and counts['REVOKED']==0
+    ok=bool(rows) and counts['MISMATCH']==0 and counts['MISSING']==0 and counts['REVOKED']==0
     if execution.evidence_manifest_hash!=mh: ok=False
-    return {'execution_id':execution_id,'checked':len(rows),'counts':counts,'manifest_hash':mh,'stored_manifest_hash':execution.evidence_manifest_hash,'valid':ok}
+    return {'execution_id':execution_id,'checked':len(rows),'counts':counts,'manifest_hash':mh,'stored_manifest_hash':execution.evidence_manifest_hash,'valid':ok}, observations
+
+def inspect_execution_evidence(db,execution_id):
+    """Inspect current evidence without recording verification events."""
+    result,_=_inspect_execution_evidence(db,execution_id)
+    return result
+
+def verify_execution_evidence(db,execution_id,actor_id):
+    """Record an actor-authorized verification of the current evidence."""
+    execution=db.get(ContinuousImprovementExecution,execution_id)
+    if not execution: raise ValueError('execution_not_found')
+    if not _eligible(db,actor_id): raise ValueError('actor_not_eligible')
+    result,observations=_inspect_execution_evidence(db,execution_id)
+    if not observations: raise ValueError('evidence_file_required')
+    for row,status,observed,details in observations:
+        _event(db,row,status,observed,actor_id,details)
+    return result
 
 def verify_chain(db):
     rows=db.query(ContinuousImprovementEvidenceIntegrityEvent).order_by(ContinuousImprovementEvidenceIntegrityEvent.id.asc()).all(); prev=None; failures=[]
