@@ -41,7 +41,8 @@ def setup(tmp_path, monkeypatch):
     monkeypatch.setenv("GOOGLE_DRIVE_FOLDER_ID", "1dXpu50BErONnQRPBdQ5ND1EUVAyRGsqU")
     monkeypatch.setenv("BACKUP_APPLICATION_COMMIT", "a" * 40)
     stage = tmp_path / "stage"
-    stage.mkdir()
+    stage.mkdir(mode=0o700)
+    stage.chmod(0o700)
     source_evidence = tmp_path / "source-evidence"
     source_evidence.mkdir()
     return stage, source_evidence, identity

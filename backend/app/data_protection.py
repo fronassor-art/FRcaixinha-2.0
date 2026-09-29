@@ -193,7 +193,8 @@ def create_backup(staging_root: Path, evidence_root: Path) -> Path:
     commit = os.environ.get("BACKUP_APPLICATION_COMMIT", "")
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
         raise BackupError("application_commit_missing")
-    if not staging_root.is_dir() or staging_root.is_symlink():
+    if (not staging_root.is_dir() or staging_root.is_symlink()
+            or staging_root.stat().st_mode & 0o077):
         raise BackupError("staging_root_invalid")
     backup_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex
     directory = staging_root / backup_id

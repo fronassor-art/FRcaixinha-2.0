@@ -83,3 +83,14 @@ def test_manifest_write_is_complete_json_and_does_not_include_secrets(tmp_path):
     assert json.loads(path.read_text()) == payload
     assert path.stat().st_mode & 0o077 == 0
     assert not (tmp_path / "manifest.tmp").exists()
+
+
+def test_backup_rejects_non_private_staging_before_database_access(monkeypatch, tmp_path):
+    staging = tmp_path / "shared"
+    staging.mkdir()
+    staging.chmod(0o755)
+    monkeypatch.setattr(protection, "_pg_env", lambda: {"PGDATABASE": "test"})
+    monkeypatch.setattr(protection, "_config", lambda: ("google_drive", "private-folder", "age1public"))
+    monkeypatch.setenv("BACKUP_APPLICATION_COMMIT", "a" * 40)
+    with pytest.raises(protection.BackupError, match="staging_root_invalid"):
+        protection.create_backup(staging, tmp_path)
