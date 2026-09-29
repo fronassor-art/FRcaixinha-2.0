@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
 import re
 
@@ -132,26 +133,17 @@ def test_daily_run_counter_does_not_call_claim_rejection_success():
 
 
 def test_worker_process_start_metric_is_process_local_and_restarts(monkeypatch):
-    from prometheus_client import generate_latest
     from app.worker import main as worker_main
 
     monkeypatch.setattr(worker_main.time, "time", lambda: 1_800_000_000)
     worker_main._set_worker_process_started_at()
-    first = generate_latest().decode()
-    assert re.search(
-        r"frcaixinha_worker_process_start_timestamp_seconds 1800000000(?:\.0+)?",
-        first,
-    )
+    assert worker_main.WORKER_PROCESS_START_TIMESTAMP._value.get() == 1_800_000_000
 
     # A new worker process records a new timestamp; a restart starts a fresh
     # first-success grace period by design.
     monkeypatch.setattr(worker_main.time, "time", lambda: 1_800_000_100)
     worker_main._set_worker_process_started_at()
-    restarted = generate_latest().decode()
-    assert re.search(
-        r"frcaixinha_worker_process_start_timestamp_seconds 1800000100(?:\.0+)?",
-        restarted,
-    )
+    assert worker_main.WORKER_PROCESS_START_TIMESTAMP._value.get() == 1_800_000_100
 
 
 def test_never_succeeded_rule_uses_daily_schedule_upper_bound_and_db_guard():
@@ -239,10 +231,15 @@ def test_runtime_smoke_trigger_covers_worker_runtime_dependencies():
 
 def test_dashboard_and_observability_docs_use_worker_process_heartbeat():
     root = Path(__file__).parents[2]
-    dashboard = (root / "ops/grafana/dashboard.json").read_text(encoding="utf-8")
+    dashboard = json.loads(
+        (root / "ops/grafana/dashboard.json").read_text(encoding="utf-8")
+    )
     docs = (root / "docs/v0.22-observability.md").read_text(encoding="utf-8")
 
-    assert 'frcaixinha_worker_heartbeat_timestamp_seconds{job="frcaixinha-worker"}' in dashboard
+    heartbeat_expr = dashboard["panels"][3]["targets"][0]["expr"]
+    assert heartbeat_expr == (
+        'time()-frcaixinha_worker_heartbeat_timestamp_seconds{job="frcaixinha-worker"}'
+    )
     assert "process-local" in docs
     assert "compartilhado via Redis" not in docs
 
