@@ -74,6 +74,13 @@ jobs:
           APP_ENV: test
         run: pytest -q tests/test_h4_c8_b3_a377b4r2r2b2f12b_postgresql_schema.py
 
+      - name: PostgreSQL durable cycle scheduler
+        env:
+          DATABASE_URL: postgresql+psycopg://frcaixinha_test:frcaixinha_test@127.0.0.1:5432/frcaixinha_test
+          JWT_SECRET: test-only-arm64-secret
+          APP_ENV: test
+        run: pytest -q tests/test_worker_cycle_scheduler.py
+
       - name: PostgreSQL contribution reservation
         env:
           DATABASE_URL: postgresql+psycopg://frcaixinha_test:frcaixinha_test@127.0.0.1:5432/frcaixinha_test

@@ -137,6 +137,32 @@ def claim_run(
     return False if row is None else _claim(row, lease_owner=lease_owner, now=now, lease_seconds=lease_seconds)
 
 
+def renew_run_lease(
+    db: Session,
+    run_id: int,
+    *,
+    lease_owner: str,
+    lease_seconds: int = 300,
+) -> datetime:
+    """Extend a still-valid run lease between unit transactions.
+
+    An expired lease cannot be revived. The caller owns the transaction and
+    must commit this renewal before starting the next unit.
+    """
+    row = _for_update(db.query(SchedulerRun).filter(SchedulerRun.id == run_id), db).one_or_none()
+    if row is None:
+        raise SchedulerLeaseLost("scheduler run no longer exists")
+    # A lock wait can cross the old expiry. Validate against a fresh clock
+    # after PostgreSQL grants the lock so renewal can never revive a lease
+    # that expired while waiting.
+    now = _utc(datetime.now(timezone.utc))
+    _assert_claim(row, lease_owner=lease_owner, now=now)
+    row.lease_expires_at = _lease_expiry(now, lease_seconds)
+    row.updated_at = now
+    db.flush()
+    return row.lease_expires_at
+
+
 def _assert_claim(row, *, lease_owner: str, now: datetime) -> None:
     if (
         row.status != "RUNNING"
@@ -283,13 +309,28 @@ def claim_unit(
     # Lock parent before unit, matching the run -> unit lock order used by
     # terminal transitions. The caller decides when this transaction commits.
     run = _for_update(db.query(SchedulerRun).filter(SchedulerRun.id == unit.run_id), db).one_or_none()
-    if run is None or run.status != "RUNNING" or run.lease_expires_at is None:
+    if (
+        run is None
+        or run.status != "RUNNING"
+        or run.lease_owner != _owner(lease_owner)
+        or run.lease_expires_at is None
+    ):
         return False
     if _as_utc(run.lease_expires_at) <= now:
         return False
     locked_unit = _for_update(
         db.query(SchedulerRunUnit).filter(SchedulerRunUnit.id == unit_id), db
     ).one_or_none()
+    if (
+        locked_unit is not None
+        and locked_unit.status == "RUNNING"
+        and locked_unit.lease_owner != lease_owner
+    ):
+        # A reclaimed parent fences its former worker immediately. That
+        # worker cannot still hold the RUN lock here: claim_run had to acquire
+        # it before transferring ownership. Reclaim the orphaned unit lease
+        # even when its own timestamp has not elapsed yet.
+        locked_unit.lease_expires_at = now
     return False if locked_unit is None else _claim(
         locked_unit, lease_owner=lease_owner, now=now, lease_seconds=lease_seconds
     )
@@ -310,6 +351,38 @@ def _locked_unit(db: Session, unit_id: int, *, lease_owner: str, now: datetime) 
     return row
 
 
+def lock_unit_for_execution(
+    db: Session,
+    unit_id: int,
+    *,
+    lease_owner: str,
+) -> datetime:
+    """Lock RUN then UNIT and validate both leases before unit effects.
+
+    Callers must keep this Session transaction open through the effects and
+    terminal unit transition. PostgreSQL locks prevent reclaim until commit.
+    """
+    unit = db.get(SchedulerRunUnit, unit_id)
+    if unit is None:
+        raise SchedulerLeaseLost("scheduler unit no longer exists")
+    run = _for_update(
+        db.query(SchedulerRun).filter(SchedulerRun.id == unit.run_id), db
+    ).one_or_none()
+    if run is None:
+        raise SchedulerLeaseLost("scheduler run no longer exists")
+    row = _for_update(
+        db.query(SchedulerRunUnit).filter(SchedulerRunUnit.id == unit_id), db
+    ).one_or_none()
+    if row is None:
+        raise SchedulerLeaseLost("scheduler unit no longer exists")
+    # Validate only after both locks are acquired; a waiter may have crossed
+    # either lease boundary before PostgreSQL granted its locks.
+    validated_at = _utc(datetime.now(timezone.utc))
+    _assert_claim(run, lease_owner=lease_owner, now=validated_at)
+    _assert_claim(row, lease_owner=lease_owner, now=validated_at)
+    return validated_at
+
+
 def mark_unit_succeeded(
     db: Session,
     unit_id: int,
@@ -319,6 +392,32 @@ def mark_unit_succeeded(
 ) -> SchedulerRunUnit:
     now = _utc(completed_at)
     row = _locked_unit(db, unit_id, lease_owner=lease_owner, now=now)
+    row.status = "SUCCEEDED"
+    row.lease_owner = None
+    row.lease_expires_at = None
+    row.completed_at = now
+    row.last_error = None
+    row.updated_at = now
+    db.flush()
+    return row
+
+
+def mark_unit_succeeded_after_locked_execution(
+    db: Session,
+    unit_id: int,
+    *,
+    lease_owner: str,
+    lease_validated_at: datetime,
+    completed_at: datetime | None = None,
+) -> SchedulerRunUnit:
+    """Complete a unit after lock_unit_for_execution in the same transaction.
+
+    The validated lease may expire while effects run; retained RUN/UNIT locks
+    fence reclaim until the effects and SUCCEEDED checkpoint commit together.
+    """
+    validated_at = _utc(lease_validated_at)
+    now = _utc(completed_at)
+    row = _locked_unit(db, unit_id, lease_owner=lease_owner, now=validated_at)
     row.status = "SUCCEEDED"
     row.lease_owner = None
     row.lease_expires_at = None
