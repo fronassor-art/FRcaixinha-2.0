@@ -1,9 +1,18 @@
 import logging, time
 from datetime import datetime, timezone
+from sqlalchemy.exc import DBAPIError
+from prometheus_client import start_http_server
 from app.core.config import settings
 from app.core.logging_config import configure_logging
 from app.worker.tasks import run_daily_tasks, run_cycle_participation_tasks
-from app.core.metrics import WORKER_HEARTBEAT, WORKER_RUNS
+from app.core.metrics import (
+    WORKER_DISPATCH_ATTEMPTS,
+    WORKER_DISPATCH_SKIPPED,
+    WORKER_HEARTBEAT,
+    WORKER_POSTGRES_FAILURES,
+    WORKER_REDIS_FAIL_OPEN,
+    WORKER_RUNS,
+)
 
 configure_logging()
 log = logging.getLogger("worker")
@@ -39,9 +48,15 @@ def _acquire_slot_lock(job_key: str, scheduled_for: datetime) -> bool:
         # are allowed to defer slot ownership to PostgreSQL.
         if type(exc) not in (exceptions.ConnectionError, exceptions.TimeoutError):
             raise
+        metric_job_key = (
+            "worker_daily_tasks"
+            if job_key == "daily"
+            else "worker_cycle_participation_daily"
+        )
+        WORKER_REDIS_FAIL_OPEN.labels(metric_job_key).inc()
         log.warning(
             "redis_lock_unavailable job=%s slot=%s error_type=%s",
-            "worker_daily_tasks" if job_key == "daily" else "worker_cycle_participation_daily",
+            metric_job_key,
             scheduled_for.isoformat(),
             type(exc).__name__,
         )
@@ -59,6 +74,24 @@ def acquire_cycle_lock(scheduled_for: datetime | None = None) -> bool:
     return _acquire_slot_lock("cycle-daily", scheduled_for)
 
 
+def _record_daily_result(result: dict) -> None:
+    if result.get("executed") is True and result.get("scheduler_run") == "SUCCEEDED":
+        WORKER_RUNS.labels("success").inc()
+    else:
+        WORKER_RUNS.labels("claim_rejected").inc()
+
+
+def _record_task_failure(job_key: str, exc: Exception) -> None:
+    WORKER_RUNS.labels("failure").inc()
+    if isinstance(exc, DBAPIError):
+        WORKER_POSTGRES_FAILURES.labels(job_key).inc()
+
+
+def _start_metrics_server() -> None:
+    # Internal container port only; Compose does not publish it on the host.
+    start_http_server(8001, addr="0.0.0.0")
+
+
 def main():
     while True:
         WORKER_HEARTBEAT.set(time.time())
@@ -69,18 +102,36 @@ def main():
                 log.exception("worker_heartbeat_failed")
         scheduled_for = datetime.now(timezone.utc)
         # Run once shortly after 00:05 UTC; lock makes it single-run across replicas.
-        if scheduled_for.hour == 0 and scheduled_for.minute == 5 and acquire_daily_lock(scheduled_for):
+        if scheduled_for.hour == 0 and scheduled_for.minute == 5:
             try:
-                run_daily_tasks(scheduled_for=scheduled_for); WORKER_RUNS.labels("success").inc()
-            except Exception:
-                WORKER_RUNS.labels("failure").inc(); log.exception("scheduled_task_failed")
+                if acquire_daily_lock(scheduled_for):
+                    WORKER_DISPATCH_ATTEMPTS.labels("worker_daily_tasks").inc()
+                    _record_daily_result(run_daily_tasks(scheduled_for=scheduled_for))
+                else:
+                    WORKER_DISPATCH_SKIPPED.labels(
+                        "worker_daily_tasks", "redis_lock_occupied"
+                    ).inc()
+            except Exception as exc:
+                _record_task_failure("worker_daily_tasks", exc)
+                log.exception("scheduled_task_failed")
         # 04:05 UTC is 01:05 in America/Belem, after the financial day changes.
-        if scheduled_for.hour == 4 and scheduled_for.minute == 5 and acquire_cycle_lock(scheduled_for):
+        if scheduled_for.hour == 4 and scheduled_for.minute == 5:
             try:
-                result = run_cycle_participation_tasks(scheduled_for=scheduled_for)
-                log.info("cycle_participation_tasks_completed %s", result)
-            except Exception:
+                if acquire_cycle_lock(scheduled_for):
+                    WORKER_DISPATCH_ATTEMPTS.labels(
+                        "worker_cycle_participation_daily"
+                    ).inc()
+                    result = run_cycle_participation_tasks(scheduled_for=scheduled_for)
+                    log.info("cycle_participation_tasks_completed %s", result)
+                else:
+                    WORKER_DISPATCH_SKIPPED.labels(
+                        "worker_cycle_participation_daily", "redis_lock_occupied"
+                    ).inc()
+            except Exception as exc:
+                _record_task_failure("worker_cycle_participation_daily", exc)
                 log.exception("cycle_participation_tasks_failed")
         time.sleep(30)
 
-if __name__ == "__main__": main()
+if __name__ == "__main__":
+    _start_metrics_server()
+    main()

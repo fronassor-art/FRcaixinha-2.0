@@ -129,6 +129,8 @@ jobs:
               assert "alembic" not in str(services[name].get("entrypoint", "")).lower()
           assert services["worker"]["environment"]["REDIS_URL_FILE"] == "/run/secrets/redis_url"
           assert services["worker"]["command"] == ["python", "-m", "app.worker.main"]
+          assert services["worker"].get("expose") == ["8001"]
+          assert set(services["worker"]["depends_on"]) == {"postgres"}
           assert "REDIS_URL_FILE" not in services["web"]["environment"]
           redis_conf = Path("ops/oci-a1/redis.conf").read_text(encoding="utf-8")
           assert re.search(r"(?m)^bind 0\.0\.0\.0$", redis_conf)
