@@ -237,6 +237,9 @@ def test_stale_owner_reclaimed_before_execution_cannot_write_effect(monkeypatch,
                 other, run_id, lease_owner="worker-b", now=now, lease_seconds=300
             )
             other.commit()
+        # SQLite has no SELECT FOR UPDATE/refresh behavior; force this
+        # simulator session to read the reclaimed owner from the database.
+        db.expire_all()
         return lock_execution(db, run_id, lease_owner=lease_owner)
 
     monkeypatch.setattr(tasks, "lock_run_for_execution", reclaim_before_lock)
