@@ -1,5 +1,6 @@
 """Real PostgreSQL 16 and age contracts; CI supplies only synthetic credentials."""
 
+import hashlib
 import json
 import os
 import shutil
@@ -150,3 +151,66 @@ def test_archive_corruption_and_truncation_rejected_before_restore(setup, tmp_pa
     finally:
         with protection._pg_connect({**protection._pg_env(), "PGDATABASE": "frcaixinha_test"}) as conn:
             conn.execute(f"DROP DATABASE {restore_db} WITH (FORCE)")
+
+
+def test_referenced_evidence_round_trip_with_real_database(setup, tmp_path, monkeypatch):
+    stage, source_evidence, identity = setup
+    source_db = os.environ["PGDATABASE"]
+    user_id = task_id = evidence_id = file_id = None
+    restore_db = None
+    try:
+        with protection._pg_connect(protection._pg_env()) as conn:
+            token = uuid.uuid4().hex
+            user_id = conn.execute(
+                "INSERT INTO users(name,email,cpf,password_hash,role,is_active,is_master,created_at) "
+                "VALUES (%s,%s,%s,%s,'ADMIN',true,false,now()) RETURNING id",
+                ("CI evidence", f"evidence-{token}@example.invalid", token[:11], "test-only"),
+            ).fetchone()[0]
+            task_id = conn.execute(
+                "INSERT INTO operational_workflow_tasks(action_code,status,priority,created_by,created_at,updated_at,sla_status,escalation_level) "
+                "VALUES ('CI_BACKUP','PENDING','MEDIUM',%s,now(),now(),'ON_TRACK','NONE') RETURNING id",
+                (user_id,),
+            ).fetchone()[0]
+            evidence_id = conn.execute(
+                "INSERT INTO workflow_execution_evidence(task_id,added_by,evidence_type,content,content_hash,created_at) "
+                "VALUES (%s,%s,'ATTACHMENT','synthetic',%s,now()) RETURNING id",
+                (task_id, user_id, hashlib.sha256(b"synthetic").hexdigest()),
+            ).fetchone()[0]
+            payload = b"synthetic CI evidence only"
+            key = f"{task_id}/{token}.bin"
+            file_id = conn.execute(
+                "INSERT INTO workflow_execution_evidence_files(evidence_id,version,original_name,storage_key,content_type,size_bytes,sha256,uploaded_by,created_at) "
+                "VALUES (%s,1,'test.txt',%s,'text/plain',%s,%s,%s,now()) RETURNING id",
+                (evidence_id, key, len(payload), hashlib.sha256(payload).hexdigest(), user_id),
+            ).fetchone()[0]
+        source_path = source_evidence / key
+        source_path.parent.mkdir()
+        source_path.write_bytes(payload)
+        directory = protection.create_backup(stage, source_evidence)
+        assert _manifest(directory)["evidence_file_count"] == 1
+        restore_db = "frcaixinha_restore_" + uuid.uuid4().hex[:12]
+        with protection._pg_connect(protection._pg_env()) as conn:
+            conn.execute(f"CREATE DATABASE {restore_db}")
+        monkeypatch.setenv("PGDATABASE", restore_db)
+        monkeypatch.setenv("FRCAIXINHA_ISOLATED_RESTORE", "YES")
+        monkeypatch.setenv("APP_ENV", "test")
+        target_root = tmp_path / "restored-evidence"
+        target_root.mkdir()
+        result = protection.restore_isolated(directory, target_root, identity)
+        assert result["evidence_files"] == 1
+        assert (target_root / key).read_bytes() == payload
+        with protection._pg_connect(protection._pg_env()) as conn:
+            assert conn.execute("SELECT sha256 FROM workflow_execution_evidence_files WHERE id=%s", (file_id,)).fetchone()[0] == hashlib.sha256(payload).hexdigest()
+    finally:
+        monkeypatch.setenv("PGDATABASE", source_db)
+        with protection._pg_connect(protection._pg_env()) as conn:
+            if restore_db is not None:
+                conn.execute(f"DROP DATABASE {restore_db} WITH (FORCE)")
+            if file_id is not None:
+                conn.execute("DELETE FROM workflow_execution_evidence_files WHERE id=%s", (file_id,))
+            if evidence_id is not None:
+                conn.execute("DELETE FROM workflow_execution_evidence WHERE id=%s", (evidence_id,))
+            if task_id is not None:
+                conn.execute("DELETE FROM operational_workflow_tasks WHERE id=%s", (task_id,))
+            if user_id is not None:
+                conn.execute("DELETE FROM users WHERE id=%s", (user_id,))
