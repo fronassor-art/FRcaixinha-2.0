@@ -12,10 +12,11 @@ contract and must not be treated as production data protection.
 `GOOGLE_DRIVE_FOLDER_ID=1dXpu50BErONnQRPBdQ5ND1EUVAyRGsqU` identify the
 approved future destination. A folder ID is not a credential. This package
 implements only the `OffVmDestination` interface; it performs **no Google
-authentication, upload, download or retention**. Phase B must determine how
-the approved private folder will be accessed, and test resumable upload,
-idempotent retry, returned file ID, remote size/checksum, download and
-controlled listing. It must not make the folder public.
+authentication, upload, download or retention**. Phase B transport and OAuth
+bootstrap are described in the Phase B guide. No live authorization or
+provider request is implied by the Phase A local capabilities.
+[See the Phase B Google Drive transport guide](oci-data-protection-phase-b.md)
+for the approved provider boundary and operational setup.
 
 ## Local package and credentials
 
