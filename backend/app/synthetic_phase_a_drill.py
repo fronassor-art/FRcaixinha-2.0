@@ -90,13 +90,22 @@ def _preflight(env: dict[str, str], *, database: str, user: str, port: int,
     if (not passfile.is_file() or passfile.is_symlink()
             or passfile.stat().st_mode & 0o077):
         raise DrillError("synthetic_passfile_invalid")
-    with psycopg.connect(host="127.0.0.1", port=port, user=user, dbname=database,
-                         passfile=str(passfile), autocommit=True,
-                         connect_timeout=5) as conn:
-        version, actual_db, actual_user, system_id = conn.execute(
-            "SELECT current_setting('server_version_num'), current_database(), "
-            "current_user, system_identifier FROM pg_control_system()"
-        ).fetchone()
+    try:
+        conn = psycopg.connect(host="127.0.0.1", port=port, user=user, dbname=database,
+                               passfile=str(passfile), autocommit=True,
+                               connect_timeout=5)
+    except psycopg.Error as exc:
+        code = exc.sqlstate or type(exc).__name__
+        raise DrillError(f"synthetic_database_connect_failed:{code}") from None
+    try:
+        with conn:
+            version, actual_db, actual_user, system_id = conn.execute(
+                "SELECT current_setting('server_version_num'), current_database(), "
+                "current_user, system_identifier FROM pg_control_system()"
+            ).fetchone()
+    except psycopg.Error as exc:
+        code = exc.sqlstate or type(exc).__name__
+        raise DrillError(f"synthetic_database_identity_query_failed:{code}") from None
     if (int(version) // 10000 != 16 or actual_db != database or actual_user != user
             or str(system_id) != _docker_identity(container_id, user, database,
                                                    env=docker_env)):
