@@ -144,10 +144,16 @@ def _remote_metadata(path: Path, folder_id: str, backup_id: str) -> dict:
     }
 
 
+def _project_drive_fields(metadata: dict, fields: str) -> dict:
+    """Model Drive's top-level fields selection for upload/PATCH responses."""
+    selected = set(fields.split(","))
+    return {key: value for key, value in metadata.items() if key in selected}
+
+
 def _mock_drive(path: Path, folder_id: str, backup_id: str, *, ambiguous=False,
                 initial_503=False):
     remote = _remote_metadata(path, folder_id, backup_id)
-    state = {"chunks": 0, "deleted": False, "requests": []}
+    state = {"chunks": 0, "deleted": False, "requests": [], "upload_fields": ""}
 
     def handler(request: httpx.Request):
         state["requests"].append(request)
@@ -158,6 +164,7 @@ def _mock_drive(path: Path, folder_id: str, backup_id: str, *, ambiguous=False,
             return httpx.Response(200, json={"id": folder_id, "mimeType": transport.FOLDER_MIME_TYPE,
                                              "capabilities": {"canAddChildren": True}, "trashed": False})
         if request.method == "POST" and request.url.path.endswith("/files"):
+            state["upload_fields"] = request.url.params.get("fields", "")
             return httpx.Response(200, headers={"Location": "https://www.googleapis.com/resumable/test"})
         if request.method == "PUT" and request.url.path.endswith("/resumable/test"):
             state["chunks"] += 1
@@ -169,11 +176,12 @@ def _mock_drive(path: Path, folder_id: str, backup_id: str, *, ambiguous=False,
                 return httpx.Response(308, headers={"Range": "bytes=0-4"})
             if ambiguous:
                 return httpx.Response(201, content=b"")
-            return httpx.Response(201, json=remote)
+            return httpx.Response(201, json=_project_drive_fields(remote, state["upload_fields"]))
         if request.method == "PATCH" and request.url.path.endswith("/files/drive-file-1"):
             payload = json.loads(request.content)
             remote["appProperties"] = payload["appProperties"]
-            return httpx.Response(200, json=remote)
+            return httpx.Response(200, json=_project_drive_fields(
+                remote, request.url.params.get("fields", "")))
         if (request.method == "GET" and request.url.path.endswith("/files/drive-file-1")
                 and not request.url.params.get("alt")):
             return httpx.Response(200, json=remote)
@@ -201,9 +209,50 @@ def test_google_upload_resumable_reconciles_and_marks_receipt_verified(tmp_path)
     assert envelope_info["sha256"] == remote["appProperties"]["local_sha256"]
     assert destination.upload_resumable(backup_id, envelope_path) == "drive-file-1"
     assert sum(request.method == "POST" for request in state["requests"]) == 1
+    upload_request = next(request for request in state["requests"] if request.method == "POST")
+    patch_requests = [request for request in state["requests"] if request.method == "PATCH"]
+    assert "mimeType" in upload_request.url.params["fields"].split(",")
+    assert patch_requests
+    assert all("mimeType" in request.url.params["fields"].split(",")
+               for request in patch_requests)
     assert all("/permissions" not in request.url.path for request in state["requests"])
     assert all(request.headers.get("Authorization") == "Bearer test-token"
                for request in state["requests"] if request.url.path.endswith("/files"))
+
+
+def test_mark_remote_verified_requires_mime_type_in_patch_response(tmp_path):
+    package = _package(tmp_path)
+    work = tmp_path / "work"
+    work.mkdir(mode=0o700)
+    envelope = work / "upload.tar"
+    transport.create_envelope(package, envelope)
+    client, state, remote = _mock_drive(envelope, "approved-folder", package.name)
+    destination = transport.GoogleDriveDestination("approved-folder", _Credentials(),
+                                                    client=client, sleep=lambda _: None)
+    expected = {"backup_id": package.name, "size": envelope.stat().st_size,
+                "sha256": transport._sha256(envelope), "md5": transport._md5(envelope)}
+    assert destination._mark_remote_verified(remote, expected)["mimeType"] == "application/x-tar"
+    patch_request = next(request for request in state["requests"] if request.method == "PATCH")
+    assert "mimeType" in patch_request.url.params["fields"].split(",")
+
+
+@pytest.mark.parametrize("mime_type", [None, "application/octet-stream"])
+def test_remote_verification_rejects_missing_or_wrong_mime_type(tmp_path, mime_type):
+    package = _package(tmp_path)
+    work = tmp_path / "work"
+    work.mkdir(mode=0o700)
+    envelope = work / "upload.tar"
+    transport.create_envelope(package, envelope)
+    metadata = _remote_metadata(envelope, "approved-folder", package.name)
+    if mime_type is None:
+        del metadata["mimeType"]
+    else:
+        metadata["mimeType"] = mime_type
+    expected = {"backup_id": package.name, "size": envelope.stat().st_size,
+                "sha256": transport._sha256(envelope), "md5": transport._md5(envelope)}
+    with pytest.raises(transport.DriveBackupError, match="drive_remote_verification_failed"):
+        transport.GoogleDriveDestination("approved-folder", _Credentials())._verify_remote(
+            metadata, expected)
 
 
 def test_ambiguous_upload_response_reconciles_before_retrying(tmp_path):

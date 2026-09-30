@@ -657,7 +657,7 @@ class GoogleDriveDestination:
         properties["verification_status"] = "VERIFIED"
         result = self._json_request(
             "PATCH", f"{DRIVE_API}/files/{urllib.parse.quote(metadata['id'], safe='')}",
-            params={"fields": "id,name,size,md5Checksum,parents,appProperties,createdTime,trashed"},
+            params={"fields": "id,name,mimeType,size,md5Checksum,parents,appProperties,createdTime,trashed"},
             json={"appProperties": properties},
         )
         return self._verify_remote(result, expected)
@@ -694,7 +694,7 @@ class GoogleDriveDestination:
                         _APP_MARKER: backup_id, "local_sha256": expected["sha256"],
                         "local_size": str(size), "marker": "v1",
                     }}
-        init_url = f"{DRIVE_UPLOAD_API}/files?uploadType=resumable&fields=id,name,size,md5Checksum,parents,appProperties,createdTime,trashed"
+        init_url = f"{DRIVE_UPLOAD_API}/files?uploadType=resumable&fields=id,name,mimeType,size,md5Checksum,parents,appProperties,createdTime,trashed"
         init = self._request_with_retry("POST", init_url, headers={
             **self._headers(content_type="application/json; charset=UTF-8"),
             "X-Upload-Content-Type": "application/x-tar", "X-Upload-Content-Length": str(size),
