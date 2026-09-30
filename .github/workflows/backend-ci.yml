@@ -104,6 +104,6 @@ jobs:
           go install filippo.io/age/cmd/age-keygen@v1.2.1
           echo "$GOBIN" >> "$GITHUB_PATH"
       - run: pip install -r requirements.txt
-      - run: python -m compileall app/data_protection.py tests/test_data_protection_core.py tests/test_data_protection_postgresql.py
+      - run: python -m compileall app/data_protection.py app/backup_transport.py tests/test_data_protection_core.py tests/test_data_protection_postgresql.py tests/test_backup_transport.py
       - run: alembic upgrade head
-      - run: pytest -q tests/test_data_protection_core.py tests/test_data_protection_postgresql.py
+      - run: pytest -q tests/test_data_protection_core.py tests/test_data_protection_postgresql.py tests/test_backup_transport.py

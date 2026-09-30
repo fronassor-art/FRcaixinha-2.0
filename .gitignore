@@ -86,6 +86,9 @@ screenshots/
 
 # Runtime production secrets
 secrets/
+client_secret*.json
+*google-oauth-client*.json
+*google-drive-token*.json
 
 # Local backup/temp artifacts
 *.bak

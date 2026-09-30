@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from app import data_protection as protection
+from app import backup_transport, data_protection as protection
 
 psycopg = pytest.importorskip("psycopg")
 
@@ -190,6 +190,14 @@ def test_referenced_evidence_round_trip_with_real_database(setup, tmp_path, monk
         source_path.write_bytes(payload)
         directory = protection.create_backup(stage, source_evidence)
         assert _manifest(directory)["evidence_file_count"] == 1
+        transport_root = tmp_path / "transport"
+        transport_root.mkdir(mode=0o700)
+        envelope = transport_root / f"{directory.name}.frcaixinha.tar"
+        envelope_meta = backup_transport.create_envelope(directory, envelope)
+        extracted = transport_root / "extracted"
+        backup_transport.extract_envelope(
+            envelope, extracted, expected_sha256=envelope_meta["sha256"]
+        )
         restore_db = "frcaixinha_restore_" + uuid.uuid4().hex[:12]
         with protection._pg_connect(protection._pg_env()) as conn:
             conn.execute(f"CREATE DATABASE {restore_db}")
@@ -199,7 +207,7 @@ def test_referenced_evidence_round_trip_with_real_database(setup, tmp_path, monk
         target_root = tmp_path / "restored-evidence"
         target_root.mkdir(mode=0o700)
         target_root.chmod(0o700)
-        result = protection.restore_isolated(directory, target_root, identity)
+        result = protection.restore_isolated(extracted, target_root, identity)
         assert result["evidence_files"] == 1
         assert (target_root / key).read_bytes() == payload
         assert (target_root / key).stat().st_mode & 0o077 == 0

@@ -129,7 +129,7 @@ jobs:
           DATABASE_URL: postgresql+psycopg://frcaixinha_test:frcaixinha_test@127.0.0.1:5432/frcaixinha_test
           JWT_SECRET: test-only-arm64-secret
           APP_ENV: test
-        run: pytest -q tests/test_data_protection_core.py tests/test_data_protection_postgresql.py
+        run: pytest -q tests/test_data_protection_core.py tests/test_data_protection_postgresql.py tests/test_backup_transport.py
 
       - name: Build backend image natively for ARM64
         run: |
