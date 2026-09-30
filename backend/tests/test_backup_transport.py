@@ -1,6 +1,7 @@
 """Deterministic tests for the portable envelope and mocked Drive transport."""
 
 import hashlib
+import io
 import json
 import os
 import sys
@@ -357,8 +358,17 @@ def test_oauth_config_is_desktop_only_private_and_scope_save_rejects_broad(tmp_p
         transport._save_credentials(Credentials(), private_dir / "token.json")
 
 
+@pytest.mark.parametrize(
+    ("browser_opens", "interactive_terminal", "callback_arrives"),
+    [
+        pytest.param(True, True, True, id="automatic-browser"),
+        pytest.param(False, True, True, id="manual-browser-fallback"),
+        pytest.param(False, True, False, id="manual-browser-timeout"),
+        pytest.param(False, False, False, id="noninteractive-no-url"),
+    ],
+)
 def test_oauth_bootstrap_uses_pkce_drive_file_offline_picker_and_private_token(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, browser_opens, interactive_terminal, callback_arrives):
     config = tmp_path / "google-oauth-client.json"
     config.write_text(json.dumps({"installed": {"client_id": "client-id",
                                                 "client_secret": "not-a-real-secret"}}))
@@ -367,6 +377,13 @@ def test_oauth_bootstrap_uses_pkce_drive_file_offline_picker_and_private_token(
     token.parent.mkdir(mode=0o700)
     token.parent.chmod(0o700)
     state = {}
+
+    class TerminalOutput(io.StringIO):
+        def isatty(self):
+            return interactive_terminal
+
+    terminal = TerminalOutput()
+    monkeypatch.setattr(transport.sys, "stdout", terminal)
 
     class FakeCredentials:
         scopes = [transport.DRIVE_FILE_SCOPE]
@@ -390,10 +407,13 @@ def test_oauth_bootstrap_uses_pkce_drive_file_offline_picker_and_private_token(
         def authorization_url(self, **kwargs):
             state["auth_args"] = kwargs
             state["state"] = kwargs["state"]
-            return "https://accounts.google.com/o/oauth2/v2/auth?scope=" + urllib.parse.quote(
-                transport.DRIVE_FILE_SCOPE), kwargs["state"]
+            auth_url = "https://accounts.google.com/o/oauth2/v2/auth?scope=" + urllib.parse.quote(
+                transport.DRIVE_FILE_SCOPE)
+            state["auth_url"] = auth_url
+            return auth_url, kwargs["state"]
 
         def fetch_token(self, *, code):
+            assert not token.exists()
             state["code"] = code
 
     google_oauth = types.ModuleType("google_auth_oauthlib")
@@ -402,7 +422,12 @@ def test_oauth_bootstrap_uses_pkce_drive_file_offline_picker_and_private_token(
     flow_module.InstalledAppFlow = FakeFlow
     monkeypatch.setitem(sys.modules, "google_auth_oauthlib", google_oauth)
     monkeypatch.setitem(sys.modules, "google_auth_oauthlib.flow", flow_module)
-    monkeypatch.setattr(transport.GoogleDriveDestination, "verify_folder", lambda self: {"id": self.folder_id})
+
+    def verify_folder(client):
+        assert not token.exists()
+        return {"id": client.folder_id}
+
+    monkeypatch.setattr(transport.GoogleDriveDestination, "verify_folder", verify_folder)
 
     def open_picker(url):
         args = state["auth_args"]
@@ -422,19 +447,41 @@ def test_oauth_bootstrap_uses_pkce_drive_file_offline_picker_and_private_token(
             })
             urllib.request.urlopen(callback.redirect_uri + "?" + query, timeout=3).read()
 
-        thread = threading.Thread(target=respond)
-        thread.start()
-        state["thread"] = thread
-        return True
+        if callback_arrives:
+            thread = threading.Thread(target=respond)
+            thread.start()
+            state["thread"] = thread
+        return browser_opens
 
-    result = transport.bootstrap_oauth(config, token, "approved-folder",
-                                       opener=open_picker, timeout=4)
-    state["thread"].join(timeout=4)
-    assert state["code"] == "synthetic-code"
-    assert result["status"] == "OAUTH_READY"
-    assert token.stat().st_mode & 0o077 == 0
-    assert "fake-access" not in json.dumps(result)
-    assert "fake-refresh" not in json.dumps(result)
+    if callback_arrives:
+        result = transport.bootstrap_oauth(config, token, "approved-folder",
+                                           opener=open_picker, timeout=4)
+        state["thread"].join(timeout=4)
+        assert state["code"] == "synthetic-code"
+        assert result["status"] == "OAUTH_READY"
+        assert token.stat().st_mode & 0o077 == 0
+        assert "fake-access" not in json.dumps(result)
+        assert "fake-refresh" not in json.dumps(result)
+        assert "synthetic-code" not in token.read_text(encoding="utf-8")
+    else:
+        error = (
+            "oauth_browser_open_failed"
+            if not interactive_terminal
+            else "oauth_authorization_incomplete"
+        )
+        with pytest.raises(transport.DriveBackupError, match=error):
+            transport.bootstrap_oauth(config, token, "approved-folder",
+                                      opener=open_picker, timeout=0.05)
+        assert not token.exists()
+
+    output = terminal.getvalue()
+    if not browser_opens and interactive_terminal:
+        assert "Open this authorization URL manually" in output
+        assert state["auth_url"] in output
+    else:
+        assert state.get("auth_url", "") not in output
+    for secret_or_code in ("not-a-real-secret", "fake-access", "fake-refresh", "synthetic-code"):
+        assert secret_or_code not in output
 
 
 def test_refresh_persists_rotated_token_privately(tmp_path, monkeypatch):

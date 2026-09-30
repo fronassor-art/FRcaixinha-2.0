@@ -17,6 +17,7 @@ import re
 import secrets
 import shutil
 import stat
+import sys
 import tarfile
 import time
 import urllib.parse
@@ -450,8 +451,11 @@ def bootstrap_oauth(client_config: Path, token_path: Path, folder_id: str,
         server.server_close()
         raise DriveBackupError("oauth_state_setup_failed")
     if not opener(auth_url):
-        server.server_close()
-        raise DriveBackupError("oauth_browser_open_failed")
+        if not sys.stdout.isatty():
+            server.server_close()
+            raise DriveBackupError("oauth_browser_open_failed")
+        print("Automatic browser opening failed. Open this authorization URL manually in your browser:")
+        print(auth_url)
     deadline = time.monotonic() + timeout
     try:
         while "query" not in received and time.monotonic() < deadline:
