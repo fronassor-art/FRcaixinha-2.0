@@ -95,3 +95,22 @@ def test_package_and_identity_roots_must_be_private_and_outside_repo(tmp_path):
         drill._private_root(private)
     with pytest.raises(drill.DrillError, match="private_output_root_invalid"):
         drill._private_root(Path(drill.REPOSITORY))
+
+
+def test_drill_failure_reports_safe_phase_without_exception_text(tmp_path, monkeypatch):
+    package_root = tmp_path / "packages"
+    identity_root = tmp_path / "identity"
+    package_root.mkdir(mode=0o700)
+    identity_root.mkdir(mode=0o700)
+    monkeypatch.setattr(drill.DOCKER_SOCKET, "is_socket", lambda: True)
+    monkeypatch.setattr(drill, "_assert_tools", lambda env: "age 1.2.1")
+    monkeypatch.setattr(
+        drill, "_docker",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("secret-password")),
+    )
+
+    with pytest.raises(drill.DrillError) as failure:
+        drill.run_drill(package_root, identity_root)
+
+    assert str(failure.value) == "container_start:RuntimeError"
+    assert "secret-password" not in str(failure.value)

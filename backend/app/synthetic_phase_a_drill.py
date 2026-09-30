@@ -189,6 +189,7 @@ def run_drill(package_root: Path, identity_root: Path) -> dict:
     identity = identity_root / f".identity-{nonce}.tmp"
     container_id = ""
     complete = False
+    phase = "container_start"
     try:
         with tempfile.TemporaryDirectory(prefix="frcaixinha-synthetic-") as temporary:
             work = Path(temporary)
@@ -205,6 +206,7 @@ def run_drill(package_root: Path, identity_root: Path) -> dict:
                                     "--publish", "127.0.0.1::5432",
                                     "--env", "POSTGRES_USER", "--env", "POSTGRES_PASSWORD",
                                     "--env", "POSTGRES_DB", IMAGE], env=docker_env)
+            phase = "container_identity"
             inspected = json.loads(_docker(["inspect", container_id], env=docker_env))[0]
             ports = inspected["NetworkSettings"]["Ports"]["5432/tcp"]
             if (inspected["Id"] != container_id or inspected["Config"]["Image"] != IMAGE
@@ -214,6 +216,7 @@ def run_drill(package_root: Path, identity_root: Path) -> dict:
             port = int(ports[0]["HostPort"])
             if not 1024 <= port <= 65535:
                 raise DrillError("synthetic_container_port_invalid")
+            phase = "postgres_startup"
             for _ in range(60):
                 try:
                     _docker(["exec", container_id, "pg_isready", "-U", user, "-d", source_db],
@@ -223,6 +226,7 @@ def run_drill(package_root: Path, identity_root: Path) -> dict:
                     time.sleep(1)
             else:
                 raise DrillError("synthetic_postgres_not_ready")
+            phase = "database_preflight"
             passfile = work / "pgpass"
             passfile.write_text(f"127.0.0.1:{port}:*:{user}:{password}\n")
             passfile.chmod(0o600)
@@ -230,6 +234,7 @@ def run_drill(package_root: Path, identity_root: Path) -> dict:
                                      passfile=passfile)
             system_id = _preflight(source_env, database=source_db, user=user, port=port,
                                    container_id=container_id, docker_env=docker_env, restore=False)
+            phase = "age_identity"
             _command(["age-keygen", "-o", str(identity)], env=base)
             identity.chmod(0o600)
             recipient = _command(["age-keygen", "-y", str(identity)], env=base)
@@ -243,6 +248,7 @@ def run_drill(package_root: Path, identity_root: Path) -> dict:
             alembic_config.chmod(0o600)
             _preflight(source_env, database=source_db, user=user, port=port,
                        container_id=container_id, docker_env=docker_env, restore=False)
+            phase = "alembic_upgrade"
             _command([sys.executable, "-m", "alembic", "-c", str(alembic_config),
                       "upgrade", "head"], env=source_env, cwd=work)
             with psycopg.connect(host="127.0.0.1", port=port, user=user,
@@ -250,6 +256,7 @@ def run_drill(package_root: Path, identity_root: Path) -> dict:
                 head = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
             if head != data_protection.EXPECTED_HEAD:
                 raise DrillError("synthetic_alembic_head_invalid")
+            phase = "synthetic_evidence"
             evidence_root = work / "source-evidence"
             evidence_root.mkdir(mode=0o700)
             evidence_key = _synthetic_evidence(source_env, evidence_root)
@@ -261,12 +268,14 @@ def run_drill(package_root: Path, identity_root: Path) -> dict:
                           "BACKUP_APPLICATION_COMMIT": commit}
             _preflight(backup_env, database=source_db, user=user, port=port,
                        container_id=container_id, docker_env=docker_env, restore=False)
+            phase = "phase_a_backup"
             result = json.loads(_command(
                 [sys.executable, "-m", "app.data_protection", "backup",
                  "--staging-root", str(stage), "--evidence-root", str(evidence_root)],
                 env=backup_env, cwd=work))
             if result.get("status") != "COMPLETE_LOCAL":
                 raise DrillError("synthetic_backup_incomplete")
+            phase = "manifest_validation"
             backup_id = result["backup_id"]
             package = stage / backup_id
             manifest = json.loads((package / "manifest.json").read_text())
@@ -283,12 +292,14 @@ def run_drill(package_root: Path, identity_root: Path) -> dict:
             with psycopg.connect(host="127.0.0.1", port=port, user=user,
                                  dbname=source_db, passfile=str(passfile), autocommit=True) as conn:
                 conn.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(restore_db)))
+            phase = "restore_preflight"
             restore_env = _target_env(base, user=user, database=restore_db, port=port,
                                       passfile=passfile)
             _preflight(restore_env, database=restore_db, user=user, port=port,
                        container_id=container_id, docker_env=docker_env, restore=True)
             restored_evidence = work / "restored-evidence"
             restored_evidence.mkdir(mode=0o700)
+            phase = "phase_a_restore"
             restored = json.loads(_command(
                 [sys.executable, "-m", "app.data_protection", "restore-test",
                  "--backup-directory", str(package), "--evidence-root", str(restored_evidence),
@@ -298,6 +309,7 @@ def run_drill(package_root: Path, identity_root: Path) -> dict:
                     or restored.get("reconciliation") != "PASS"
                     or restored.get("evidence_files") != 1):
                 raise DrillError("synthetic_restore_integrity_failed")
+            phase = "evidence_validation"
             expected = hashlib.sha256((evidence_root / evidence_key).read_bytes()).hexdigest()
             if hashlib.sha256((restored_evidence / evidence_key).read_bytes()).hexdigest() != expected:
                 raise DrillError("synthetic_restored_evidence_mismatch")
@@ -308,6 +320,7 @@ def run_drill(package_root: Path, identity_root: Path) -> dict:
                                      (evidence_key, expected)).fetchone()[0]
             if count != 1:
                 raise DrillError("synthetic_restored_inventory_mismatch")
+            phase = "envelope_creation"
             envelope = work / f"{backup_id}.frcaixinha.tar"
             metadata = backup_transport.create_envelope(package, envelope)
             backup_transport.inspect_envelope(envelope)
@@ -315,6 +328,7 @@ def run_drill(package_root: Path, identity_root: Path) -> dict:
             final_identity = identity_root / f"{backup_id}.agekey"
             if final_package.exists() or final_identity.exists():
                 raise DrillError("synthetic_output_exists")
+            phase = "preserve_validated_output"
             identity.rename(final_identity)
             try:
                 package.rename(final_package)
@@ -330,6 +344,13 @@ def run_drill(package_root: Path, identity_root: Path) -> dict:
                     "alembic_head": manifest["alembic_head"],
                     "off_vm_status": manifest["off_vm_status"],
                     "restore": restored, "server_system_identifier": system_id}
+    except DrillError as exc:
+        raise DrillError(f"{phase}:{exc}") from None
+    except Exception as exc:
+        # Avoid echoing exception text, which may contain connection data or
+        # command arguments. A phase and exception type are sufficient to
+        # locate the failure without disclosing sensitive values.
+        raise DrillError(f"{phase}:{type(exc).__name__}") from None
     finally:
         if container_id:
             try:
@@ -352,8 +373,11 @@ def main() -> None:
     try:
         result = run_drill(args.package_root, args.identity_root)
         print(json.dumps(result, sort_keys=True))
-    except Exception:
-        print(json.dumps({"status": "FAILED", "error_code": "synthetic_drill_failed"}))
+    except DrillError as exc:
+        print(json.dumps({"status": "FAILED", "error_code": str(exc)}))
+        raise SystemExit(1) from None
+    except Exception as exc:
+        print(json.dumps({"status": "FAILED", "error_code": type(exc).__name__}))
         raise SystemExit(1) from None
 
 
