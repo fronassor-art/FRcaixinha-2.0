@@ -12,11 +12,37 @@ from app import data_protection as protection
 def test_google_drive_configuration_is_metadata_only(monkeypatch):
     monkeypatch.setenv("BACKUP_OFF_VM_PROVIDER", "google_drive")
     monkeypatch.setenv("GOOGLE_DRIVE_FOLDER_ID", "1dXpu50BErONnQRPBdQ5ND1EUVAyRGsqU")
+    monkeypatch.delenv("BACKUP_AGE_RECIPIENTS", raising=False)
     monkeypatch.setenv("BACKUP_AGE_RECIPIENT", "age1publictestrecipient")
     assert protection._config() == (
-        "google_drive", "1dXpu50BErONnQRPBdQ5ND1EUVAyRGsqU", "age1publictestrecipient"
+        "google_drive", "1dXpu50BErONnQRPBdQ5ND1EUVAyRGsqU", ("age1publictestrecipient",)
     )
     assert not hasattr(protection, "GoogleDriveUploader")
+
+
+def test_multi_recipient_configuration_and_single_recipient_compatibility(monkeypatch):
+    monkeypatch.setenv("BACKUP_OFF_VM_PROVIDER", "google_drive")
+    monkeypatch.setenv("GOOGLE_DRIVE_FOLDER_ID", "1dXpu50BErONnQRPBdQ5ND1EUVAyRGsqU")
+    monkeypatch.delenv("BACKUP_AGE_RECIPIENT", raising=False)
+    monkeypatch.setenv("BACKUP_AGE_RECIPIENTS", "age1operatorpublic,age1runnerpublic")
+    assert protection._config()[2] == ("age1operatorpublic", "age1runnerpublic")
+
+    monkeypatch.delenv("BACKUP_AGE_RECIPIENTS")
+    monkeypatch.setenv("BACKUP_AGE_RECIPIENT", "age1legacypublic")
+    assert protection._config()[2] == ("age1legacypublic",)
+
+
+def test_multi_recipient_configuration_fails_closed(monkeypatch):
+    monkeypatch.setenv("BACKUP_OFF_VM_PROVIDER", "google_drive")
+    monkeypatch.setenv("GOOGLE_DRIVE_FOLDER_ID", "1dXpu50BErONnQRPBdQ5ND1EUVAyRGsqU")
+    monkeypatch.delenv("BACKUP_AGE_RECIPIENT", raising=False)
+    monkeypatch.setenv("BACKUP_AGE_RECIPIENTS", "age1operatorpublic,malformed")
+    with pytest.raises(protection.BackupError, match="age_recipient_invalid"):
+        protection._config()
+
+    monkeypatch.setenv("BACKUP_AGE_RECIPIENT", "age1legacypublic")
+    with pytest.raises(protection.BackupError, match="age_recipient_config_ambiguous"):
+        protection._config()
 
 
 def test_password_file_required_without_password_environment(monkeypatch, tmp_path):

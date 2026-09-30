@@ -1,6 +1,7 @@
 """Real PostgreSQL 16 and age contracts; CI supplies only synthetic credentials."""
 
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -21,6 +22,33 @@ pytestmark = pytest.mark.skipif(
          and shutil.which("age-keygen")),
     reason="PostgreSQL 16 client, age and DATABASE_URL PostgreSQL required",
 )
+
+
+def test_same_age_ciphertext_decrypts_with_both_recipients(tmp_path):
+    payload = b"synthetic multi-recipient ciphertext contract"
+    identities = (tmp_path / "operator.agekey", tmp_path / "runner.agekey")
+    recipients = []
+    for identity in identities:
+        subprocess.run(["age-keygen", "-o", str(identity)],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        identity.chmod(0o600)
+        result = subprocess.run(["age-keygen", "-y", str(identity)],
+                                capture_output=True, text=True, check=True)
+        recipients.append(result.stdout.strip())
+
+    ciphertext = tmp_path / "same-payload.age"
+    protection._encrypt_stream(io.BytesIO(payload), ciphertext, tuple(recipients))
+    ciphertext_hash = protection._sha256(ciphertext)
+    for index, identity in enumerate(identities):
+        plaintext = tmp_path / f"plaintext-{index}.bin"
+        result = subprocess.run(
+            ["age", "--decrypt", "--identity", str(identity), "--output",
+             str(plaintext), str(ciphertext)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+        )
+        assert result.returncode == 0
+        assert plaintext.read_bytes() == payload
+        assert protection._sha256(ciphertext) == ciphertext_hash
 
 
 @pytest.fixture

@@ -17,7 +17,7 @@ import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Protocol
+from typing import Protocol, Sequence
 
 
 EXPECTED_HEAD = "0104_scheduler_runs_g3d4a"
@@ -134,8 +134,28 @@ def _open_evidence(root: Path, relative: str):
     return source
 
 
-def _encrypt_stream(source, output: Path, recipient: str) -> tuple[int, str]:
-    process = subprocess.Popen(["age", "-r", recipient, "-o", str(output)],
+def _recipients(value: str | Sequence[str]) -> tuple[str, ...]:
+    if isinstance(value, str):
+        parts = value.replace("\n", ",").split(",")
+    else:
+        parts = list(value)
+    if not parts or any(not item.strip() for item in parts):
+        raise BackupError("age_recipient_invalid")
+    recipients = tuple(item.strip() for item in parts)
+    if not recipients or any(not recipient.startswith("age1") for recipient in recipients):
+        raise BackupError("age_recipient_invalid")
+    if len(set(recipients)) != len(recipients):
+        raise BackupError("age_recipient_duplicate")
+    return recipients
+
+
+def _encrypt_stream(source, output: Path, recipient: str | Sequence[str]) -> tuple[int, str]:
+    recipients = _recipients(recipient)
+    command = ["age"]
+    for item in recipients:
+        command.extend(("-r", item))
+    command.extend(("-o", str(output)))
+    process = subprocess.Popen(command,
                                stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                                stderr=subprocess.DEVNULL)
     digest = hashlib.sha256()
@@ -158,7 +178,8 @@ def _encrypt_stream(source, output: Path, recipient: str) -> tuple[int, str]:
     return size, digest.hexdigest()
 
 
-def _dump_encrypted(env: dict[str, str], snapshot: str, output: Path, recipient: str) -> None:
+def _dump_encrypted(env: dict[str, str], snapshot: str, output: Path,
+                    recipient: str | Sequence[str]) -> None:
     command = ["pg_dump", "--format=custom", "--snapshot", snapshot,
                "--dbname", env["PGDATABASE"]]
     dump = subprocess.Popen(command, env=env, stdout=subprocess.PIPE,
@@ -175,21 +196,29 @@ def _dump_encrypted(env: dict[str, str], snapshot: str, output: Path, recipient:
         raise
 
 
-def _config() -> tuple[str, str, str]:
+def _config() -> tuple[str, str, tuple[str, ...]]:
     provider = os.environ.get("BACKUP_OFF_VM_PROVIDER")
     folder = os.environ.get("GOOGLE_DRIVE_FOLDER_ID")
-    recipient = os.environ.get("BACKUP_AGE_RECIPIENT")
+    single_recipient = os.environ.get("BACKUP_AGE_RECIPIENT")
+    multiple_recipients = os.environ.get("BACKUP_AGE_RECIPIENTS")
     if provider != "google_drive" or not folder or not re.fullmatch(r"[A-Za-z0-9_-]+", folder):
         raise BackupError("destination_config_invalid")
-    if not recipient or not recipient.startswith("age1"):
+    if single_recipient and multiple_recipients:
+        raise BackupError("age_recipient_config_ambiguous")
+    recipient_value = multiple_recipients or single_recipient or ""
+    if not recipient_value.strip():
         raise BackupError("age_recipient_missing")
-    return provider, folder, recipient
+    try:
+        recipients = _recipients(recipient_value)
+    except BackupError:
+        raise
+    return provider, folder, recipients
 
 
 def create_backup(staging_root: Path, evidence_root: Path) -> Path:
     """Produce an encrypted, locally complete set; never upload it."""
     env = _pg_env()
-    provider, folder, recipient = _config()
+    provider, folder, recipients = _config()
     commit = os.environ.get("BACKUP_APPLICATION_COMMIT", "")
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
         raise BackupError("application_commit_missing")
@@ -204,7 +233,9 @@ def create_backup(staging_root: Path, evidence_root: Path) -> Path:
                 "application_commit": commit, "alembic_head": None,
                 "postgres_version": None, "pg_dump_version": None,
                 "archive_format": "custom", "archive": None, "encryption": "age",
-                "encryption_recipient_identifier": hashlib.sha256(recipient.encode()).hexdigest()[:16],
+                "encryption_recipient_identifier": hashlib.sha256(
+                    "\n".join(sorted(recipients)).encode()
+                ).hexdigest()[:16],
                 "evidence_file_count": 0, "evidence": [], "off_vm_provider": provider,
                 "off_vm_folder_id": folder, "remote_file_id": None,
                 "off_vm_status": "NOT_UPLOADED", "status": "IN_PROGRESS"}
@@ -227,7 +258,7 @@ def create_backup(staging_root: Path, evidence_root: Path) -> Path:
                 raise BackupError("pg_dump_version_unexpected")
             manifest["pg_dump_version"] = result.stdout.strip()
             archive = directory / "postgres.dump.age"
-            _dump_encrypted(env, snapshot, archive, recipient)
+            _dump_encrypted(env, snapshot, archive, recipients)
             conn.execute("ROLLBACK")
         manifest["archive"] = _metadata(archive)
         evidence_dir = directory / "evidence"
@@ -235,7 +266,7 @@ def create_backup(staging_root: Path, evidence_root: Path) -> Path:
         for ref in refs:
             target = evidence_dir / f"{ref['table']}-{ref['row_id']}.age"
             with _open_evidence(evidence_root, ref["path"]) as source:
-                size, digest = _encrypt_stream(source, target, recipient)
+                size, digest = _encrypt_stream(source, target, recipients)
             if size != ref["size"] or digest != ref["sha256"]:
                 target.unlink(missing_ok=True)
                 raise BackupError("evidence_content_mismatch")

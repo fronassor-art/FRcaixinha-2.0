@@ -10,7 +10,7 @@ in the same container. It never calls Google Drive, the API, or the worker.
 Use a local Docker daemon available through `/var/run/docker.sock`, Python with
 `backend/requirements.txt`, PostgreSQL 16 `pg_dump` and `pg_restore`, and
 `age`/`age-keygen` v1.2.1. The Docker daemon must already have the
-`postgres:16-alpine` image; the harness uses `--pull=never`. Create two distinct
+`postgres:16-alpine` image; the harness uses `--pull=never`. Create distinct
 mode-0700 directories outside the repository and run from `backend`:
 
 ```sh
@@ -36,6 +36,31 @@ deterministic transport envelope. Only after the restore and existing read-only
 integrity checks pass are the package and identity moved to their final paths.
 Keep both paths private and preserve the identity separately; losing it makes
 the package unusable. Neither path belongs in Git or Google Drive together.
+
+## Manual persistent CI artifact
+
+The manual workflow `.github/workflows/synthetic-phase-a-persistent.yml` is
+restricted to `main`. Before using it, configure the non-secret repository
+variable `BACKUP_AGE_OPERATOR_RECIPIENT` with the operator's age public
+recipient. The workflow fails closed if it is absent or invalid. It never
+receives the operator's private identity.
+
+For this workflow, the harness creates a second, ephemeral runner identity.
+Phase A encrypts the PostgreSQL archive and every evidence file to both the
+operator recipient and the runner recipient. The restore-test decrypts the
+same ciphertext with only the runner identity; the operator can later restore
+the downloaded package with the operator identity. The runner identity stays
+in its separate temporary directory and is not published.
+
+Only after backup, restore, integrity checks, envelope inspection, and
+checksum validation pass does the workflow upload the `.frcaixinha.tar`
+envelope and a non-secret receipt. The artifact is named by run ID and backup
+ID and retained for 7 days. Download it promptly, verify its SHA-256, inspect
+and extract the envelope into a private directory, then run the existing
+isolated restore-test with the operator identity before any later transport
+operation. The GitHub artifact is a staging mechanism, not durable backup
+storage. The ordinary Backend CI drill remains ephemeral and does not publish
+its output.
 
 The Backend CI job runs this drill with temporary runner directories. Its
 output is evidence that the harness works on an isolated PostgreSQL 16 runner;

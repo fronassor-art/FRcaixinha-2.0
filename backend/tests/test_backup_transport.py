@@ -75,6 +75,14 @@ def test_envelope_rejects_source_symlinks_unexpected_and_corrupt_files(tmp_path)
         transport.create_envelope(package, tmp_path / "out.tar")
 
 
+def test_envelope_never_accepts_age_identity_material(tmp_path):
+    package = _package(tmp_path)
+    (package / "operator.agekey").write_text("AGE-SECRET-KEY-not-for-package")
+    (package / "operator.agekey").chmod(0o600)
+    with pytest.raises(transport.DriveBackupError, match="backup_members_unexpected"):
+        transport.create_envelope(package, tmp_path / "out.tar")
+
+
 def test_envelope_rejects_path_traversal_before_extraction(tmp_path):
     package = _package(tmp_path)
     output = tmp_path / "transport.tar"

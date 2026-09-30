@@ -1,0 +1,130 @@
+name: Persistent synthetic Phase A package
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  main-ref-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the default main branch
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "synthetic_package_requires_main_ref"
+            exit 1
+          fi
+
+  package-and-restore:
+    needs: main-ref-guard
+    if: needs.main-ref-guard.result == 'success' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: frcaixinha_test
+          POSTGRES_PASSWORD: frcaixinha_test
+          POSTGRES_DB: frcaixinha_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U frcaixinha_test -d frcaixinha_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql+psycopg://frcaixinha_test:frcaixinha_test@127.0.0.1:5432/frcaixinha_test
+      JWT_SECRET: synthetic-package-only-secret
+      APP_ENV: test
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.6'
+      - name: Install PostgreSQL 16 client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client-16
+      - name: Install pinned age tools
+        env:
+          GOBIN: ${{ runner.temp }}/age-bin
+        run: |
+          mkdir -p "$GOBIN"
+          go install filippo.io/age/cmd/age@v1.2.1
+          go install filippo.io/age/cmd/age-keygen@v1.2.1
+          echo "$GOBIN" >> "$GITHUB_PATH"
+      - run: pip install -r requirements.txt
+      - name: Upgrade isolated PostgreSQL service and run focused tests
+        run: |
+          alembic upgrade head
+          pytest -q tests/test_data_protection_core.py tests/test_data_protection_postgresql.py tests/test_backup_transport.py tests/test_synthetic_phase_a_drill.py
+      - name: Produce synthetic package, restore it, and prepare exact artifact files
+        id: drill
+        env:
+          BACKUP_AGE_OPERATOR_RECIPIENT: ${{ vars.BACKUP_AGE_OPERATOR_RECIPIENT }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_root="$(mktemp -d "$RUNNER_TEMP/frcaixinha-synthetic-packages.XXXXXX")"
+          identity_root="$(mktemp -d "$RUNNER_TEMP/frcaixinha-synthetic-identity.XXXXXX")"
+          publish_root="$(mktemp -d "$RUNNER_TEMP/frcaixinha-synthetic-publication.XXXXXX")"
+          chmod 700 "$package_root" "$identity_root" "$publish_root"
+          result_file="$RUNNER_TEMP/frcaixinha-synthetic-drill-result.json"
+          if ! python -m app.synthetic_phase_a_drill \
+              --package-root "$package_root" \
+              --identity-root "$identity_root" \
+              --publish-root "$publish_root" \
+              --require-operator-recipient > "$result_file"; then
+            python -c 'import json,sys; print(json.load(open(sys.argv[1]))["error_code"])' "$result_file"
+            exit 1
+          fi
+          python - "$result_file" "$publish_root" "$identity_root" "$GITHUB_OUTPUT" <<'PY'
+          import json, pathlib, sys
+
+          result_path, publish_root, identity_root, output_path = map(pathlib.Path, sys.argv[1:])
+          result = json.loads(result_path.read_text())
+          root = publish_root.resolve(strict=True)
+          identities = identity_root.resolve(strict=True)
+          if result.get("status") != "PASS":
+              raise SystemExit("synthetic_drill_result_invalid")
+          identity = pathlib.Path(result.get("identity_path", "")).resolve(strict=True)
+          envelope = pathlib.Path(result.get("publish_envelope_path", "")).resolve(strict=True)
+          receipt = pathlib.Path(result.get("receipt_path", "")).resolve(strict=True)
+          if (identity.parent != identities or identity.stat().st_mode & 0o077
+                  or envelope.parent != root or receipt.parent != root
+                  or envelope.suffix != ".tar" or not envelope.name.endswith(".frcaixinha.tar")
+                  or not receipt.name.endswith(".receipt.json")
+                  or envelope.stat().st_mode & 0o077 or receipt.stat().st_mode & 0o077):
+              raise SystemExit("synthetic_artifact_path_invalid")
+          with output_path.open("a", encoding="utf-8") as output:
+              output.write(f"backup_id={result['backup_id']}\n")
+              output.write(f"envelope_path={envelope}\n")
+              output.write(f"receipt_path={receipt}\n")
+          print("Synthetic backup, restore, integrity, and envelope validation: PASS")
+          print(f"backup_id={result['backup_id']}")
+          print(f"envelope_sha256={result['package_sha256']}")
+          print(f"envelope_size={result['package_size']}")
+          print(f"postgres_version={result['postgres_version']}")
+          print(f"pg_dump_version={result['pg_dump_version']}")
+          print(f"pg_restore_version={result['pg_restore_version']}")
+          print(f"alembic_head={result['alembic_head']}")
+          print(f"off_vm_status={result['off_vm_status']}")
+          PY
+      - name: Upload verified encrypted envelope and receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: synthetic-phase-a-${{ github.run_id }}-${{ steps.drill.outputs.backup_id }}
+          path: |
+            ${{ steps.drill.outputs.envelope_path }}
+            ${{ steps.drill.outputs.receipt_path }}
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
