@@ -122,3 +122,21 @@ def test_database_error_diagnostic_uses_safe_category_only():
         "password authentication failed for user synthetic secret-password"
     )
     assert drill._safe_pg_error_code(error) == "password_authentication_failed"
+
+
+def test_published_database_endpoint_is_retried_until_reachable(monkeypatch):
+    attempts = iter([
+        drill.DrillError("synthetic_database_connect_failed:OperationalError"),
+        "synthetic-system-id",
+    ])
+
+    def preflight(*args, **kwargs):
+        result = next(attempts)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(drill, "_preflight", preflight)
+    monkeypatch.setattr(drill.time, "sleep", lambda _: None)
+    assert drill._wait_for_preflight({}, database="synthetic", user="synthetic", port=12345,
+                                     container_id="owned", docker_env={}) == "synthetic-system-id"

@@ -194,6 +194,25 @@ def _target_env(base: dict[str, str], *, user: str, database: str, port: int,
             "PGDATABASE": database, "PGPASSFILE": str(passfile)}
 
 
+def _wait_for_preflight(env: dict[str, str], *, database: str, user: str, port: int,
+                        container_id: str, docker_env: dict[str, str]) -> str:
+    # pg_isready inside the container can observe the entrypoint's temporary
+    # initialization server. Confirm the runner's published loopback endpoint
+    # separately before any migration or backup command is allowed to run.
+    for attempt in range(60):
+        try:
+            return _preflight(env, database=database, user=user, port=port,
+                              container_id=container_id, docker_env=docker_env,
+                              restore=False)
+        except DrillError as exc:
+            if not str(exc).startswith("synthetic_database_connect_failed:"):
+                raise
+            if attempt == 59:
+                break
+            time.sleep(1)
+    raise DrillError("synthetic_postgres_host_endpoint_not_ready")
+
+
 def run_drill(package_root: Path, identity_root: Path) -> dict:
     package_root = _private_root(package_root)
     identity_root = _private_root(identity_root)
@@ -258,8 +277,9 @@ def run_drill(package_root: Path, identity_root: Path) -> dict:
             passfile.chmod(0o600)
             source_env = _target_env(base, user=user, database=source_db, port=port,
                                      passfile=passfile)
-            system_id = _preflight(source_env, database=source_db, user=user, port=port,
-                                   container_id=container_id, docker_env=docker_env, restore=False)
+            system_id = _wait_for_preflight(
+                source_env, database=source_db, user=user, port=port,
+                container_id=container_id, docker_env=docker_env)
             phase = "age_identity"
             _command(["age-keygen", "-o", str(identity)], env=base)
             identity.chmod(0o600)
