@@ -37,6 +37,23 @@ class DrillError(RuntimeError):
     """Stable, non-sensitive failure code."""
 
 
+def _safe_pg_error_code(error: psycopg.Error) -> str:
+    if error.sqlstate:
+        return error.sqlstate
+    message = str(error).lower()
+    for fragment, code in (
+        ("connection refused", "connection_refused"),
+        ("timeout expired", "connection_timeout"),
+        ("password authentication failed", "password_authentication_failed"),
+        ("no password supplied", "password_missing"),
+        ("no pg_hba.conf entry", "pg_hba_rejected"),
+        ("could not translate host name", "host_resolution_failed"),
+    ):
+        if fragment in message:
+            return code
+    return type(error).__name__
+
+
 def _command(arguments: list[str], *, env: dict[str, str], cwd: Path | None = None) -> str:
     result = subprocess.run(arguments, env=env, cwd=cwd, capture_output=True, text=True,
                             check=False)
@@ -95,7 +112,7 @@ def _preflight(env: dict[str, str], *, database: str, user: str, port: int,
                                passfile=str(passfile), autocommit=True,
                                connect_timeout=5)
     except psycopg.Error as exc:
-        code = exc.sqlstate or type(exc).__name__
+        code = _safe_pg_error_code(exc)
         raise DrillError(f"synthetic_database_connect_failed:{code}") from None
     try:
         with conn:
@@ -104,7 +121,7 @@ def _preflight(env: dict[str, str], *, database: str, user: str, port: int,
                 "current_user, system_identifier FROM pg_control_system()"
             ).fetchone()
     except psycopg.Error as exc:
-        code = exc.sqlstate or type(exc).__name__
+        code = _safe_pg_error_code(exc)
         raise DrillError(f"synthetic_database_identity_query_failed:{code}") from None
     if (int(version) // 10000 != 16 or actual_db != database or actual_user != user
             or str(system_id) != _docker_identity(container_id, user, database,

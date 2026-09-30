@@ -115,3 +115,10 @@ def test_drill_failure_reports_safe_phase_without_exception_text(tmp_path, monke
 
     assert str(failure.value) == "container_start:RuntimeError"
     assert "secret-password" not in str(failure.value)
+
+
+def test_database_error_diagnostic_uses_safe_category_only():
+    error = drill.psycopg.OperationalError(
+        "password authentication failed for user synthetic secret-password"
+    )
+    assert drill._safe_pg_error_code(error) == "password_authentication_failed"
