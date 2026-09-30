@@ -54,6 +54,14 @@ def _safe_pg_error_code(error: psycopg.Error) -> str:
     return type(error).__name__
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def _command(arguments: list[str], *, env: dict[str, str], cwd: Path | None = None) -> str:
     result = subprocess.run(arguments, env=env, cwd=cwd, capture_output=True, text=True,
                             check=False)
@@ -130,7 +138,7 @@ def _preflight(env: dict[str, str], *, database: str, user: str, port: int,
     return str(system_id)
 
 
-def _assert_tools(env: dict[str, str]) -> str:
+def _assert_tools(env: dict[str, str]) -> dict[str, str]:
     def version(tool: str) -> str:
         result = subprocess.run([tool, "--version"], env=env, capture_output=True,
                                 text=True, check=False)
@@ -146,7 +154,82 @@ def _assert_tools(env: dict[str, str]) -> str:
             or not restore_version.startswith("pg_restore (PostgreSQL) 16.")
             or "1.2.1" not in age_version or "1.2.1" not in keygen_version):
         raise DrillError("synthetic_tool_version_invalid")
-    return age_version
+    return {"pg_dump_version": dump_version, "pg_restore_version": restore_version,
+            "age_version": age_version, "age_keygen_version": keygen_version}
+
+
+def _validate_age_recipient(recipient: str, env: dict[str, str]) -> None:
+    if (not recipient or recipient != recipient.strip()
+            or not re.fullmatch(r"age1[0-9a-z]+", recipient)):
+        raise DrillError("operator_recipient_invalid")
+    try:
+        result = subprocess.run(["age", "-r", recipient], input=b"", env=env,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                check=False, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        raise DrillError("operator_recipient_invalid") from None
+    if result.returncode:
+        raise DrillError("operator_recipient_invalid")
+
+
+def _write_publication(envelope: Path, publish_root: Path, *, backup_id: str,
+                       manifest: dict, envelope_metadata: dict, restore: dict,
+                       versions: dict[str, str], evidence_sha256: str) -> tuple[Path, Path]:
+    if (manifest.get("status") != "COMPLETE_LOCAL"
+            or manifest.get("off_vm_status") != "NOT_UPLOADED"
+            or manifest.get("alembic_head") != data_protection.EXPECTED_HEAD
+            or restore.get("alembic_head") != data_protection.EXPECTED_HEAD
+            or restore.get("ledger") != "PASS"
+            or restore.get("reconciliation") != "PASS"
+            or restore.get("evidence_files") != manifest.get("evidence_file_count")):
+        raise DrillError("synthetic_publication_preconditions_failed")
+    filename = f"{backup_id}.frcaixinha.tar"
+    target = publish_root / filename
+    receipt_path = publish_root / f"{backup_id}.receipt.json"
+    if target.exists() or target.is_symlink() or receipt_path.exists() or receipt_path.is_symlink():
+        raise DrillError("synthetic_publication_target_exists")
+    try:
+        with envelope.open("rb") as source, target.open("xb") as output:
+            os.chmod(target, 0o600)
+            shutil.copyfileobj(source, output, length=1024 * 1024)
+            output.flush()
+            os.fsync(output.fileno())
+        actual_sha256 = _sha256_file(target)
+        actual_size = target.stat().st_size
+        if actual_sha256 != envelope_metadata["sha256"] or actual_size != envelope_metadata["size"]:
+            raise DrillError("synthetic_publication_checksum_mismatch")
+        verified_manifest = backup_transport.inspect_envelope(target)
+        if verified_manifest.get("backup_id") != backup_id:
+            raise DrillError("synthetic_publication_backup_id_mismatch")
+        receipt = {
+            "receipt_version": 1,
+            "backup_id": backup_id,
+            "envelope_filename": filename,
+            "envelope_size": actual_size,
+            "envelope_sha256": actual_sha256,
+            "status": "COMPLETE_LOCAL",
+            "off_vm_status": "NOT_UPLOADED",
+            "alembic_head": manifest["alembic_head"],
+            "postgres_version": manifest["postgres_version"],
+            "pg_dump_version": manifest["pg_dump_version"],
+            "pg_restore_version": versions["pg_restore_version"],
+            "restore_status": "PASS",
+            "ledger_status": restore["ledger"],
+            "reconciliation_status": restore["reconciliation"],
+            "evidence_files": restore["evidence_files"],
+            "synthetic_evidence_sha256": evidence_sha256,
+        }
+        with receipt_path.open("x", encoding="utf-8") as stream:
+            os.chmod(receipt_path, 0o600)
+            json.dump(receipt, stream, sort_keys=True, separators=(",", ":"))
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        return target, receipt_path
+    except Exception:
+        target.unlink(missing_ok=True)
+        receipt_path.unlink(missing_ok=True)
+        raise
 
 
 def _synthetic_evidence(env: dict[str, str], evidence_root: Path) -> str:
@@ -213,16 +296,31 @@ def _wait_for_preflight(env: dict[str, str], *, database: str, user: str, port: 
     raise DrillError("synthetic_postgres_host_endpoint_not_ready")
 
 
-def run_drill(package_root: Path, identity_root: Path) -> dict:
+def run_drill(package_root: Path, identity_root: Path, *, operator_recipient: str | None = None,
+              require_operator_recipient: bool = False,
+              publish_root: Path | None = None) -> dict:
     package_root = _private_root(package_root)
     identity_root = _private_root(identity_root)
+    if publish_root is not None:
+        publish_root = _private_root(publish_root)
     if (identity_root == package_root or identity_root.is_relative_to(package_root)
             or package_root.is_relative_to(identity_root)):
         raise DrillError("identity_must_be_separate")
+    if publish_root is not None and any(
+            candidate == publish_root or candidate.is_relative_to(publish_root)
+            or publish_root.is_relative_to(candidate)
+            for candidate in (package_root, identity_root)):
+        raise DrillError("publication_root_must_be_separate")
+    if require_operator_recipient and not operator_recipient:
+        raise DrillError("operator_recipient_missing")
+    base = _safe_environment(os.environ)
+    versions = _assert_tools(base)
+    if operator_recipient:
+        _validate_age_recipient(operator_recipient, base)
+    if require_operator_recipient and publish_root is None:
+        raise DrillError("publication_root_required")
     if not DOCKER_SOCKET.is_socket():
         raise DrillError("local_docker_socket_required")
-    base = _safe_environment(os.environ)
-    age_version = _assert_tools(base)
     nonce = secrets.token_hex(6)
     source_db = f"frcaixinha_synthetic_{nonce}"
     restore_db = f"frcaixinha_restore_{nonce}"
@@ -235,6 +333,7 @@ def run_drill(package_root: Path, identity_root: Path) -> dict:
     container_id = ""
     complete = False
     phase = "container_start"
+    published_files: list[Path] = []
     try:
         with tempfile.TemporaryDirectory(prefix="frcaixinha-synthetic-") as temporary:
             work = Path(temporary)
@@ -310,8 +409,11 @@ def run_drill(package_root: Path, identity_root: Path) -> dict:
                               env={"PATH": base["PATH"]}, cwd=REPOSITORY)
             backup_env = {**source_env, "BACKUP_OFF_VM_PROVIDER": "google_drive",
                           "GOOGLE_DRIVE_FOLDER_ID": FOLDER_ID,
-                          "BACKUP_AGE_RECIPIENT": recipient,
                           "BACKUP_APPLICATION_COMMIT": commit}
+            if operator_recipient:
+                backup_env["BACKUP_AGE_RECIPIENTS"] = f"{operator_recipient},{recipient}"
+            else:
+                backup_env["BACKUP_AGE_RECIPIENT"] = recipient
             _preflight(backup_env, database=source_db, user=user, port=port,
                        container_id=container_id, docker_env=docker_env, restore=False)
             phase = "phase_a_backup"
@@ -335,6 +437,15 @@ def run_drill(package_root: Path, identity_root: Path) -> dict:
             data_protection._verify_file(package, manifest["archive"])
             for ref in manifest["evidence"]:
                 data_protection._verify_file(package / "evidence", ref["encrypted"])
+            phase = "envelope_creation"
+            envelope = work / f"{backup_id}.frcaixinha.tar"
+            metadata = backup_transport.create_envelope(package, envelope)
+            envelope_manifest = backup_transport.inspect_envelope(envelope)
+            if envelope_manifest.get("backup_id") != backup_id:
+                raise DrillError("synthetic_envelope_backup_id_mismatch")
+            extracted_package = work / "envelope-extracted"
+            backup_transport.extract_envelope(
+                envelope, extracted_package, expected_sha256=metadata["sha256"])
             with psycopg.connect(host="127.0.0.1", port=port, user=user,
                                  dbname=source_db, passfile=str(passfile), autocommit=True) as conn:
                 conn.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(restore_db)))
@@ -348,7 +459,7 @@ def run_drill(package_root: Path, identity_root: Path) -> dict:
             phase = "phase_a_restore"
             restored = json.loads(_command(
                 [sys.executable, "-m", "app.data_protection", "restore-test",
-                 "--backup-directory", str(package), "--evidence-root", str(restored_evidence),
+                 "--backup-directory", str(extracted_package), "--evidence-root", str(restored_evidence),
                  "--identity", str(identity)], env=restore_env, cwd=work))
             if (restored.get("alembic_head") != data_protection.EXPECTED_HEAD
                     or restored.get("ledger") != "PASS"
@@ -366,10 +477,14 @@ def run_drill(package_root: Path, identity_root: Path) -> dict:
                                      (evidence_key, expected)).fetchone()[0]
             if count != 1:
                 raise DrillError("synthetic_restored_inventory_mismatch")
-            phase = "envelope_creation"
-            envelope = work / f"{backup_id}.frcaixinha.tar"
-            metadata = backup_transport.create_envelope(package, envelope)
-            backup_transport.inspect_envelope(envelope)
+            publication_paths: tuple[Path, Path] | None = None
+            if publish_root is not None:
+                phase = "publication_package"
+                publication_paths = _write_publication(
+                    envelope, publish_root, backup_id=backup_id, manifest=manifest,
+                    envelope_metadata=metadata, restore=restored, versions=versions,
+                    evidence_sha256=expected)
+                published_files.extend(publication_paths)
             final_package = package_root / backup_id
             final_identity = identity_root / f"{backup_id}.agekey"
             if final_package.exists() or final_identity.exists():
@@ -385,7 +500,11 @@ def run_drill(package_root: Path, identity_root: Path) -> dict:
             return {"status": "PASS", "backup_id": backup_id,
                     "package_path": str(final_package), "identity_path": str(final_identity),
                     "package_size": metadata["size"], "package_sha256": metadata["sha256"],
-                    "age_version": age_version, "postgres_version": manifest["postgres_version"],
+                    "publish_envelope_path": (str(publication_paths[0]) if publication_paths else None),
+                    "receipt_path": (str(publication_paths[1]) if publication_paths else None),
+                    "age_version": versions["age_version"],
+                    "pg_restore_version": versions["pg_restore_version"],
+                    "postgres_version": manifest["postgres_version"],
                     "pg_dump_version": manifest["pg_dump_version"],
                     "alembic_head": manifest["alembic_head"],
                     "off_vm_status": manifest["off_vm_status"],
@@ -408,6 +527,8 @@ def run_drill(package_root: Path, identity_root: Path) -> dict:
             shutil.rmtree(stage)
         if not complete:
             identity.unlink(missing_ok=True)
+            for path in published_files:
+                path.unlink(missing_ok=True)
 
 
 def main() -> None:
@@ -415,9 +536,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Isolated synthetic Phase A backup/restore drill")
     parser.add_argument("--package-root", type=Path, required=True)
     parser.add_argument("--identity-root", type=Path, required=True)
+    parser.add_argument("--publish-root", type=Path)
+    parser.add_argument("--operator-recipient", default=os.environ.get("BACKUP_AGE_OPERATOR_RECIPIENT"))
+    parser.add_argument("--require-operator-recipient", action="store_true")
     args = parser.parse_args()
     try:
-        result = run_drill(args.package_root, args.identity_root)
+        result = run_drill(args.package_root, args.identity_root,
+                           operator_recipient=args.operator_recipient,
+                           require_operator_recipient=args.require_operator_recipient,
+                           publish_root=args.publish_root)
         print(json.dumps(result, sort_keys=True))
     except DrillError as exc:
         print(json.dumps({"status": "FAILED", "error_code": str(exc)}))
