@@ -22,6 +22,7 @@ from app.services.ledger import (
     _hash_payload,
     _hash_payload_v2,
     post_entry,
+    post_entry_v2,
     verify_ledger_chain,
 )
 
@@ -233,6 +234,112 @@ def test_v1_chain_and_v1_to_v2_to_v2_chain_verify_without_changing_v1_hash():
     engine.dispose()
 
 
+def test_post_entry_keeps_v1_null_metadata_payload_and_v1_chain():
+    engine, db = _db()
+    first = post_entry(db, "CAIXINHA", "CREDIT", Decimal("12.30"), "F2B_TEST", "v1-1")
+    db.flush()
+    second = post_entry(db, "CAIXINHA", "DEBIT", Decimal("2.30"), "F2B_TEST", "v1-2")
+    db.flush()
+
+    assert first.financial_date is None and first.hash_version is None
+    assert second.financial_date is None and second.hash_version is None
+    assert first.entry_hash == _hash_payload(first, None)
+    assert second.previous_hash == first.entry_hash
+    assert second.entry_hash == _hash_payload(second, first.entry_hash)
+    assert verify_ledger_chain(db) == {"status": "PASS", "entries": 2, "errors": []}
+
+    db.close()
+    engine.dispose()
+
+
+def test_post_entry_v2_persists_explicit_date_and_verifies():
+    engine, db = _db()
+    requested_date = date(2026, 9, 30)
+    entry = post_entry_v2(
+        db, "CAIXINHA", "CREDIT", Decimal("12.30"), "F2B_TEST", "v2-one",
+        financial_date=requested_date,
+    )
+    db.flush()
+
+    assert entry.financial_date == requested_date
+    assert entry.hash_version == 2
+    assert entry.created_at.tzinfo is not None
+    assert entry.entry_hash == _hash_payload_v2(entry, None)
+    assert verify_ledger_chain(db) == {"status": "PASS", "entries": 1, "errors": []}
+
+    db.close()
+    engine.dispose()
+
+
+def test_post_entry_v2_requires_date_and_does_not_accept_a_version_override():
+    engine, db = _db()
+    legacy = post_entry(db, "CAIXINHA", "CREDIT", Decimal("5.00"), "F2B_TEST", "stable-v1")
+    db.flush()
+    before = (db.query(LedgerEntry).count(), legacy.entry_hash, verify_ledger_chain(db))
+    args = (db, "CAIXINHA", "DEBIT", Decimal("1.00"), "F2B_TEST", "invalid")
+
+    with pytest.raises(TypeError):
+        post_entry_v2(*args)
+    with pytest.raises(TypeError):
+        post_entry_v2(*args, financial_date=date(2026, 9, 30), hash_version=1)
+
+    assert (db.query(LedgerEntry).count(), legacy.entry_hash, verify_ledger_chain(db)) == before
+    db.close()
+    engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "invalid_date",
+    [None, datetime(2026, 9, 30, tzinfo=timezone.utc), "2026-09-30"],
+)
+def test_post_entry_v2_rejects_non_date_without_changing_chain(invalid_date):
+    engine, db = _db()
+    legacy = post_entry(db, "CAIXINHA", "CREDIT", Decimal("5.00"), "F2B_TEST", "before-invalid")
+    db.flush()
+    before = (db.query(LedgerEntry).count(), legacy.entry_hash, verify_ledger_chain(db))
+
+    with pytest.raises(ValueError, match="date civil"):
+        post_entry_v2(
+            db, "CAIXINHA", "DEBIT", Decimal("1.00"), "F2B_TEST", "invalid-date",
+            financial_date=invalid_date,
+        )
+
+    assert (db.query(LedgerEntry).count(), legacy.entry_hash, verify_ledger_chain(db)) == before
+    db.close()
+    engine.dispose()
+
+
+def test_post_entry_v2_builds_v1_v2_v2_chain_and_authenticates_previous_hash():
+    engine, db = _db()
+    first_v1 = post_entry(db, "CAIXINHA", "CREDIT", Decimal("8.00"), "F2B_TEST", "chain-v1")
+    db.flush()
+    first_v2 = post_entry_v2(
+        db, "CAIXINHA", "DEBIT", Decimal("1.00"), "F2B_TEST", "chain-v2-1",
+        financial_date=date(2026, 9, 30),
+    )
+    db.flush()
+    second_v2 = post_entry_v2(
+        db, "CAIXINHA", "CREDIT", Decimal("2.00"), "F2B_TEST", "chain-v2-2",
+        financial_date=date(2026, 10, 1),
+    )
+    db.flush()
+    assert first_v2.previous_hash == first_v1.entry_hash
+    assert second_v2.previous_hash == first_v2.entry_hash
+    assert verify_ledger_chain(db)["status"] == "PASS"
+
+    db.execute(
+        text("UPDATE ledger_entries SET previous_hash=:bad WHERE id=:id"),
+        {"bad": "b" * 64, "id": second_v2.id},
+    )
+    db.expire_all()
+    assert {error["reason"] for error in verify_ledger_chain(db)["errors"]} >= {
+        "previous_hash_mismatch", "entry_hash_mismatch",
+    }
+
+    db.close()
+    engine.dispose()
+
+
 def test_v2_financial_date_and_created_at_are_authenticated():
     engine, db = _db()
     entry = _append_v2(
@@ -244,6 +351,13 @@ def test_v2_financial_date_and_created_at_are_authenticated():
     db.expire_all()
     assert {error["reason"] for error in verify_ledger_chain(db)["errors"]} == {"entry_hash_mismatch"}
     db.execute(text("UPDATE ledger_entries SET financial_date='2026-09-30' WHERE id=:id"), {"id": entry.id})
+    # Bypass the schema guard only to exercise verifier behavior for an
+    # impossible persisted version; the production constraint remains intact.
+    db.execute(text("PRAGMA ignore_check_constraints=ON"))
+    db.execute(text("UPDATE ledger_entries SET hash_version=3 WHERE id=:id"), {"id": entry.id})
+    db.expire_all()
+    assert "unsupported_hash_version" in {error["reason"] for error in verify_ledger_chain(db)["errors"]}
+    db.execute(text("UPDATE ledger_entries SET hash_version=2 WHERE id=:id"), {"id": entry.id})
     db.execute(text("UPDATE ledger_entries SET created_at='2026-10-01 03:04:00+00:00' WHERE id=:id"), {"id": entry.id})
     db.expire_all()
     assert {error["reason"] for error in verify_ledger_chain(db)["errors"]} == {"entry_hash_mismatch"}

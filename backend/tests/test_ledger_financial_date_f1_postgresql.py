@@ -15,7 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models import LedgerEntry
-from app.services.ledger import _hash_payload, _hash_payload_v2, post_entry, verify_ledger_chain
+from app.services.ledger import _hash_payload, post_entry, post_entry_v2, verify_ledger_chain
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -72,15 +72,13 @@ def test_postgresql_migration_constraint_and_mixed_hash_chain():
             with Session(bind=connection) as db:
                 v1 = post_entry(db, "CAIXINHA", "CREDIT", Decimal("4.00"), "F1_PG", "legacy")
                 db.flush()
-                v2 = LedgerEntry(
-                    account="CAIXINHA", direction="DEBIT", amount=Decimal("1.00"),
-                    reference_type="F1_PG", reference_id="v2", reversal_of_id=None,
-                    previous_hash=v1.entry_hash, created_at=datetime(2026, 10, 1, 3, 0, tzinfo=timezone.utc),
-                    financial_date=date(2026, 9, 30), hash_version=2,
+                v2 = post_entry_v2(
+                    db, "CAIXINHA", "DEBIT", Decimal("1.00"), "F1_PG", "v2",
+                    financial_date=date(2026, 9, 30),
                 )
-                v2.entry_hash = _hash_payload_v2(v2, v1.entry_hash)
-                db.add(v2)
                 db.flush()
+                assert v2.previous_hash == v1.entry_hash
+                assert v2.created_at.tzinfo is not None
                 assert verify_ledger_chain(db)["status"] == "PASS"
 
                 with pytest.raises(IntegrityError):
