@@ -65,7 +65,7 @@ def dashboard(admin=Depends(require_admin), db: Session = Depends(get_db)):
 @router.get("/members")
 def members(status: str | None = None, q: str | None = Query(default=None, min_length=1),
             admin=Depends(require_admin), db: Session = Depends(get_db)):
-    query = db.query(Member).options(joinedload(Member.user), joinedload(Member.quota))
+    query = db.query(Member).options(joinedload(Member.user), joinedload(Member.quotas))
     if status:
         query = query.filter(Member.status == status.upper())
     if q:
@@ -82,7 +82,7 @@ def members(status: str | None = None, q: str | None = Query(default=None, min_l
 
 @router.get("/members/{member_id}")
 def member_detail(member_id: int, admin=Depends(require_admin), db: Session = Depends(get_db)):
-    m = db.query(Member).options(joinedload(Member.user), joinedload(Member.quota)).filter(Member.id == member_id).first()
+    m = db.query(Member).options(joinedload(Member.user), joinedload(Member.quotas)).filter(Member.id == member_id).first()
     if not m:
         raise HTTPException(404, "Membro não encontrado.")
     contributions = db.query(Contribution).filter(Contribution.member_id == m.id).order_by(Contribution.competence.desc()).all()
