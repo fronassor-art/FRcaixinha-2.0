@@ -19,7 +19,7 @@ def test_single_alembic_head_after_security_reconciliation():
         if line.strip()
     ]
 
-    assert heads == ["0105_ledger_financial_date_f1"]
+    assert heads == ["0106_event_financial_date_f2e1"]
 
     root = Path(__file__).parents[1] / "alembic" / "versions"
     rows = {}

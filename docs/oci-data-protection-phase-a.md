@@ -32,7 +32,7 @@ Run `python -m app.data_protection backup --staging-root PATH
   host. PostgreSQL 16 `pg_dump`/`pg_restore` and age v1.2.1 are the tested
   tool versions in CI.
 - A pre-existing mode-0700 staging directory and the POSIX evidence root. The
-  application must have already migrated to `0105_ledger_financial_date_f1`.
+  application must have already migrated to `0106_event_financial_date_f2e1`.
 
 The tool exports one PostgreSQL MVCC snapshot, inventories evidence references
 under that snapshot and passes it to `pg_dump -Fc`. It streams the custom dump

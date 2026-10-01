@@ -336,7 +336,7 @@ def test_scheduler_migration_upgrades_and_downgrades_structurally(tmp_path):
         try:
             with engine.connect() as connection:
                 current = MigrationContext.configure(connection).get_current_revision()
-                assert current == "0105_ledger_financial_date_f1"
+                assert current == "0106_event_financial_date_f2e1"
                 tables = set(inspect(connection).get_table_names())
                 assert {"scheduler_runs", "scheduler_run_units"} <= tables
                 run_constraints = {c["name"] for c in inspect(connection).get_unique_constraints("scheduler_runs")}
@@ -358,7 +358,7 @@ def test_scheduler_migration_upgrades_and_downgrades_structurally(tmp_path):
                 assert "scheduler_run_units" not in tables
             command.upgrade(config, "head")
             with engine.connect() as connection:
-                assert MigrationContext.configure(connection).get_current_revision() == "0105_ledger_financial_date_f1"
+                assert MigrationContext.configure(connection).get_current_revision() == "0106_event_financial_date_f2e1"
         finally:
             engine.dispose()
     finally:
