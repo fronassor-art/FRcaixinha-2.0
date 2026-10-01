@@ -2,17 +2,25 @@
 
 import hashlib
 import json
-from datetime import date
+from datetime import date, datetime, timezone
 
 from sqlalchemy import event
 import pytest
 from app.models import LedgerEntry, PaymentReversalComponent
 from app.services.reconciliation_v040 import build_advanced_reconciliation
 from app.services.payment_reversal_evidence import validate_reversal_effect
+from app.services import ledger as ledger_service
 from test_payment_reversal_contribution_v104 import _setup as contribution_setup
 from test_payment_reversal_loan_v105 import _loan_payment
 from test_payment_reversal_agreement_v106 import _agreement_payment
 from app.services.payment_reversal import reverse_payment
+
+
+class _SeptemberLedgerClock:
+    @classmethod
+    def now(cls, tz=None):
+        value = datetime(2026, 9, 16, 3, 51, tzinfo=timezone.utc)
+        return value if tz is None else value.astimezone(tz)
 
 
 def _findings(db):
@@ -24,10 +32,15 @@ def _db_for_contribution():
     return _db()
 
 
-def test_contribution_reversal_neutralizes_only_with_complete_chain():
+def test_contribution_reversal_neutralizes_only_with_complete_chain(monkeypatch):
+    monkeypatch.setattr(ledger_service, "datetime", _SeptemberLedgerClock)
     db = _db_for_contribution()
     admin, _contribution, payment, _settlement = contribution_setup(db, received="40.00", suffix="h1-contribution")
-    reversal = reverse_payment(db, payment_id=payment.id, admin_id=admin.id, reason="H1 contribution")
+    reversal_at = datetime(2026, 9, 16, 4, 0, tzinfo=timezone.utc)
+    reversal = reverse_payment(
+        db, payment_id=payment.id, admin_id=admin.id,
+        reason="H1 contribution", now=reversal_at,
+    )
     db.commit()
     assert _findings(db)["CONTRIBUTIONS"]["status"] == "PASS"
 
