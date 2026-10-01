@@ -4,6 +4,8 @@ import 'package:go_router/go_router.dart';
 
 import '../app.dart';
 import '../services/api_client.dart';
+import '../theme/frcaixinha_theme.dart';
+import '../widgets/fr_brand_mark.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -49,61 +51,75 @@ class _LoginScreenState extends State<LoginScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: Center(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(24),
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 420),
-            child: Column(
-              children: [
-                const Icon(Icons.account_balance_wallet_outlined, size: 64),
-                const SizedBox(height: 16),
-                const Text(
-                  'FRcaixinha',
-                  style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold),
-                ),
-                const SizedBox(height: 28),
-                TextField(
-                  controller: email,
-                  keyboardType: TextInputType.emailAddress,
-                  decoration: const InputDecoration(
-                    labelText: 'E-mail',
-                    border: OutlineInputBorder(),
+      body: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 420),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Center(child: FRBrandMark(size: 88)),
+                  const SizedBox(height: 22),
+                  Text(
+                    'FRcaixinha',
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.headlineLarge,
                   ),
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: password,
-                  obscureText: true,
-                  decoration: const InputDecoration(
-                    labelText: 'Senha',
-                    border: OutlineInputBorder(),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Seu espaço para acompanhar a caixinha.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: FRColors.muted),
                   ),
-                ),
-                if (error != null)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 12),
-                    child: Text(
-                      error!,
-                      style: TextStyle(
-                        color: Theme.of(context).colorScheme.error,
-                      ),
+                  const SizedBox(height: 40),
+                  Text(
+                    'Entrar na sua conta',
+                    style: Theme.of(context).textTheme.titleLarge,
+                  ),
+                  const SizedBox(height: 20),
+                  TextField(
+                    controller: email,
+                    keyboardType: TextInputType.emailAddress,
+                    autofillHints: const [AutofillHints.email],
+                    decoration: const InputDecoration(
+                      labelText: 'E-mail',
+                      prefixIcon: Icon(Icons.mail_outline),
                     ),
                   ),
-                const SizedBox(height: 20),
-                SizedBox(
-                  width: double.infinity,
-                  child: FilledButton(
+                  const SizedBox(height: 14),
+                  TextField(
+                    controller: password,
+                    obscureText: true,
+                    autofillHints: const [AutofillHints.password],
+                    decoration: const InputDecoration(
+                      labelText: 'Senha',
+                      prefixIcon: Icon(Icons.lock_outline),
+                    ),
+                  ),
+                  if (error != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 14),
+                      child: Text(
+                        error!,
+                        style: TextStyle(
+                          color: Theme.of(context).colorScheme.error,
+                        ),
+                      ),
+                    ),
+                  const SizedBox(height: 24),
+                  FilledButton(
                     onPressed: loading ? null : submit,
                     child: Text(loading ? 'Entrando...' : 'Entrar'),
                   ),
-                ),
-                const SizedBox(height: 8),
-                TextButton(
-                  onPressed: loading ? null : () => context.go('/register'),
-                  child: const Text('Criar conta'),
-                ),
-              ],
+                  const SizedBox(height: 8),
+                  TextButton(
+                    onPressed: loading ? null : () => context.go('/register'),
+                    child: const Text('Criar conta'),
+                  ),
+                ],
+              ),
             ),
           ),
         ),
