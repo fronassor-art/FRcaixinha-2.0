@@ -16,7 +16,7 @@ from app.models import (AuditLog, CycleAnnualClosing, CycleAnnualClosingCashEvid
                         CycleAnnualClosingReview, LedgerEntry, User,
                         WorkflowExecutionEvidenceFile)
 from app.services.cycle_closing import FINANCIAL_PREVIEW_MODELS, preview_cycle_closing
-from app.services.ledger import _hash_payload
+from app.services.ledger import _expected_entry_hash
 
 
 CENT = Decimal("0.01")
@@ -86,14 +86,15 @@ def _ledger_cash_at_cutoff(db: Session, cutoff: datetime) -> tuple[Decimal, list
     for row in prefix:
         if row.id <= previous_id or not row.entry_hash:
             raise ValueError("ledger chain sequence or hash is missing")
-        expected_hash = _hash_payload(
+        expected_hash, shape_error = _expected_entry_hash(
             SimpleNamespace(
                 account=row.account, direction=row.direction, amount=row.amount,
                 reference_type=row.reference_type, reference_id=row.reference_id,
                 reversal_of_id=row.reversal_of_id, created_at=_stored_utc(row.created_at),
+                financial_date=row.financial_date, hash_version=row.hash_version,
             ), previous_hash,
         )
-        if row.previous_hash != previous_hash or row.entry_hash != expected_hash:
+        if shape_error is not None or row.previous_hash != previous_hash or row.entry_hash != expected_hash:
             raise ValueError("ledger integrity cannot prove annual cash position")
         previous_hash = row.entry_hash
         previous_id = row.id
