@@ -4,6 +4,7 @@ from decimal import Decimal
 from sqlalchemy import event, text
 
 from app.models import LedgerEntry, MemberFinancialEntry, MonthlyClosing
+from app.services import ledger as ledger_service
 from app.services.ledger import reverse_entry
 
 from app.services.payment_reversal import reverse_payment
@@ -23,6 +24,13 @@ def _inflows(report):
 
 def _aware(value):
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+
+
+class _SeptemberLedgerClock:
+    @classmethod
+    def now(cls, tz=None):
+        value = datetime(2026, 9, 16, 3, 51, tzinfo=timezone.utc)
+        return value if tz is None else value.astimezone(tz)
 
 
 def test_monthly_shape_is_preserved_and_events_replace_current_obligation_state():
@@ -86,7 +94,8 @@ def test_agreement_partial_and_reversal_are_event_based_and_not_operating_revenu
     assert Decimal(reversed_report["operating_result"]) == Decimal("0.00")
 
 
-def test_ledger_section_is_preserved_without_double_counting_event_metrics():
+def test_ledger_section_is_preserved_without_double_counting_event_metrics(monkeypatch):
+    monkeypatch.setattr(ledger_service, "datetime", _SeptemberLedgerClock)
     db = contribution_db()
     admin, _contribution, payment, settlement = setup_contribution(db, suffix="h2b2-ledger")
     before = monthly_accountability(db, settlement.confirmed_at.date())
@@ -257,7 +266,8 @@ def test_penalty_only_and_zero_components_are_reported_without_fictitious_events
     assert reversed_report["inflows"]["interest_received"] == "0.00"
 
 
-def test_generic_ledger_reversal_does_not_reduce_event_inflows_or_become_expense():
+def test_generic_ledger_reversal_does_not_reduce_event_inflows_or_become_expense(monkeypatch):
+    monkeypatch.setattr(ledger_service, "datetime", _SeptemberLedgerClock)
     db = contribution_db()
     _admin, _contribution, payment, settlement = setup_contribution(db, suffix="h2b2-generic")
     original = db.query(LedgerEntry).filter_by(reference_type="CONTRIBUTION_PAYMENT", reference_id=str(payment.id)).one()
