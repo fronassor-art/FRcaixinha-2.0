@@ -1,6 +1,6 @@
 from datetime import datetime, date, timezone
 from decimal import Decimal
-from sqlalchemy import String, Integer, Boolean, DateTime, Date, Numeric, ForeignKey, ForeignKeyConstraint, Text, UniqueConstraint, PrimaryKeyConstraint, Index, CheckConstraint, false, text
+from sqlalchemy import String, Integer, SmallInteger, Boolean, DateTime, Date, Numeric, ForeignKey, ForeignKeyConstraint, Text, UniqueConstraint, PrimaryKeyConstraint, Index, CheckConstraint, false, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 from sqlalchemy import event, inspect
 from app.db.base import Base
@@ -889,7 +889,16 @@ class LedgerEntry(Base):
     previous_hash: Mapped[str | None] = mapped_column(String(64), index=True)
     entry_hash: Mapped[str | None] = mapped_column(String(64), unique=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
-    __table_args__ = (Index("ix_ledger_reference", "reference_type", "reference_id"),)
+    financial_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    hash_version: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    __table_args__ = (
+        Index("ix_ledger_reference", "reference_type", "reference_id"),
+        CheckConstraint(
+            "(financial_date IS NULL AND hash_version IS NULL) OR "
+            "(financial_date IS NOT NULL AND hash_version IS NOT NULL AND hash_version = 2)",
+            name="ck_ledger_entries_financial_date_hash_version",
+        ),
+    )
 
 
 class PaymentReversal(Base):

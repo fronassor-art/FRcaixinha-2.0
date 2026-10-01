@@ -1,7 +1,7 @@
 import hashlib
 import json
 from decimal import Decimal, ROUND_HALF_UP
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from sqlalchemy import text
 from app.models import LedgerEntry, Payment, PaymentSettlement
 
@@ -13,6 +13,7 @@ def _lock_ledger_sequence(db):
         db.execute(text("SELECT pg_advisory_xact_lock(hashtext('frcaixinha:ledger-sequence'))"))
 
 def _hash_payload(entry, previous_hash):
+    # V1 is the historical payload. Keep its fields and serialization stable.
     payload = {
         "account": entry.account, "direction": entry.direction,
         "amount": str(Decimal(entry.amount).quantize(CENT, rounding=ROUND_HALF_UP)),
@@ -20,6 +21,21 @@ def _hash_payload(entry, previous_hash):
         "reversal_of_id": entry.reversal_of_id,
         "created_at": entry.created_at.astimezone(timezone.utc).isoformat(),
         "previous_hash": previous_hash,
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+def _hash_payload_v2(entry, previous_hash):
+    if entry.hash_version != 2 or not isinstance(entry.financial_date, date) or isinstance(entry.financial_date, datetime):
+        raise ValueError("Ledger V2 exige hash_version=2 e financial_date civil")
+    payload = {
+        "account": entry.account, "direction": entry.direction,
+        "amount": str(Decimal(entry.amount).quantize(CENT, rounding=ROUND_HALF_UP)),
+        "reference_type": entry.reference_type, "reference_id": entry.reference_id,
+        "reversal_of_id": entry.reversal_of_id,
+        "created_at": entry.created_at.astimezone(timezone.utc).isoformat(),
+        "previous_hash": previous_hash,
+        "hash_version": 2,
+        "financial_date": entry.financial_date.isoformat(),
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
@@ -88,8 +104,17 @@ def verify_ledger_chain(db):
     for entry in db.query(LedgerEntry).order_by(LedgerEntry.id.asc()).all():
         if entry.previous_hash != previous:
             errors.append({"id": entry.id, "reason": "previous_hash_mismatch"})
-        expected = _hash_payload(entry, entry.previous_hash)
-        if entry.entry_hash != expected:
+        if entry.hash_version is None and entry.financial_date is None:
+            expected = _hash_payload(entry, entry.previous_hash)
+        elif entry.hash_version == 2 and isinstance(entry.financial_date, date) and not isinstance(entry.financial_date, datetime):
+            expected = _hash_payload_v2(entry, entry.previous_hash)
+        elif entry.hash_version not in (None, 2):
+            errors.append({"id": entry.id, "reason": "unsupported_hash_version"})
+            expected = None
+        else:
+            errors.append({"id": entry.id, "reason": "invalid_hash_version_shape"})
+            expected = None
+        if expected is not None and entry.entry_hash != expected:
             errors.append({"id": entry.id, "reason": "entry_hash_mismatch"})
         previous = entry.entry_hash
     return {"status": "PASS" if not errors else "FAIL", "entries": db.query(LedgerEntry).count(), "errors": errors}
