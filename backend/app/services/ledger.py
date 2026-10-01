@@ -39,6 +39,16 @@ def _hash_payload_v2(entry, previous_hash):
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
+def _expected_entry_hash(entry, previous_hash):
+    """Select the historical or V2 hash contract without changing either payload."""
+    if entry.hash_version is None and entry.financial_date is None:
+        return _hash_payload(entry, previous_hash), None
+    if entry.hash_version == 2 and isinstance(entry.financial_date, date) and not isinstance(entry.financial_date, datetime):
+        return _hash_payload_v2(entry, previous_hash), None
+    if entry.hash_version not in (None, 2):
+        return None, "unsupported_hash_version"
+    return None, "invalid_hash_version_shape"
+
 def post_entry(db, account: str, direction: str, amount: Decimal, reference_type: str, reference_id: str, reversal_of_id: int | None = None):
     amount = Decimal(amount).quantize(CENT, rounding=ROUND_HALF_UP)
     if amount <= 0:
@@ -158,16 +168,9 @@ def verify_ledger_chain(db):
     for entry in db.query(LedgerEntry).order_by(LedgerEntry.id.asc()).all():
         if entry.previous_hash != previous:
             errors.append({"id": entry.id, "reason": "previous_hash_mismatch"})
-        if entry.hash_version is None and entry.financial_date is None:
-            expected = _hash_payload(entry, entry.previous_hash)
-        elif entry.hash_version == 2 and isinstance(entry.financial_date, date) and not isinstance(entry.financial_date, datetime):
-            expected = _hash_payload_v2(entry, entry.previous_hash)
-        elif entry.hash_version not in (None, 2):
-            errors.append({"id": entry.id, "reason": "unsupported_hash_version"})
-            expected = None
-        else:
-            errors.append({"id": entry.id, "reason": "invalid_hash_version_shape"})
-            expected = None
+        expected, shape_error = _expected_entry_hash(entry, entry.previous_hash)
+        if shape_error is not None:
+            errors.append({"id": entry.id, "reason": shape_error})
         if expected is not None and entry.entry_hash != expected:
             errors.append({"id": entry.id, "reason": "entry_hash_mismatch"})
         previous = entry.entry_hash

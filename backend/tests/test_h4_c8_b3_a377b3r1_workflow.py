@@ -32,7 +32,7 @@ from app.services.cycle_closing_workflow import (
 )
 from app.services.workflow_evidence_storage_v068 import _storage_path
 from app.services.workflow_evidence_storage_v068 import upload_file
-from app.services.ledger import post_entry, reverse_entry
+from app.services.ledger import post_entry, post_entry_v2, reverse_entry
 
 
 D = Decimal
@@ -398,6 +398,84 @@ def test_ledger_global_prefix_hash_corruption_blocks_review(db, column, value):
     db.expire_all()
     with pytest.raises(ValueError, match="ledger (integrity|chain)"):
         _ledger_cash_at_cutoff(db, cutoff)
+
+
+def _mixed_ledger_prefix(db, monkeypatch):
+    from app.services import ledger as ledger_service
+
+    class LedgerClock(datetime):
+        current = datetime(2027, 1, 1, 12, tzinfo=timezone.utc)
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current
+
+    monkeypatch.setattr(ledger_service, "datetime", LedgerClock)
+    first = post_entry(db, "CAIXINHA", "CREDIT", D("10.00"), "TEST_CASH", "v1")
+    db.flush()
+    LedgerClock.current = datetime(2027, 1, 2, 12, tzinfo=timezone.utc)
+    second = post_entry_v2(db, "CAIXINHA", "CREDIT", D("20.00"), "TEST_CASH", "v2-first",
+                           financial_date=date(2026, 12, 31))
+    db.flush()
+    LedgerClock.current = datetime(2027, 1, 3, 12, tzinfo=timezone.utc)
+    third = post_entry_v2(db, "CAIXINHA", "CREDIT", D("30.00"), "TEST_CASH", "v2-second",
+                          financial_date=date(2027, 2, 1))
+    db.flush()
+    return first, second, third
+
+
+@pytest.mark.parametrize("cutoff,balance,expected_count", [
+    (datetime(2027, 1, 1, 13, tzinfo=timezone.utc), D("10.00"), 1),
+    (datetime(2027, 1, 2, 13, tzinfo=timezone.utc), D("30.00"), 2),
+    (datetime(2027, 1, 3, 13, tzinfo=timezone.utc), D("60.00"), 3),
+])
+def test_mixed_ledger_prefix_uses_technical_cutoff_and_canonical_hash(
+    db, monkeypatch, cutoff, balance, expected_count,
+):
+    from app.services.cycle_closing_workflow import _ledger_cash_at_cutoff
+    from app.services.ledger import verify_ledger_chain
+
+    rows = _mixed_ledger_prefix(db, monkeypatch)
+    assert verify_ledger_chain(db)["status"] == "PASS"
+    actual_balance, trace = _ledger_cash_at_cutoff(db, cutoff)
+    assert actual_balance == balance
+    assert [item["id"] for item in trace] == [row.id for row in rows[:expected_count]]
+    assert set(trace[0]) == {
+        "id", "account", "direction", "amount", "reference_type", "reference_id",
+        "reversal_of_id", "created_at", "entry_hash",
+    }
+
+
+@pytest.mark.parametrize("field,value", [
+    ("financial_date", date(2027, 1, 2)),
+    ("hash_version", 3),
+    ("hash_version", None),
+    ("created_at", datetime(2027, 1, 2, 13, tzinfo=timezone.utc)),
+    ("previous_hash", "f" * 64),
+    ("financial_date", None),
+])
+def test_mixed_ledger_prefix_rejects_v2_tampering(db, monkeypatch, field, value):
+    from app.services.cycle_closing_workflow import _ledger_cash_at_cutoff
+
+    _first, second, _third = _mixed_ledger_prefix(db, monkeypatch)
+    setattr(second, field, value)
+    with pytest.raises(ValueError, match="ledger integrity"):
+        _ledger_cash_at_cutoff(db, datetime(2027, 1, 3, 13, tzinfo=timezone.utc))
+
+
+def test_mixed_ledger_prefix_ignores_later_v2_tampering(db, monkeypatch):
+    from app.services.cycle_closing_workflow import _ledger_cash_at_cutoff
+
+    _first, _second, third = _mixed_ledger_prefix(db, monkeypatch)
+    third.entry_hash = "f" * 64
+    v1_balance, v1_trace = _ledger_cash_at_cutoff(db, datetime(2027, 1, 1, 13, tzinfo=timezone.utc))
+    assert v1_balance == D("10.00")
+    assert len(v1_trace) == 1
+    balance, trace = _ledger_cash_at_cutoff(db, datetime(2027, 1, 2, 13, tzinfo=timezone.utc))
+    assert balance == D("30.00")
+    assert len(trace) == 2
+    with pytest.raises(ValueError, match="ledger integrity"):
+        _ledger_cash_at_cutoff(db, datetime(2027, 1, 3, 13, tzinfo=timezone.utc))
 
 
 def test_duplicate_compensating_reversal_is_rejected(db):
