@@ -67,6 +67,60 @@ def post_entry(db, account: str, direction: str, amount: Decimal, reference_type
     db.add(entry)
     return entry
 
+def post_entry_v2(
+    db,
+    account: str,
+    direction: str,
+    amount: Decimal,
+    reference_type: str,
+    reference_id: str,
+    financial_date: date,
+    reversal_of_id: int | None = None,
+):
+    """Create a V2 ledger entry with an explicit civil financial date.
+
+    Timestamp-to-date conversion belongs to the caller. This API never
+    derives a financial date from the technical created_at timestamp.
+    """
+    if not isinstance(financial_date, date) or isinstance(financial_date, datetime):
+        raise ValueError("Ledger V2 exige financial_date do tipo date civil")
+
+    amount = Decimal(amount).quantize(CENT, rounding=ROUND_HALF_UP)
+    if amount <= 0:
+        raise ValueError("amount deve ser positivo")
+    if direction not in {"DEBIT", "CREDIT"}:
+        raise ValueError("direction inválida")
+    if reversal_of_id is not None:
+        original = db.get(LedgerEntry, reversal_of_id)
+        if not original:
+            raise ValueError("Lançamento original não encontrado")
+        if original.reversal_of_id is not None:
+            raise ValueError("Não é permitido reverter uma reversão")
+        existing = db.query(LedgerEntry).filter(LedgerEntry.reversal_of_id == reversal_of_id).first()
+        if existing:
+            raise ValueError("Lançamento já possui reversão")
+        if amount != Decimal(original.amount):
+            raise ValueError("A reversão deve ter o mesmo valor do lançamento original")
+
+    _lock_ledger_sequence(db)
+    previous = db.query(LedgerEntry).order_by(LedgerEntry.id.desc()).first()
+    previous_hash = previous.entry_hash if previous else None
+    entry = LedgerEntry(
+        account=account,
+        direction=direction,
+        amount=amount,
+        reference_type=reference_type,
+        reference_id=reference_id,
+        reversal_of_id=reversal_of_id,
+        previous_hash=previous_hash,
+        created_at=datetime.now(timezone.utc),
+        financial_date=financial_date,
+        hash_version=2,
+    )
+    entry.entry_hash = _hash_payload_v2(entry, previous_hash)
+    db.add(entry)
+    return entry
+
 def post_contribution_payment(db, payment: Payment, *, amount: Decimal | None = None):
     if payment.ledger_posted_at is not None:
         return
