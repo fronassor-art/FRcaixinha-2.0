@@ -81,7 +81,8 @@ def test_postgresql_upgrade_preserves_legacy_and_downgrade_fails_closed():
                 assert row[4] == "date"
                 nullable = connection.exec_driver_sql(
                     "SELECT is_nullable FROM information_schema.columns "
-                    "WHERE table_schema = pg_my_temp_schema() AND table_name = %s "
+                    "WHERE table_schema = (SELECT nspname FROM pg_namespace "
+                    "WHERE oid = pg_my_temp_schema()) AND table_name = %s "
                     "AND column_name = 'financial_date'",
                     (table,),
                 ).scalar_one()
@@ -108,7 +109,8 @@ def test_postgresql_upgrade_preserves_legacy_and_downgrade_fails_closed():
             for table in ("payment_settlements", "payment_reversals"):
                 column_exists = connection.exec_driver_sql(
                     "SELECT 1 FROM information_schema.columns "
-                    "WHERE table_schema = pg_my_temp_schema() AND table_name = %s "
+                    "WHERE table_schema = (SELECT nspname FROM pg_namespace "
+                    "WHERE oid = pg_my_temp_schema()) AND table_name = %s "
                     "AND column_name = 'financial_date'",
                     (table,),
                 ).scalar_one_or_none()
