@@ -520,5 +520,5 @@ def test_migration_chain_and_no_sensitive_columns():
     config = Config(str(ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(ROOT / "alembic"))
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_current_head() == "0104_scheduler_runs_g3d4a"
+    assert scripts.get_current_head() == "0105_ledger_financial_date_f1"
     assert scripts.get_revision(REVISION).down_revision == PREVIOUS
