@@ -20,7 +20,7 @@ from pathlib import Path, PurePosixPath
 from typing import Protocol, Sequence
 
 
-EXPECTED_HEAD = "0104_scheduler_runs_g3d4a"
+EXPECTED_HEAD = "0105_ledger_financial_date_f1"
 MANIFEST_VERSION = 1
 _HASH = re.compile(r"[0-9a-f]{64}\Z")
 _RESTORE_DB = re.compile(r"frcaixinha_restore_[a-z0-9_]+\Z")
