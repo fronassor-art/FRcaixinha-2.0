@@ -80,7 +80,7 @@ jobs:
         run: |
           alembic upgrade head
           alembic current | tee /tmp/frcaixinha-alembic-current.txt
-          grep -q '0105_ledger_financial_date_f1' /tmp/frcaixinha-alembic-current.txt
+          grep -q '0106_event_financial_date_f2e1' /tmp/frcaixinha-alembic-current.txt
 
       - name: PostgreSQL schema contract
         env:
@@ -88,6 +88,13 @@ jobs:
           JWT_SECRET: test-only-arm64-secret
           APP_ENV: test
         run: pytest -q tests/test_h4_c8_b3_a377b4r2r2b2f12b_postgresql_schema.py
+
+      - name: PostgreSQL event financial-date migration
+        env:
+          DATABASE_URL: postgresql+psycopg://frcaixinha_test:frcaixinha_test@127.0.0.1:5432/frcaixinha_test
+          JWT_SECRET: test-only-arm64-secret
+          APP_ENV: test
+        run: pytest -q tests/test_event_financial_date_f2e1_postgresql.py
 
       - name: PostgreSQL durable cycle scheduler
         env:

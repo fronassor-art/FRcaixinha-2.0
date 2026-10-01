@@ -56,6 +56,7 @@ jobs:
       - run: alembic upgrade head
       - run: alembic current
       - run: pytest -q tests/test_ledger_financial_date_f1_postgresql.py
+      - run: pytest -q tests/test_event_financial_date_f2e1_postgresql.py
       - run: pytest -q tests/test_h4_c8_b3_a377b4r2r2b2f12b_postgresql_schema.py
       - run: pytest -q tests/test_worker_daily_scheduler.py
       - run: pytest -q tests/test_worker_cycle_scheduler.py

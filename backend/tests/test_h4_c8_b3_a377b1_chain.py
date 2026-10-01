@@ -47,7 +47,7 @@ with patch.dict(sys.modules, {"app.core.config": fake}):
             revision = connection.execute(
                 sa.text("SELECT version_num FROM alembic_version")
             ).scalar_one()
-            assert revision == "0105_ledger_financial_date_f1"
+            assert revision == "0106_event_financial_date_f2e1"
             inspector = sa.inspect(connection)
             assert inspector.has_table("member_payout_destinations")
             assert any(
@@ -81,7 +81,7 @@ with patch.dict(sys.modules, {"app.core.config": fake}):
             revision = connection.execute(
                 sa.text("SELECT version_num FROM alembic_version")
             ).scalar_one()
-            assert revision == "0105_ledger_financial_date_f1"
+            assert revision == "0106_event_financial_date_f2e1"
             assert sa.inspect(connection).has_table("member_payout_destinations")
     finally:
         engine.dispose()

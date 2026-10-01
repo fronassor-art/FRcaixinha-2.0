@@ -177,7 +177,7 @@ jobs:
           import sys
 
           output = Path(sys.argv[1]).read_text(encoding="utf-8")
-          expected = "0105_ledger_financial_date_f1"
+          expected = "0106_event_financial_date_f2e1"
           assert re.search(rf"(?m)^{expected}(?: \(head\))?$", output), output
           print(f"MANUAL_MIGRATION=PASS; ALEMBIC_CURRENT={expected}")
           PY
