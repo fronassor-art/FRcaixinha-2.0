@@ -95,7 +95,7 @@ docker compose --env-file ops/oci-a1/.env.oci-a1 \
   -f ops/oci-a1/docker-compose.oci-a1.yml up -d web worker
 ```
 
-Run `alembic upgrade head` **once** for a release, after PostgreSQL is healthy and before web/worker start. The expected revision for this package is `0104_scheduler_runs_g3d4a`. Neither container startup command runs migrations. A first production database requires a separately approved migration and backup plan; this README does not authorize deployment.
+Run `alembic upgrade head` **once** for a release, after PostgreSQL is healthy and before web/worker start. The expected revision for this package is `0105_ledger_financial_date_f1`. Neither container startup command runs migrations. A first production database requires a separately approved migration and backup plan; this README does not authorize deployment.
 
 Stop processes without deleting the bind-mounted data:
 
