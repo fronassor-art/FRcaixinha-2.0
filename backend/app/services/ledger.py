@@ -175,3 +175,43 @@ def verify_ledger_chain(db):
             errors.append({"id": entry.id, "reason": "entry_hash_mismatch"})
         previous = entry.entry_hash
     return {"status": "PASS" if not errors else "FAIL", "entries": db.query(LedgerEntry).count(), "errors": errors}
+
+
+def ledger_entries_for_financial_period(db, *, start: datetime, end: datetime, financial_start: date, financial_end_exclusive: date, direction: str | None = None, reference_types: set[str] | None = None, exclude_ids: set[int] | None = None):
+    """Select mixed V1/V2 rows without reinterpreting legacy timestamps."""
+    if start.tzinfo is None or end.tzinfo is None:
+        raise ValueError("ledger technical bounds must be timezone-aware")
+    if isinstance(financial_start, datetime) or isinstance(financial_end_exclusive, datetime):
+        raise ValueError("ledger financial bounds must be civil dates")
+    if financial_end_exclusive <= financial_start:
+        raise ValueError("ledger financial bounds must be increasing")
+    start = start.astimezone(timezone.utc)
+    end = end.astimezone(timezone.utc)
+    if direction is not None and direction not in {"DEBIT", "CREDIT"}:
+        raise ValueError("direction invalid")
+    rows = db.query(LedgerEntry).order_by(LedgerEntry.id.asc()).all()
+    if any(row.hash_version is not None or row.financial_date is not None for row in rows):
+        if verify_ledger_chain(db)["status"] != "PASS":
+            raise ValueError("invalid ledger chain")
+    selected = []
+    for row in rows:
+        if (direction is not None and row.direction != direction) or (reference_types is not None and row.reference_type not in reference_types) or (exclude_ids and row.id in exclude_ids):
+            continue
+        if row.hash_version is None:
+            if row.financial_date is not None:
+                raise ValueError("Ledger V1 has financial_date")
+            created_at = row.created_at
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+            else:
+                created_at = created_at.astimezone(timezone.utc)
+            if start <= created_at < end:
+                selected.append(row)
+        elif row.hash_version == 2:
+            if row.financial_date is None:
+                raise ValueError("Ledger V2 has no financial_date")
+            if financial_start <= row.financial_date < financial_end_exclusive:
+                selected.append(row)
+        else:
+            raise ValueError("unknown Ledger hash version")
+    return selected

@@ -10,6 +10,7 @@ from app.models import (Contribution, Payment, PaymentSettlement, WebhookEvent, 
                         PaymentReversalComponent)
 from app.services.payment_settlement import _canonical_json, _ledger_snapshot, _receipt_snapshot
 from app.services.payment_reversal_evidence import validate_reversal_effect
+from app.services.ledger import ledger_entries_for_financial_period
 from app.services.payment_financial_events import payment_financial_events
 from app.services.temporal_event_receipts import verify_settlement_v6
 
@@ -52,16 +53,47 @@ def _reversal_index(db):
     return valid_originals, invalid
 
 
-def _sum_ledger(db, direction, ref_types=None, start=None, end=None, *, reversed_originals=None):
-    q=db.query(LedgerEntry).filter(LedgerEntry.direction==direction)
-    if ref_types: q=q.filter(LedgerEntry.reference_type.in_(ref_types))
-    if start: q=q.filter(LedgerEntry.created_at>=start)
-    if end: q=q.filter(LedgerEntry.created_at<end)
-    total = ZERO
-    for row in q.all():
-        if reversed_originals and row.id in reversed_originals:
-            continue
-        total += Decimal(row.amount or 0)
+def _sum_ledger(db, direction, ref_types=None, start=None, end=None, *, financial_start=None, financial_end=None, reversed_originals=None):
+    if start is None or end is None or financial_start is None or financial_end is None:
+        raise ValueError("reconciliation ledger period bounds are required")
+    if direction not in {"DEBIT", "CREDIT"}:
+        raise ValueError("direction inválida")
+    types = set(ref_types) if ref_types else None
+    legacy_reversed_ids = set()
+    temporal_reversed_ids = set()
+    if reversed_originals and types:
+        originals = db.query(LedgerEntry).filter(
+            LedgerEntry.id.in_(reversed_originals),
+            LedgerEntry.reference_type.in_(types),
+            LedgerEntry.direction == direction,
+            LedgerEntry.reversal_of_id.is_(None),
+        ).all()
+        for original in originals:
+            compensation = db.query(LedgerEntry).filter(
+                LedgerEntry.reversal_of_id == original.id,
+                LedgerEntry.reference_type == "REVERSAL",
+            ).one_or_none()
+            if compensation is None:
+                continue
+            if compensation.hash_version is None:
+                legacy_reversed_ids.add(original.id)
+            elif compensation.hash_version == 2:
+                temporal_reversed_ids.add(original.id)
+    rows = ledger_entries_for_financial_period(
+        db, start=start, end=end, financial_start=financial_start,
+        financial_end_exclusive=financial_end, direction=direction,
+        reference_types=types, exclude_ids=legacy_reversed_ids,
+    )
+    total = sum((Decimal(row.amount or 0) for row in rows), ZERO)
+    if temporal_reversed_ids:
+        compensations = ledger_entries_for_financial_period(
+            db, start=start, end=end, financial_start=financial_start,
+            financial_end_exclusive=financial_end, reference_types={"REVERSAL"},
+        )
+        total -= sum((
+            Decimal(row.amount or 0) for row in compensations
+            if row.reversal_of_id in temporal_reversed_ids and row.direction != direction
+        ), ZERO)
     return total.quantize(CENT)
 
 def _pix_installment_settlement_findings(db):
@@ -623,20 +655,21 @@ def build_advanced_reconciliation(db: Session, competence: date):
     findings=[]
     valid_reversed_originals, reversal_findings = _reversal_index(db)
     financial_events = payment_financial_events(db, start=start, end=end)
+    period = {"start": start, "end": end, "financial_start": a, "financial_end": b + timedelta(days=1)}
     def check(code, expected, observed, details):
         e=Decimal(expected or 0).quantize(CENT); o=Decimal(observed or 0).quantize(CENT)
         ok=e==o; findings.append({'code':code,'status':'PASS' if ok else 'FAIL','details':details,'expected':money(e),'observed':money(o)})
     contrib=sum((event.amount for event in financial_events if event.component == "CONTRIBUTION"), ZERO)
-    contrib_ledger=_sum_ledger(db,'CREDIT',['CONTRIBUTION_PAYMENT'],start,end,reversed_originals=valid_reversed_originals)
+    contrib_ledger=_sum_ledger(db,'CREDIT',['CONTRIBUTION_PAYMENT'],**period,reversed_originals=valid_reversed_originals)
     check('CONTRIBUTIONS',contrib,contrib_ledger,'Contribuições pagas devem bater com créditos no Ledger no período.')
-    loan_pay=_sum_ledger(db,'CREDIT',['LOAN_INSTALLMENT_PAYMENT'],start,end,reversed_originals=valid_reversed_originals)
-    agr_pay=_sum_ledger(db,'CREDIT',['AGREEMENT_INSTALLMENT_PAYMENT'],start,end,reversed_originals=valid_reversed_originals)
+    loan_pay=_sum_ledger(db,'CREDIT',['LOAN_INSTALLMENT_PAYMENT'],**period,reversed_originals=valid_reversed_originals)
+    agr_pay=_sum_ledger(db,'CREDIT',['AGREEMENT_INSTALLMENT_PAYMENT'],**period,reversed_originals=valid_reversed_originals)
     interest_received=sum((event.amount for event in financial_events if event.component == "LOAN_INTEREST"), ZERO)
-    disb=_sum_ledger(db,'DEBIT',['LOAN_DISBURSEMENT'],start,end)
+    disb=_sum_ledger(db,'DEBIT',['LOAN_DISBURSEMENT'],**period)
     exp=Decimal(db.query(func.coalesce(func.sum(Expense.amount),0)).filter(Expense.status=='POSTED',Expense.expense_date.between(a,b)).scalar() or 0)
-    exp_ledger=_sum_ledger(db,'DEBIT',['EXPENSE'],start,end)
+    exp_ledger=_sum_ledger(db,'DEBIT',['EXPENSE'],**period)
     check('EXPENSES',exp,exp_ledger,'Despesas lançadas devem bater com débitos no Ledger no período.')
-    check('LOAN_PAYMENT_TOTAL',loan_pay+agr_pay,_sum_ledger(db,'CREDIT',['LOAN_INSTALLMENT_PAYMENT','AGREEMENT_INSTALLMENT_PAYMENT'],start,end,reversed_originals=valid_reversed_originals),'Recebimentos de empréstimos/acordos devem estar no Ledger.')
+    check('LOAN_PAYMENT_TOTAL',loan_pay+agr_pay,_sum_ledger(db,'CREDIT',['LOAN_INSTALLMENT_PAYMENT','AGREEMENT_INSTALLMENT_PAYMENT'],**period,reversed_originals=valid_reversed_originals),'Recebimentos de empréstimos/acordos devem estar no Ledger.')
     approved_total = Decimal(db.query(func.coalesce(func.sum(func.coalesce(Payment.amount_received, Payment.amount)),0)).filter(Payment.status=='approved',Payment.created_at>=start,Payment.created_at<end).scalar() or 0)
     posted_total = Decimal(db.query(func.coalesce(func.sum(func.coalesce(Payment.amount_received, Payment.amount)),0)).filter(Payment.status=='approved',Payment.ledger_posted_at.is_not(None),Payment.created_at>=start,Payment.created_at<end).scalar() or 0)
     approved_issues = _approved_payment_issues(db, start, end)
@@ -700,9 +733,9 @@ def build_advanced_reconciliation(db: Session, competence: date):
       'loan_disbursements_ledger':money(disb),'expenses_posted':money(exp),'expenses_ledger':money(exp_ledger),
       'approved_payments':money(approved_total),'posted_payments':money(posted_total),
       'open_loan_exposure':money(loan_out),'open_agreement_exposure':money(agr_out),
-      'ledger_credits':money(_sum_ledger(db,'CREDIT',start=start,end=end)),
-      'ledger_debits':money(_sum_ledger(db,'DEBIT',start=start,end=end)),
-      'ledger_net':money(_sum_ledger(db,'CREDIT',start=start,end=end)-_sum_ledger(db,'DEBIT',start=start,end=end)),
+      'ledger_credits':money(_sum_ledger(db,'CREDIT',**period)),
+      'ledger_debits':money(_sum_ledger(db,'DEBIT',**period)),
+      'ledger_net':money(_sum_ledger(db,'CREDIT',**period)-_sum_ledger(db,'DEBIT',**period)),
       'findings':findings
     }
     raw=json.dumps(snapshot,sort_keys=True,separators=(',',':')).encode(); h=hashlib.sha256(raw).hexdigest()
