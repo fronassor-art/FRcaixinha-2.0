@@ -25,8 +25,13 @@ from app.models import (
 from app.services import payment_reversal as reversal_service
 from app.services.ledger import reverse_entry, verify_ledger_chain
 from app.services.payment_reversal import reverse_payment
-from app.services.payment_settlement import settle_confirmed_pix_payment
-from app.services.temporal_event_receipts import build_reversal_v2_snapshot, verify_reversal_v2
+from app.services.payment_settlement import _canonical_json, settle_confirmed_pix_payment
+from app.services.temporal_event_receipts import (
+    build_reversal_v2_snapshot,
+    build_settlement_v6_snapshot,
+    verify_reversal_v2,
+    verify_settlement_v6,
+)
 from app.services.payment_reversal_evidence import validate_reversal_effect
 
 
@@ -183,6 +188,76 @@ def test_full_paid_contribution_reversal_clears_paid_at_and_restores_pending():
     assert contribution.paid_amount == Decimal("0.00")
     assert contribution.status == "PENDING"
     assert contribution.paid_at is None
+    db.close()
+
+
+def test_settlement_v6_survives_colliding_reversal_ledger_reference():
+    db = _db()
+    admin, _contribution, payment, settlement = _setup(db, suffix="v6-ledger-id-collision")
+
+    # Build a valid temporal settlement receipt before the real legacy reversal
+    # writer runs. Its original ledger row shares the Payment's numeric ID.
+    original = db.query(LedgerEntry).filter_by(
+        reference_type="CONTRIBUTION_PAYMENT", reference_id=str(payment.id)
+    ).one()
+    assert original.id == payment.id
+    settlement.receipt_version = "v6"
+    settlement.receipt_number = f"PIX-V6-{payment.id:012d}"
+    settlement.financial_date = date(2026, 9, 16)
+    db.flush()
+    settlement_v6_snapshot = build_settlement_v6_snapshot(db, payment, settlement)
+    settlement_v6_json = _canonical_json(settlement_v6_snapshot)
+    settlement_v6_hash = hashlib.sha256(settlement_v6_json.encode()).hexdigest()
+
+    # The operational reversal path remains on its existing v1 contract.
+    settlement.receipt_version = "v1"
+    settlement.receipt_number = f"PIX-V1-{payment.id:012d}"
+    settlement.financial_date = None
+    db.flush()
+    reversal = reverse_payment(
+        db, payment_id=payment.id, admin_id=admin.id,
+        reason="Temporal collision reversal",
+        now=datetime(2026, 10, 1, 2, 59, 59, tzinfo=timezone.utc),
+    )
+    db.flush()
+    component = db.query(PaymentReversalComponent).one()
+    compensating = db.get(LedgerEntry, component.compensating_ledger_entry_id)
+    assert compensating.reference_type == "REVERSAL"
+    assert compensating.reference_id == str(payment.id)
+    assert compensating.reversal_of_id == original.id
+
+    # Restore the already-authenticated v6 receipt as the preexisting evidence
+    # whose validity must not depend on a later compensating row.
+    db.execute(
+        PaymentSettlement.__table__.update()
+        .where(PaymentSettlement.id == settlement.id)
+        .values(
+            receipt_version="v6",
+            receipt_number=f"PIX-V6-{payment.id:012d}",
+            financial_date=date(2026, 9, 16),
+            receipt_snapshot_json=settlement_v6_json,
+            receipt_hash=settlement_v6_hash,
+        )
+    )
+    db.refresh(settlement)
+    assert verify_settlement_v6(db, payment, settlement) == (True, "")
+    assert [row["id"] for row in settlement_v6_snapshot["ledger_entries"]] == [original.id]
+
+    legacy_reversal = json.loads(reversal.receipt_snapshot_json)
+    reversal.receipt_version = "v2"
+    reversal.receipt_number = f"PIX-REV-V2-{payment.id}"
+    reversal.financial_date = date(2026, 9, 30)
+    db.flush()
+    reversal_snapshot = build_reversal_v2_snapshot(
+        db, reversal, payment, settlement, legacy_reversal
+    )
+    reversal.receipt_snapshot_json = _canonical_json(reversal_snapshot)
+    reversal.receipt_hash = hashlib.sha256(reversal.receipt_snapshot_json.encode()).hexdigest()
+    db.flush()
+    assert verify_reversal_v2(db, reversal) == (True, "")
+
+    reversal.receipt_hash = "0" * 64
+    assert verify_reversal_v2(db, reversal)[0] is False
     db.close()
 
 
