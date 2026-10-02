@@ -15,6 +15,7 @@ from app.models import (
     Contribution,
     LedgerEntry,
     MonthlyClosing,
+    MemberFinancialEntry,
     Payment,
     PaymentReversal,
     PaymentReversalComponent,
@@ -240,12 +241,25 @@ def test_temporal_reversal_v2_is_independent_and_supports_legacy_settlement(tamp
             changed["ledger_entries"][0]["id"] += 100
         elif tamper == "component_link":
             component = db.query(PaymentReversalComponent).one()
-            component.compensating_ledger_entry_id = component.original_ledger_entry_id
+            db.execute(
+                PaymentReversalComponent.__table__.update()
+                .where(PaymentReversalComponent.id == component.id)
+                .values(
+                    original_ledger_entry_id=component.compensating_ledger_entry_id,
+                    compensating_ledger_entry_id=component.original_ledger_entry_id,
+                )
+            )
+            db.expire(component)
         elif tamper == "ledger_hash_version":
             changed["ledger_entries"][0]["hash_version"] = 99
         elif tamper == "ledger_row_hash":
             component = db.query(PaymentReversalComponent).one()
-            db.get(LedgerEntry, component.compensating_ledger_entry_id).entry_hash = "0" * 64
+            db.execute(
+                LedgerEntry.__table__.update()
+                .where(LedgerEntry.id == component.compensating_ledger_entry_id)
+                .values(entry_hash="0" * 64)
+            )
+            db.expire_all()
         elif tamper == "mfe_id":
             assert changed["member_financial_entries"]
             changed["member_financial_entries"][0]["id"] += 100

@@ -146,7 +146,9 @@ def test_postgresql_0107_legacy_constraints_and_temporal_downgrade_guard():
             _apply(connection, "downgrade")
             _apply(connection, "upgrade")
             assert connection.exec_driver_sql(
-                "SELECT count(*) FROM information_schema.columns WHERE table_name='payment_settlements' AND column_name='financial_date'"
+                "SELECT count(*) FROM pg_attribute "
+                "WHERE attrelid = to_regclass('pg_temp.payment_settlements') "
+                "AND attname = 'financial_date' AND NOT attisdropped"
             ).scalar_one() == 1
     finally:
         engine.dispose()
