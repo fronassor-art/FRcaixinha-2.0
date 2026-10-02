@@ -269,12 +269,12 @@ def test_temporal_original_and_reversal_in_same_month_are_both_emitted():
     admin, _contribution, payment, settlement = setup_contribution(db, suffix="f2f1-v2-same-month")
     settlement.confirmed_at = datetime(2026, 10, 5, tzinfo=timezone.utc)
     db.commit()
-    _make_settlement_v6(db, payment, settlement)
     reversal = reverse_payment(
         db, payment_id=payment.id, admin_id=admin.id, reason="F2-F1 same-month reversal",
         now=datetime(2026, 10, 12, tzinfo=timezone.utc),
     )
     db.flush()
+    _make_settlement_v6(db, payment, settlement)
     _make_reversal_v2(db, payment, settlement, reversal)
 
     events = payment_financial_events(
@@ -295,12 +295,12 @@ def test_temporal_original_and_temporal_reversal_cross_month_remain_independent(
     admin, _contribution, payment, settlement = setup_contribution(db, suffix="f2f1-v2-cross-month")
     settlement.confirmed_at = datetime(2026, 9, 30, 23, 55, tzinfo=timezone.utc)
     db.commit()
-    _make_settlement_v6(db, payment, settlement)
     reversal = reverse_payment(
         db, payment_id=payment.id, admin_id=admin.id, reason="F2-F1 temporal cross-month",
         now=datetime(2026, 10, 1, 3, 5, tzinfo=timezone.utc),
     )
     db.flush()
+    _make_settlement_v6(db, payment, settlement)
     _make_reversal_v2(db, payment, settlement, reversal)
 
     september = payment_financial_events(
