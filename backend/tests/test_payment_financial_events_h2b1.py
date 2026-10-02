@@ -8,6 +8,7 @@ from app.models import LedgerEntry, MemberFinancialEntry, Payment
 from app.services.payment_financial_events import payment_financial_events
 from app.services.payment_reversal import reverse_payment
 from app.services.ledger import reverse_entry
+from app.services.payment_event_periods import PaymentEventEvidenceError
 import app.services.payment_financial_events as financial_events_service
 
 from test_payment_reversal_contribution_v104 import _db as contribution_db, _setup as setup_contribution
@@ -213,7 +214,8 @@ def test_unsupported_settlement_version_is_not_silently_estimated():
     db = contribution_db()
     _admin, _contribution, _payment, settlement = setup_contribution(db, suffix="h2b1-unsupported")
     settlement.receipt_version = "v99"
-    assert payment_financial_events(db) == ()
+    with pytest.raises(PaymentEventEvidenceError, match="unknown or unsupported"):
+        payment_financial_events(db)
     db.rollback()
 
 
