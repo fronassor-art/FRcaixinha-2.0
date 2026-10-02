@@ -31,6 +31,10 @@ class PaymentEventEvidenceError(ValueError):
     """An event is temporally unknown or its temporal evidence is invalid."""
 
 
+class UnsupportedPaymentEventVersion(PaymentEventEvidenceError):
+    """A receipt version cannot be interpreted under the current contract."""
+
+
 @dataclass(frozen=True)
 class PaymentEventPeriodIdentity:
     """Verified classification plus both event instant and optional civil date.
@@ -93,7 +97,7 @@ def classify_settlement_event(
 
     allowed = LEGACY_SETTLEMENT_VERSIONS.get(settlement.obligation_type, frozenset())
     if version not in allowed:
-        raise PaymentEventEvidenceError(
+        raise UnsupportedPaymentEventVersion(
             f"unknown or unsupported settlement receipt version: {version!r}"
         )
     if settlement.financial_date is not None:
@@ -119,7 +123,7 @@ def classify_reversal_event(
     """
     version = reversal.receipt_version
     if version not in LEGACY_REVERSAL_VERSIONS | {REVERSAL_TEMPORAL_VERSION}:
-        raise PaymentEventEvidenceError(
+        raise UnsupportedPaymentEventVersion(
             f"unknown reversal receipt version: {version!r}"
         )
     temporal = version == REVERSAL_TEMPORAL_VERSION

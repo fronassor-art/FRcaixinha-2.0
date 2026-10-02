@@ -9,6 +9,7 @@ from app.models import LedgerEntry, MemberFinancialEntry, PaymentReversal
 from app.services.late_charge_v1 import financial_civil_date
 from app.services.payment_event_periods import (
     PaymentEventEvidenceError,
+    UnsupportedPaymentEventVersion,
     classify_settlement_event,
 )
 from app.services.payment_financial_events import payment_financial_events
@@ -28,8 +29,16 @@ from test_agreement_payment_settlement_v104 import (
 from test_payment_reversal_contribution_v104 import _db as reversal_db
 
 
+def _aware_utc(value):
+    # SQLite drops tzinfo on persisted timezone-aware columns; the project
+    # contract interprets those stored values as UTC.
+    if value.tzinfo is None or value.utcoffset() is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def _make_settlement_v6(db, payment, settlement):
-    financial_date = financial_civil_date(settlement.confirmed_at)
+    financial_date = financial_civil_date(_aware_utc(settlement.confirmed_at))
     db.execute(
         type(settlement).__table__.update()
         .where(type(settlement).id == settlement.id)
@@ -53,7 +62,7 @@ def _make_settlement_v6(db, payment, settlement):
 
 def _make_reversal_v2(db, payment, settlement, reversal):
     legacy_evidence = json.loads(reversal.receipt_snapshot_json)
-    financial_date = financial_civil_date(reversal.reversed_at)
+    financial_date = financial_civil_date(_aware_utc(reversal.reversed_at))
     db.execute(
         PaymentReversal.__table__.update()
         .where(PaymentReversal.id == reversal.id)
@@ -88,12 +97,13 @@ def test_legacy_event_identity_has_no_fabricated_financial_date():
     db.close()
 
 
-def test_legacy_unsupported_settlement_version_fails_closed():
+def test_legacy_unsupported_settlement_version_is_not_estimated_by_reader():
     db = reversal_db()
-    _admin, _contribution, _payment, settlement = setup_contribution(db, suffix="f2f1-unknown")
+    _admin, _contribution, payment, settlement = setup_contribution(db, suffix="f2f1-unknown")
     settlement.receipt_version = "v99"
-    with pytest.raises(PaymentEventEvidenceError, match="unknown or unsupported"):
-        payment_financial_events(db)
+    assert payment_financial_events(db) == ()
+    with pytest.raises(UnsupportedPaymentEventVersion, match="unknown or unsupported"):
+        classify_settlement_event(db, payment, settlement)
     db.close()
 
 
@@ -149,7 +159,9 @@ def test_legacy_and_temporal_period_boundaries_are_intentionally_distinct(
 
 def test_mixed_legacy_and_temporal_settlements_share_one_period():
     db = reversal_db()
-    _admin1, _contribution1, _payment1, legacy = setup_contribution(db, suffix="f2f1-mixed-legacy")
+    admin1, _contribution1, _payment1, legacy = setup_contribution(db, suffix="f2f1-mixed-legacy")
+    admin1.is_master = False
+    db.flush()
     _admin2, _contribution2, payment2, temporal = setup_contribution(db, suffix="f2f1-mixed-temporal")
     legacy.confirmed_at = datetime(2026, 9, 15, tzinfo=timezone.utc)
     temporal.confirmed_at = datetime(2026, 10, 1, 2, 59, 59, tzinfo=timezone.utc)

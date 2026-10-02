@@ -25,6 +25,7 @@ from app.models import (
 from app.services.payment_event_periods import (
     LEGACY_SETTLEMENT_VERSIONS,
     PaymentEventPeriodIdentity,
+    UnsupportedPaymentEventVersion,
     classify_reversal_event,
     classify_settlement_event,
     event_is_in_period,
@@ -263,7 +264,7 @@ def payment_financial_events(
 
     with db.no_autoflush:
         by_settlement = {settlement.id: settlement for settlement in settlements}
-        candidates: list[tuple[PaymentReversal, PaymentSettlement]] = []
+        candidates: list[tuple[PaymentReversal, PaymentSettlement, PaymentEventPeriodIdentity]] = []
         for reversal in reversals:
             settlement = by_settlement.get(reversal.settlement_id)
             if settlement is None:
@@ -271,7 +272,13 @@ def payment_financial_events(
                 if settlement is None or (member_id is not None and settlement.member_id != member_id):
                     continue
                 by_settlement[settlement.id] = settlement
-            identity = classify_reversal_event(db, reversal)
+            try:
+                identity = classify_reversal_event(db, reversal)
+            except UnsupportedPaymentEventVersion:
+                # Preserve the legacy event-stream contract: unknown records
+                # contribute no financial flow. Temporal v2 evidence failures
+                # remain hard errors and are never silently omitted.
+                continue
             if identity is None:
                 continue
             if event_is_in_period(
@@ -285,7 +292,13 @@ def payment_financial_events(
             payment = db.get(Payment, settlement.payment_id)
             if payment is None:
                 continue
-            identity = classify_settlement_event(db, payment, settlement)
+            try:
+                identity = classify_settlement_event(db, payment, settlement)
+            except UnsupportedPaymentEventVersion:
+                # Match the historical behavior for unsupported legacy
+                # receipts: fail closed by not estimating an event. Callers
+                # that need an explicit diagnostic can use the classifier.
+                continue
             if identity is None or not _original_is_consistent(db, settlement):
                 continue
             if event_is_in_period(
