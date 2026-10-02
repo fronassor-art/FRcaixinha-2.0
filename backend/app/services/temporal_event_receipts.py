@@ -28,7 +28,7 @@ from app.models import (
 )
 from app.services.late_charge_v1 import financial_civil_date
 from app.services.ledger import verify_ledger_chain
-from app.services.payment_settlement import _canonical_json, _ledger_snapshot, _money, _receipt_snapshot
+from app.services.payment_settlement import _canonical_json, _money, _receipt_snapshot
 
 
 SETTLEMENT_TEMPORAL_VERSION = "v6"
@@ -129,7 +129,6 @@ def _settlement_mfes(db: Session, payment: Payment, settlement: PaymentSettlemen
 
 
 def _assert_settlement_ledger(db: Session, payment: Payment, settlement: PaymentSettlement) -> list[LedgerEntry]:
-    rows = db.query(LedgerEntry).filter(LedgerEntry.reference_id == str(payment.id)).order_by(LedgerEntry.id).all()
     expected: dict[str, Decimal] = {}
     if settlement.obligation_type == "CONTRIBUTION":
         if _money(settlement.amount_applied) > 0:
@@ -144,6 +143,14 @@ def _assert_settlement_ledger(db: Session, payment: Payment, settlement: Payment
             expected["AGREEMENT_INSTALLMENT_PAYMENT"] = _money(settlement.amount_applied)
     else:
         raise ValueError("obligation_type sem contrato temporal")
+    # A payment ID alone is not a ledger identity: a compensating REVERSAL
+    # stores the original LedgerEntry ID as its reference_id. Select only the
+    # component types authorized by this settlement, then validate that every
+    # selected row is an original (non-compensating) component.
+    rows = db.query(LedgerEntry).filter(
+        LedgerEntry.reference_id == str(payment.id),
+        LedgerEntry.reference_type.in_(tuple(expected)),
+    ).order_by(LedgerEntry.id).all()
     if len(rows) != len(expected):
         raise ValueError("conjunto de Ledger do settlement ausente, duplicado ou inesperado")
     by_type = {row.reference_type: row for row in rows}
@@ -178,14 +185,27 @@ def build_settlement_v6_snapshot(db: Session, payment: Payment, settlement: Paym
     if settlement.payment_id != payment.id:
         raise ValueError("PaymentSettlement não referencia o Payment")
 
+    rows = _assert_settlement_ledger(db, payment, settlement)
+    legacy_ledger = [
+        {
+            "id": row.id,
+            "account": row.account,
+            "direction": row.direction,
+            "amount": format(_money(row.amount), "f"),
+            "reference_type": row.reference_type,
+            "reference_id": row.reference_id,
+            "entry_hash": row.entry_hash,
+        }
+        for row in rows
+    ]
+
     legacy_shape = copy.copy(settlement)
     legacy_shape.receipt_version = expected_legacy_version
     legacy_shape.receipt_number = f"PIX-{expected_legacy_version.upper()}-{payment.id:012d}"
-    legacy = _receipt_snapshot(payment=payment, settlement=legacy_shape, ledger=_ledger_snapshot(db, payment.id))
+    legacy = _receipt_snapshot(payment=payment, settlement=legacy_shape, ledger=legacy_ledger)
     legacy["receipt_version"] = SETTLEMENT_TEMPORAL_VERSION
     legacy["receipt_number"] = f"PIX-V6-{payment.id:012d}"
     legacy["confirmation"]["confirmed_at"] = confirmed_at.isoformat()
-    rows = _assert_settlement_ledger(db, payment, settlement)
     mfes = _settlement_mfes(db, payment, settlement)
     chain = verify_ledger_chain(db)
     if chain["status"] != "PASS":
