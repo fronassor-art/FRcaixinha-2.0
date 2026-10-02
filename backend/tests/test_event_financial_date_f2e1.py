@@ -170,6 +170,8 @@ def test_migration_is_single_successor_of_f1():
     config = Config(str(BACKEND_ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(BACKEND_ROOT / "alembic"))
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_current_head() == REVISION
-    assert tuple(scripts.get_heads()) == (REVISION,)
     assert scripts.get_revision(REVISION).down_revision == PARENT
+    current_head = "0107_temporal_receipt_evidence_f2e2"
+    assert scripts.get_current_head() == current_head
+    assert tuple(scripts.get_heads()) == (current_head,)
+    assert scripts.get_revision(current_head).down_revision == REVISION
