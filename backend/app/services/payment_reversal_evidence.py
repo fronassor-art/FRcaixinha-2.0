@@ -366,9 +366,18 @@ def validate_reversal_effect(db: Session, reversal: PaymentReversal) -> tuple[bo
             ok, detail = verify_reversal_v2(db, reversal)
             if not ok:
                 return False, detail
-            snapshot = snapshot.get("legacy_obligation_evidence")
+            temporal_snapshot = snapshot
+            snapshot = temporal_snapshot.get("legacy_obligation_evidence")
             if not isinstance(snapshot, dict):
                 return False, "evidência legada da obrigação ausente no reversal v2"
+            # The embedded v1 receipt preserves obligation evidence from when
+            # the reversal was first issued. F2-E2R1 binds the current
+            # settlement identity in the authenticated v2 envelope, so use
+            # that identity when validating the obligation snapshot against
+            # the current settlement. Otherwise a settlement promoted to v6
+            # makes the intentionally preserved v1 receipt look conflicting.
+            snapshot = dict(snapshot)
+            snapshot["settlement"] = temporal_snapshot.get("settlement")
         ok, detail = _assert_common_snapshot(snapshot, reversal, payment, settlement)
         if not ok:
             return False, detail
