@@ -11,7 +11,10 @@ from app.services import payment_reversal as reversal_service
 from app.services.ledger import post_entry, reverse_entry, verify_ledger_chain
 from app.services.member_financial import get_member_financial_position
 from app.services.payment_reversal import reverse_payment
-from app.services.payment_settlement import settle_confirmed_pix_payment
+from app.services.payment_settlement import _canonical_json, settle_confirmed_pix_payment
+from app.services.late_charge_v1 import financial_civil_date
+from app.services.temporal_event_receipts import build_reversal_v2_snapshot, verify_reversal_v2
+from app.services.payment_reversal_evidence import validate_reversal_effect
 from test_payment_settlement_v103 import _db, _installment, _member, _payment, _settle
 
 
@@ -53,6 +56,58 @@ def test_loan_reversal_restores_literal_state_and_compensates_all_components():
     assert snapshot["loan_installment"]["status_before"] == "OPEN"
     assert hashlib.sha256(reversal.receipt_snapshot_json.encode()).hexdigest() == reversal.receipt_hash
     assert verify_ledger_chain(db)["status"] == "PASS"
+
+
+def test_temporal_reversal_v2_supports_multiple_ledger_components():
+    db = _db()
+    admin, _, _, _, payment, settlement = _loan_payment(db, "a2-temporal-v2-multi", penalty="10.00", amount="130.00")
+    reversal = reverse_payment(
+        db, payment_id=payment.id, admin_id=admin.id, reason="Temporal multi-component",
+        now=datetime(2026, 10, 1, 2, 59, 59, tzinfo=timezone.utc),
+    )
+    db.flush()
+    legacy_snapshot = json.loads(reversal.receipt_snapshot_json)
+    reversal.receipt_version = "v2"
+    reversal.receipt_number = f"PIX-REV-V2-{payment.id}"
+    reversal.financial_date = financial_civil_date(reversal.reversed_at)
+    db.flush()
+    snapshot = build_reversal_v2_snapshot(db, reversal, payment, settlement, legacy_snapshot)
+    reversal.receipt_snapshot_json = _canonical_json(snapshot)
+    reversal.receipt_hash = hashlib.sha256(reversal.receipt_snapshot_json.encode("utf-8")).hexdigest()
+    db.flush()
+
+    assert len(snapshot["ledger_entries"]) == 4
+    assert len(snapshot["member_financial_entries"]) == 2
+    assert verify_reversal_v2(db, reversal) == (True, "")
+    assert validate_reversal_effect(db, reversal) == (True, "")
+    db.close()
+
+
+def test_temporal_reversal_v2_allows_zero_ledger_components_with_loan_principal():
+    db = _db()
+    admin, _, _, _, payment, settlement = _loan_payment(
+        db, "a2-temporal-v2-zero-ledger", amount="100.00", interest="0.00", penalty="0.00"
+    )
+    reversal = reverse_payment(
+        db, payment_id=payment.id, admin_id=admin.id, reason="Temporal principal-only",
+        now=datetime(2026, 10, 1, 3, 0, 0, tzinfo=timezone.utc),
+    )
+    db.flush()
+    legacy_snapshot = json.loads(reversal.receipt_snapshot_json)
+    reversal.receipt_version = "v2"
+    reversal.receipt_number = f"PIX-REV-V2-{payment.id}"
+    reversal.financial_date = financial_civil_date(reversal.reversed_at)
+    db.flush()
+    snapshot = build_reversal_v2_snapshot(db, reversal, payment, settlement, legacy_snapshot)
+    reversal.receipt_snapshot_json = _canonical_json(snapshot)
+    reversal.receipt_hash = hashlib.sha256(reversal.receipt_snapshot_json.encode("utf-8")).hexdigest()
+    db.flush()
+
+    assert snapshot["ledger_entries"] == []
+    assert len(snapshot["member_financial_entries"]) == 2
+    assert verify_reversal_v2(db, reversal) == (True, "")
+    assert validate_reversal_effect(db, reversal) == (True, "")
+    db.close()
 
 
 def test_loan_reversal_requires_v4_and_master_and_is_idempotent():

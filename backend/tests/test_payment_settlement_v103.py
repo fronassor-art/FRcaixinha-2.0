@@ -14,6 +14,8 @@ from app.services.ledger import verify_ledger_chain
 from app.services.late_charge_v1 import financial_civil_date
 from app.services import payment_settlement as payment_settlement_service
 from app.services.payment_settlement import settle_confirmed_pix_payment
+from app.services.temporal_event_receipts import build_settlement_v6_snapshot, verify_settlement_v6
+from app.services.ledger import post_entry_v2
 
 
 def _db():
@@ -88,6 +90,22 @@ def _utc_iso(value):
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc).isoformat()
+
+
+def _set_temporal_settlement(db, settlement, financial_date):
+    # Update the version/date tuple in one statement: ORM attribute access on
+    # this post-commit, expired object can autoflush an invalid intermediate
+    # v6/NULL state before the DATE is assigned.
+    db.execute(
+        PaymentSettlement.__table__.update()
+        .where(PaymentSettlement.id == settlement.id)
+        .values(
+            receipt_version="v6",
+            receipt_number=f"PIX-V6-{settlement.payment_id:012d}",
+            financial_date=financial_date,
+        )
+    )
+    db.refresh(settlement)
 
 
 def test_full_contribution_uses_canonical_reference_and_posts_hashed_ledger():
@@ -351,4 +369,207 @@ def test_partial_payment_after_due_date_remains_overdue_with_outstanding_balance
     assert contribution.status == "OVERDUE"
     assert settlement.obligation_status_before == "OVERDUE"
     assert settlement.obligation_status_after == "OVERDUE"
+    db.close()
+
+
+@pytest.mark.parametrize(
+    ("confirmed_at", "expected_date"),
+    [
+        (datetime(2026, 10, 1, 2, 59, 59, tzinfo=timezone.utc), date(2026, 9, 30)),
+        (datetime(2026, 10, 1, 3, 0, 0, tzinfo=timezone.utc), date(2026, 10, 1)),
+        (datetime(2027, 1, 1, 2, 59, 59, tzinfo=timezone.utc), date(2026, 12, 31)),
+    ],
+)
+def test_temporal_settlement_v6_uses_persisted_confirmed_at_in_belem(confirmed_at, expected_date):
+    db = _db()
+    member = _member(db, f"v6-{expected_date.isoformat()}")
+    contribution = _contribution(db, member, due_date=date(2027, 12, 31))
+    payment = _payment(
+        db, suffix=f"v6-{expected_date.isoformat()}", amount="100.00",
+        reference_type="CONTRIBUTION", reference_id=str(contribution.id),
+    )
+    settlement = _settle(db, payment, when=confirmed_at)
+    legacy_snapshot, legacy_hash = settlement.receipt_snapshot_json, settlement.receipt_hash
+
+    # Opt-in synthetic evidence only. Operational settlement still emitted v1.
+    _set_temporal_settlement(db, settlement, expected_date)
+    snapshot = build_settlement_v6_snapshot(db, payment, settlement)
+    canonical = payment_settlement_service._canonical_json(snapshot)
+    settlement.receipt_snapshot_json = canonical
+    settlement.receipt_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    db.flush()
+
+    assert legacy_snapshot and legacy_hash
+    assert verify_settlement_v6(db, payment, settlement) == (True, "")
+    assert snapshot["financial_date"] == expected_date.isoformat()
+    assert snapshot["confirmation"]["confirmed_at"] == _utc_iso(confirmed_at)
+    assert len(snapshot["member_financial_entries"]) == 1
+    db.close()
+
+
+def test_temporal_loan_principal_only_v6_authenticates_mfe_without_ledger():
+    db = _db()
+    member = _member(db, "v6-principal-only")
+    _loan, installment = _installment(db, member, amount="100.00", interest="0.00", penalty="0.00")
+    payment = _payment(
+        db, suffix="v6-principal-only", amount="100.00",
+        reference_type="LOAN_INSTALLMENT", reference_id=str(installment.id),
+    )
+    confirmed_at = datetime(2026, 10, 1, 2, 59, 59, tzinfo=timezone.utc)
+    settlement = _settle(db, payment, when=confirmed_at)
+    assert db.query(LedgerEntry).filter(LedgerEntry.reference_id == str(payment.id)).count() == 0
+    _set_temporal_settlement(db, settlement, date(2026, 9, 30))
+    snapshot = build_settlement_v6_snapshot(db, payment, settlement)
+    canonical = payment_settlement_service._canonical_json(snapshot)
+    settlement.receipt_snapshot_json = canonical
+    settlement.receipt_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    db.flush()
+    assert snapshot["ledger_entries"] == []
+    assert len(snapshot["member_financial_entries"]) == 1
+    assert verify_settlement_v6(db, payment, settlement) == (True, "")
+    db.close()
+
+
+def test_temporal_loan_v6_authenticates_principal_interest_and_penalty():
+    db = _db()
+    member = _member(db, "v6-loan-components")
+    _loan, installment = _installment(db, member, amount="130.00", interest="20.00", penalty="10.00")
+    payment = _payment(
+        db, suffix="v6-loan-components", amount="130.00",
+        reference_type="LOAN_INSTALLMENT", reference_id=str(installment.id),
+    )
+    confirmed_at = datetime(2026, 11, 1, 2, 59, 59, tzinfo=timezone.utc)
+    settlement = _settle(db, payment, when=confirmed_at)
+    _set_temporal_settlement(db, settlement, date(2026, 10, 31))
+    snapshot = build_settlement_v6_snapshot(db, payment, settlement)
+    canonical = payment_settlement_service._canonical_json(snapshot)
+    settlement.receipt_snapshot_json = canonical
+    settlement.receipt_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    db.flush()
+
+    assert settlement.principal_applied == Decimal("100.00")
+    assert settlement.interest_applied == Decimal("20.00")
+    assert settlement.penalty_applied == Decimal("10.00")
+    assert {row["reference_type"] for row in snapshot["ledger_entries"]} == {
+        "LOAN_INTEREST_PAYMENT", "LOAN_PENALTY_PAYMENT"
+    }
+    assert len(snapshot["member_financial_entries"]) == 1
+    assert verify_settlement_v6(db, payment, settlement) == (True, "")
+    db.close()
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        "column_date", "receipt_date", "confirmed_at", "receipt_hash",
+        "obligation_amount", "mfe_amount", "mfe_member", "mfe_reference",
+        "mfe_receipt_id", "ledger_receipt_id", "ledger_receipt_hash",
+        "ledger_receipt_version", "ledger_entry_hash",
+    ],
+)
+def test_temporal_settlement_v6_fails_closed_on_independent_evidence_tamper(tamper):
+    db = _db()
+    member = _member(db, f"v6-tamper-{tamper}")
+    contribution = _contribution(db, member, due_date=date(2027, 12, 31))
+    payment = _payment(
+        db, suffix=f"v6-tamper-{tamper}", amount="100.00",
+        reference_type="CONTRIBUTION", reference_id=str(contribution.id),
+    )
+    confirmed_at = datetime(2026, 10, 1, 2, 59, 59, tzinfo=timezone.utc)
+    settlement = _settle(db, payment, when=confirmed_at)
+    _set_temporal_settlement(db, settlement, date(2026, 9, 30))
+    snapshot = build_settlement_v6_snapshot(db, payment, settlement)
+    canonical = payment_settlement_service._canonical_json(snapshot)
+    settlement.receipt_snapshot_json = canonical
+    settlement.receipt_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    db.flush()
+
+    if tamper == "column_date":
+        settlement.financial_date = date(2026, 10, 1)
+    elif tamper == "receipt_date":
+        changed = json.loads(settlement.receipt_snapshot_json)
+        changed["financial_date"] = "2026-10-01"
+        changed["settlement"]["financial_date"] = "2026-10-01"
+        settlement.receipt_snapshot_json = payment_settlement_service._canonical_json(changed)
+        settlement.receipt_hash = hashlib.sha256(settlement.receipt_snapshot_json.encode("utf-8")).hexdigest()
+    elif tamper == "confirmed_at":
+        settlement.confirmed_at = datetime(2026, 10, 1, 3, 0, 0, tzinfo=timezone.utc)
+    elif tamper == "receipt_hash":
+        settlement.receipt_hash = "0" * 64
+    elif tamper == "obligation_amount":
+        changed = json.loads(settlement.receipt_snapshot_json)
+        changed["obligation_evidence"]["amount"] = "999.00"
+        settlement.receipt_snapshot_json = payment_settlement_service._canonical_json(changed)
+        settlement.receipt_hash = hashlib.sha256(settlement.receipt_snapshot_json.encode("utf-8")).hexdigest()
+    else:
+        from app.models import MemberFinancialEntry
+        if tamper in {"mfe_amount", "mfe_member", "mfe_reference", "mfe_receipt_id"}:
+            entry = db.query(MemberFinancialEntry).filter_by(payment_settlement_id=settlement.id).one()
+        if tamper == "mfe_amount":
+            entry.amount = Decimal("99.00")
+        elif tamper == "mfe_member":
+            entry.account.member_id += 100
+        elif tamper == "mfe_reference":
+            entry.reference_id = "tampered"
+        elif tamper == "mfe_receipt_id":
+            changed = json.loads(settlement.receipt_snapshot_json)
+            changed["member_financial_entries"][0]["id"] += 100
+            settlement.receipt_snapshot_json = payment_settlement_service._canonical_json(changed)
+            settlement.receipt_hash = hashlib.sha256(settlement.receipt_snapshot_json.encode("utf-8")).hexdigest()
+        elif tamper in {"ledger_receipt_id", "ledger_receipt_hash", "ledger_receipt_version"}:
+            changed = json.loads(settlement.receipt_snapshot_json)
+            evidence = changed["ledger_entries"][0]
+            if tamper == "ledger_receipt_id":
+                evidence["id"] += 100
+            elif tamper == "ledger_receipt_hash":
+                evidence["entry_hash"] = "0" * 64
+            else:
+                evidence["hash_version"] = 99
+            settlement.receipt_snapshot_json = payment_settlement_service._canonical_json(changed)
+            settlement.receipt_hash = hashlib.sha256(settlement.receipt_snapshot_json.encode("utf-8")).hexdigest()
+        elif tamper == "ledger_entry_hash":
+            entry = db.query(LedgerEntry).filter_by(reference_id=str(payment.id)).one()
+            db.execute(
+                LedgerEntry.__table__.update()
+                .where(LedgerEntry.id == entry.id)
+                .values(entry_hash="0" * 64)
+            )
+            db.expire(entry)
+    db.flush()
+    assert verify_settlement_v6(db, payment, settlement)[0] is False
+    db.close()
+
+
+def test_temporal_settlement_v6_binds_v2_ledger_evidence_and_hash_fields():
+    db = _db()
+    member = _member(db, "v6-ledger-v2")
+    contribution = _contribution(db, member, due_date=date(2027, 12, 31))
+    payment = _payment(
+        db, suffix="v6-ledger-v2", amount="100.00",
+        reference_type="CONTRIBUTION", reference_id=str(contribution.id),
+    )
+    confirmed_at = datetime(2026, 10, 1, 2, 59, 59, tzinfo=timezone.utc)
+    settlement = _settle(db, payment, when=confirmed_at)
+    db.query(LedgerEntry).filter(LedgerEntry.reference_id == str(payment.id)).delete()
+    post_entry_v2(
+        db, "CAIXINHA", "CREDIT", Decimal("100.00"), "CONTRIBUTION_PAYMENT",
+        str(payment.id), financial_date=date(2026, 9, 30),
+    )
+    _set_temporal_settlement(db, settlement, date(2026, 9, 30))
+    snapshot = build_settlement_v6_snapshot(db, payment, settlement)
+    canonical = payment_settlement_service._canonical_json(snapshot)
+    settlement.receipt_snapshot_json = canonical
+    settlement.receipt_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    db.flush()
+    assert snapshot["ledger_entries"][0]["hash_version"] == 2
+    assert snapshot["ledger_entries"][0]["financial_date"] == "2026-09-30"
+    assert verify_settlement_v6(db, payment, settlement) == (True, "")
+    ledger = db.query(LedgerEntry).one()
+    db.execute(
+        LedgerEntry.__table__.update()
+        .where(LedgerEntry.id == ledger.id)
+        .values(financial_date=date(2026, 10, 1))
+    )
+    db.expire(ledger)
+    assert verify_settlement_v6(db, payment, settlement)[0] is False
     db.close()

@@ -80,7 +80,7 @@ jobs:
         run: |
           alembic upgrade head
           alembic current | tee /tmp/frcaixinha-alembic-current.txt
-          grep -q '0106_event_financial_date_f2e1' /tmp/frcaixinha-alembic-current.txt
+          grep -q '0107_temporal_receipt_evidence_f2e2' /tmp/frcaixinha-alembic-current.txt
 
       - name: PostgreSQL schema contract
         env:
@@ -95,6 +95,13 @@ jobs:
           JWT_SECRET: test-only-arm64-secret
           APP_ENV: test
         run: pytest -q tests/test_event_financial_date_f2e1_postgresql.py
+
+      - name: PostgreSQL temporal receipt evidence migration
+        env:
+          DATABASE_URL: postgresql+psycopg://frcaixinha_test:frcaixinha_test@127.0.0.1:5432/frcaixinha_test
+          JWT_SECRET: test-only-arm64-secret
+          APP_ENV: test
+        run: pytest -q tests/test_temporal_receipt_f2e2_postgresql.py
 
       - name: PostgreSQL durable cycle scheduler
         env:

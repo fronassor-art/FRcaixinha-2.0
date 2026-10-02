@@ -11,6 +11,7 @@ from app.models import (Contribution, Payment, PaymentSettlement, WebhookEvent, 
 from app.services.payment_settlement import _canonical_json, _ledger_snapshot, _receipt_snapshot
 from app.services.payment_reversal_evidence import validate_reversal_effect
 from app.services.payment_financial_events import payment_financial_events
+from app.services.temporal_event_receipts import verify_settlement_v6
 
 CENT=Decimal('0.01')
 ZERO=Decimal('0.00')
@@ -92,9 +93,9 @@ def _pix_installment_settlement_findings(db):
         if installment is None: issue(pid, "LoanInstallment inexistente")
         elif loan is None: issue(pid, "Loan inexistente")
         elif loan.member_id != settlement.member_id: issue(pid, "membro do settlement diverge do empréstimo")
-        if settlement.receipt_version not in {"v1", "v2", "v3", "v4"}:
+        if settlement.receipt_version not in {"v1", "v2", "v3", "v4", "v6"}:
             issue(pid, "receipt_version inválido")
-        if settlement.receipt_version in {"v2", "v3", "v4"}:
+        if settlement.receipt_version in {"v2", "v3", "v4", "v6"}:
             if any(getattr(settlement, field) is None for field in (
                 "loan_status_before", "loan_status_after",
                 "loan_state_revision_before", "loan_state_revision_after",
@@ -110,7 +111,7 @@ def _pix_installment_settlement_findings(db):
                 for field in ("loan_paid_at_before", "loan_paid_at_after")
             ):
                 issue(pid, "settlement v2 possui evidência paid_at de v3")
-            if settlement.receipt_version in {"v3", "v4"}:
+            if settlement.receipt_version in {"v3", "v4", "v6"}:
                 paid_before = settlement.loan_paid_at_before
                 paid_after = settlement.loan_paid_at_after
                 if settlement.loan_status_before == "PAID":
@@ -121,7 +122,7 @@ def _pix_installment_settlement_findings(db):
                     issue(pid, "paid_at_after é obrigatório ao entrar em PAID")
                 if settlement.loan_status_after != "PAID" and paid_after is not None:
                     issue(pid, "paid_at_after deve ser NULL fora de PAID")
-            if settlement.receipt_version == "v4":
+            if settlement.receipt_version in {"v4", "v6"}:
                 if settlement.obligation_type != "LOAN_INSTALLMENT":
                     issue(pid, "settlement v4 deve ser de parcela de empréstimo")
                 if settlement.loan_installment_status_before is None:
@@ -154,7 +155,7 @@ def _pix_installment_settlement_findings(db):
         if principal > ZERO:
             if len(mr) != 1 or len(mv) != 1 or dec(mv[0].amount) != principal: issue(pid, "principal ausente, duplicado ou incorreto")
         elif mr: issue(pid, "principal indevido para componente zero")
-        if settlement.receipt_version in {"v2", "v3", "v4"}:
+        if settlement.receipt_version in {"v2", "v3", "v4", "v6"}:
             expected_version = settlement.receipt_version.upper()
             if settlement.receipt_number != f"PIX-{expected_version}-{pid:012d}":
                 issue(pid, f"receipt_number {settlement.receipt_version} inválido")
@@ -166,10 +167,16 @@ def _pix_installment_settlement_findings(db):
             )
             try:
                 snapshot = json.loads(settlement.receipt_snapshot_json)
-                expected_snapshot = None if reversal_is_valid else _receipt_snapshot(
-                    payment=payment, settlement=settlement, ledger=_ledger_snapshot(db, pid)
-                )
-                if settlement.receipt_version in {"v3", "v4"}:
+                if settlement.receipt_version == "v6":
+                    valid_v6, detail_v6 = verify_settlement_v6(db, payment, settlement)
+                    if not valid_v6:
+                        issue(pid, f"receipt_snapshot_json v6 inválido: {detail_v6}")
+                    expected_snapshot = None
+                else:
+                    expected_snapshot = None if reversal_is_valid else _receipt_snapshot(
+                        payment=payment, settlement=settlement, ledger=_ledger_snapshot(db, pid)
+                    )
+                if settlement.receipt_version in {"v3", "v4", "v6"}:
                     loan_state = snapshot.get("loan_state")
                     if not isinstance(loan_state, dict):
                         issue(pid, "snapshot v3 sem loan_state")
@@ -183,7 +190,7 @@ def _pix_installment_settlement_findings(db):
                                     issue(pid, f"snapshot v3 {field} diverge das colunas")
                             except (TypeError, ValueError):
                                 issue(pid, f"snapshot v3 {field} inválido")
-                if settlement.receipt_version == "v4":
+                if settlement.receipt_version in {"v4", "v6"}:
                     installment_state = snapshot.get("loan_installment_state")
                     if not isinstance(installment_state, dict):
                         issue(pid, "snapshot v4 sem loan_installment_state")
@@ -328,11 +335,11 @@ def _agreement_settlement_findings(db):
                     "ledger ausente, duplicado, extra, ou com direção/conta/valor incompatível"))
 
         # Receipt fields are part of the immutable evidence generated by payment_settlement.py.
-        if settlement.receipt_version not in {"v1", "v5"}:
+        if settlement.receipt_version not in {"v1", "v5", "v6"}:
             add("AGREEMENT_SETTLEMENT_INVALID", settlement, "receipt_version inválido")
         if settlement.receipt_number != f"PIX-{settlement.receipt_version.upper()}-{pid:012d}":
             add("AGREEMENT_SETTLEMENT_INVALID", settlement, "receipt_number inválido")
-        if settlement.receipt_version == "v5":
+        if settlement.receipt_version in {"v5", "v6"}:
             required = (
                 settlement.agreement_installment_status_before,
                 settlement.agreement_installment_status_after,
@@ -401,14 +408,19 @@ def _agreement_settlement_findings(db):
             except (TypeError, ValueError, json.JSONDecodeError, AttributeError):
                 add("AGREEMENT_SETTLEMENT_INVALID", settlement, "snapshot v5 de estado ilegível")
         try:
-            snapshot = json.loads(settlement.receipt_snapshot_json)
-            expected_snapshot = _receipt_snapshot(payment=payment, settlement=settlement, ledger=_ledger_snapshot(db, pid))
-            canonical_snapshot = _canonical_json(expected_snapshot)
-            if snapshot != expected_snapshot or settlement.receipt_snapshot_json != canonical_snapshot:
-                add("AGREEMENT_SETTLEMENT_INVALID", settlement, "receipt_snapshot_json inválido")
-            expected_hash = hashlib.sha256(canonical_snapshot.encode("utf-8")).hexdigest()
-            if settlement.receipt_hash != expected_hash:
-                add("AGREEMENT_SETTLEMENT_INVALID", settlement, "receipt_hash inválido")
+            if settlement.receipt_version == "v6":
+                valid_v6, detail_v6 = verify_settlement_v6(db, payment, settlement)
+                if not valid_v6:
+                    add("AGREEMENT_SETTLEMENT_INVALID", settlement, f"receipt v6 inválido: {detail_v6}")
+            else:
+                snapshot = json.loads(settlement.receipt_snapshot_json)
+                expected_snapshot = _receipt_snapshot(payment=payment, settlement=settlement, ledger=_ledger_snapshot(db, pid))
+                canonical_snapshot = _canonical_json(expected_snapshot)
+                if snapshot != expected_snapshot or settlement.receipt_snapshot_json != canonical_snapshot:
+                    add("AGREEMENT_SETTLEMENT_INVALID", settlement, "receipt_snapshot_json inválido")
+                expected_hash = hashlib.sha256(canonical_snapshot.encode("utf-8")).hexdigest()
+                if settlement.receipt_hash != expected_hash:
+                    add("AGREEMENT_SETTLEMENT_INVALID", settlement, "receipt_hash inválido")
         except (TypeError, ValueError, json.JSONDecodeError, AttributeError):
             add("AGREEMENT_SETTLEMENT_INVALID", settlement, "receipt_snapshot_json ilegível")
 
@@ -514,8 +526,12 @@ def _approved_contribution_issues(db, payment):
             issues.append(f"{pid}: membro da contribuição diverge do settlement")
         if (payment.reference_type or "").upper() != "CONTRIBUTION" or payment.reference_id != str(contribution.id):
             issues.append(f"{pid}: referência da contribuição incompatível")
-    if settlement.receipt_version != "v1":
+    if settlement.receipt_version not in {"v1", "v6"}:
         issues.append(f"{pid}: contribuição deve usar receipt_version v1")
+    elif settlement.receipt_version == "v6":
+        valid_v6, detail_v6 = verify_settlement_v6(db, payment, settlement)
+        if not valid_v6:
+            issues.append(f"{pid}: receipt v6 inválido: {detail_v6}")
     expected_received = money(payment.amount_received if payment.amount_received is not None else payment.amount)
     if money(settlement.amount_received) != expected_received:
         issues.append(f"{pid}: amount_received do settlement diverge do Payment")

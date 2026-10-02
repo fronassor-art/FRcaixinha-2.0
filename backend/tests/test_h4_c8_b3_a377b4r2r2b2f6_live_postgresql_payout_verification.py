@@ -38,7 +38,7 @@ from app.models import (
 from app.services import payout_destination_verification as verification_service
 
 
-ALEMBIC_HEAD = "0106_event_financial_date_f2e1"
+ALEMBIC_HEAD = "0107_temporal_receipt_evidence_f2e2"
 _NOW = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
 _IDS = count(7_100_000)
 

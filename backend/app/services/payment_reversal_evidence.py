@@ -22,6 +22,7 @@ from app.models import (
     PaymentSettlement,
 )
 from app.services.payment_settlement import _canonical_json
+from app.services.temporal_event_receipts import verify_reversal_v2, verify_settlement_v6
 
 
 CENT = Decimal("0.01")
@@ -79,6 +80,8 @@ def _assert_common_snapshot(snapshot, reversal, payment, settlement):
 
 
 def _receipt_valid(reversal: PaymentReversal) -> tuple[bool, dict | None, str]:
+    if reversal.receipt_version not in {"v1", "v2"}:
+        return False, None, "versão de receipt do reversal desconhecida"
     try:
         snapshot = json.loads(reversal.receipt_snapshot_json)
         canonical = _canonical_json(snapshot)
@@ -96,11 +99,17 @@ def _receipt_valid(reversal: PaymentReversal) -> tuple[bool, dict | None, str]:
     return True, snapshot, ""
 
 
-def _settlement_valid(payment: Payment, settlement: PaymentSettlement) -> tuple[bool, str]:
+def _settlement_valid(db: Session, payment: Payment, settlement: PaymentSettlement) -> tuple[bool, str]:
     if settlement is None or settlement.payment_id != payment.id:
         return False, "settlement não referencia o Payment"
     if settlement.obligation_type not in {"CONTRIBUTION", "LOAN_INSTALLMENT", "AGREEMENT_INSTALLMENT"}:
         return False, "obligation_type incompatível"
+    if settlement.receipt_version == "v6":
+        return verify_settlement_v6(db, payment, settlement)
+    if settlement.receipt_version not in {"v1", "v2", "v3", "v4", "v5"}:
+        return False, "versão de receipt do settlement desconhecida"
+    if settlement.financial_date is not None:
+        return False, "settlement legacy contém financial_date"
     if settlement.receipt_snapshot_json is None or settlement.receipt_hash is None:
         return False, "settlement sem receipt/hash"
     try:
@@ -183,8 +192,8 @@ def _receipt_components_match(db: Session, reversal, snapshot, expected):
 
 
 def _validate_contribution(db, payment, settlement, reversal, snapshot):
-    if settlement.receipt_version != "v1" or settlement.contribution_id is None:
-        return False, "settlement Contribution não é v1"
+    if settlement.receipt_version not in {"v1", "v6"} or settlement.contribution_id is None:
+        return False, "settlement Contribution possui versão incompatível"
     contribution = db.get(Contribution, settlement.contribution_id)
     if contribution is None or settlement.member_id != contribution.member_id:
         return False, "Contribution do settlement inexistente ou incompatível"
@@ -218,8 +227,8 @@ def _validate_contribution(db, payment, settlement, reversal, snapshot):
 
 
 def _validate_loan(db, payment, settlement, reversal, snapshot):
-    if settlement.receipt_version != "v4" or settlement.loan_installment_id is None:
-        return False, "settlement Loan não é v4"
+    if settlement.receipt_version not in {"v4", "v6"} or settlement.loan_installment_id is None:
+        return False, "settlement Loan possui versão incompatível"
     installment = db.get(LoanInstallment, settlement.loan_installment_id)
     if installment is None:
         return False, "LoanInstallment do settlement inexistente"
@@ -292,8 +301,8 @@ def _validate_loan(db, payment, settlement, reversal, snapshot):
 
 
 def _validate_agreement(db, payment, settlement, reversal, snapshot):
-    if settlement.receipt_version != "v5" or settlement.agreement_installment_id is None:
-        return False, "settlement Agreement não é v5"
+    if settlement.receipt_version not in {"v5", "v6"} or settlement.agreement_installment_id is None:
+        return False, "settlement Agreement possui versão incompatível"
     installment = db.get(AgreementInstallment, settlement.agreement_installment_id)
     agreement = db.get(CollectionAgreement, installment.agreement_id) if installment else None
     if installment is None or agreement is None or settlement.member_id != agreement.member_id:
@@ -342,12 +351,24 @@ def validate_reversal_effect(db: Session, reversal: PaymentReversal) -> tuple[bo
             return False, "Payment/Settlement original inexistente"
         if settlement.payment_id != payment.id:
             return False, "PaymentSettlement não referencia o Payment"
-        ok, detail = _settlement_valid(payment, settlement)
-        if not ok:
-            return False, detail
+        if settlement.receipt_version == "v6":
+            ok, detail = verify_settlement_v6(db, payment, settlement)
+            if not ok:
+                return False, detail
+        else:
+            ok, detail = _settlement_valid(db, payment, settlement)
+            if not ok:
+                return False, detail
         ok, snapshot, detail = _receipt_valid(reversal)
         if not ok:
             return False, detail
+        if reversal.receipt_version == "v2":
+            ok, detail = verify_reversal_v2(db, reversal)
+            if not ok:
+                return False, detail
+            snapshot = snapshot.get("legacy_obligation_evidence")
+            if not isinstance(snapshot, dict):
+                return False, "evidência legada da obrigação ausente no reversal v2"
         ok, detail = _assert_common_snapshot(snapshot, reversal, payment, settlement)
         if not ok:
             return False, detail

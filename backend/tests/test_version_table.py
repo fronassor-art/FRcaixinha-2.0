@@ -67,7 +67,7 @@ def test_current_revision_ids_and_chain_are_unchanged():
         if revision:
             rows[revision.group(1)] = down_revision.group(1) if down_revision else None
 
-    assert len(rows) == 112
+    assert len(rows) == 113
     assert max(map(len, rows)) <= VERSION_NUM_CAPACITY
     assert rows["0093_payment_attempt_schema_foundation"] == "0092_versioned_late_charge_foundation"
     assert rows["0094_late_interest_event_contract"] == "0093_payment_attempt_schema_foundation"
@@ -82,6 +82,7 @@ def test_current_revision_ids_and_chain_are_unchanged():
     assert rows["0104_scheduler_runs_g3d4a"] == "0103_pix_reconciliation_schema_a377b4r4"
     assert rows["0105_ledger_financial_date_f1"] == "0104_scheduler_runs_g3d4a"
     assert rows["0106_event_financial_date_f2e1"] == "0105_ledger_financial_date_f1"
+    assert rows["0107_temporal_receipt_evidence_f2e2"] == "0106_event_financial_date_f2e1"
     assert rows["0012_monthly_closing_integrity_v034"] == "0011_penalty_allocation_v029"
     assert rows["0087_monthly_closing_immutability_h3c_a1"] == "0086_payment_settlement_agreement_state_v106"
     assert rows["0088_monthly_closing_snapshot_schema_h3c_b2"] == "0087_monthly_closing_immutability_h3c_a1"

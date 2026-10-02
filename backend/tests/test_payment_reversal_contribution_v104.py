@@ -15,6 +15,7 @@ from app.models import (
     Contribution,
     LedgerEntry,
     MonthlyClosing,
+    MemberFinancialEntry,
     Payment,
     PaymentReversal,
     PaymentReversalComponent,
@@ -25,6 +26,8 @@ from app.services import payment_reversal as reversal_service
 from app.services.ledger import reverse_entry, verify_ledger_chain
 from app.services.payment_reversal import reverse_payment
 from app.services.payment_settlement import settle_confirmed_pix_payment
+from app.services.temporal_event_receipts import build_reversal_v2_snapshot, verify_reversal_v2
+from app.services.payment_reversal_evidence import validate_reversal_effect
 
 
 def _db():
@@ -180,6 +183,102 @@ def test_full_paid_contribution_reversal_clears_paid_at_and_restores_pending():
     assert contribution.paid_amount == Decimal("0.00")
     assert contribution.status == "PENDING"
     assert contribution.paid_at is None
+    db.close()
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        "column_date", "receipt_date", "reversed_at", "receipt_hash",
+        "amount_evidence", "original_settlement_hash", "component_ledger_id",
+        "component_link", "ledger_row_hash", "ledger_hash_version", "mfe_id",
+        "mfe_amount", "mfe_reference",
+    ],
+)
+def test_temporal_reversal_v2_is_independent_and_supports_legacy_settlement(tamper):
+    db = _db()
+    admin, _contribution, payment, settlement = _setup(db, suffix="temporal-reversal")
+    reversal = reverse_payment(
+        db, payment_id=payment.id, admin_id=admin.id,
+        reason="Temporal reversal test",
+        now=datetime(2026, 10, 1, 2, 59, 59, tzinfo=timezone.utc),
+    )
+    db.flush()
+    legacy_snapshot = json.loads(reversal.receipt_snapshot_json)
+    legacy_hash = reversal.receipt_hash
+    reversal.receipt_version = "v2"
+    reversal.receipt_number = f"PIX-REV-V2-{payment.id}"
+    reversal.financial_date = date(2026, 9, 30)
+    db.flush()
+    snapshot = build_reversal_v2_snapshot(db, reversal, payment, settlement, legacy_snapshot)
+    reversal.receipt_snapshot_json = json.dumps(snapshot, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    reversal.receipt_hash = hashlib.sha256(reversal.receipt_snapshot_json.encode("utf-8")).hexdigest()
+    db.flush()
+
+    assert settlement.receipt_version == "v1"
+    assert settlement.receipt_hash
+    assert legacy_hash
+    assert snapshot["financial_date"] == "2026-09-30"
+    assert snapshot["settlement"]["receipt_version"] == "v1"
+    component = db.query(PaymentReversalComponent).one()
+    assert snapshot["ledger_components"] == [{
+        "id": component.id,
+        "original_ledger_entry_id": component.original_ledger_entry_id,
+        "compensating_ledger_entry_id": component.compensating_ledger_entry_id,
+    }]
+    assert verify_reversal_v2(db, reversal) == (True, "")
+    assert validate_reversal_effect(db, reversal) == (True, "")
+
+    if tamper == "column_date":
+        reversal.financial_date = date(2026, 10, 1)
+    elif tamper == "reversed_at":
+        reversal.reversed_at = datetime(2026, 10, 1, 3, 0, 0, tzinfo=timezone.utc)
+    elif tamper == "receipt_hash":
+        reversal.receipt_hash = "0" * 64
+    else:
+        changed = json.loads(reversal.receipt_snapshot_json)
+        if tamper == "receipt_date":
+            changed["financial_date"] = "2026-10-01"
+        elif tamper == "amount_evidence":
+            changed["amounts"]["amount_applied"] = "999.00"
+        elif tamper == "original_settlement_hash":
+            changed["settlement"]["receipt_hash"] = "0" * 64
+        elif tamper == "component_ledger_id":
+            changed["ledger_entries"][0]["id"] += 100
+        elif tamper == "component_link":
+            component = db.query(PaymentReversalComponent).one()
+            db.execute(
+                PaymentReversalComponent.__table__.update()
+                .where(PaymentReversalComponent.id == component.id)
+                .values(
+                    original_ledger_entry_id=component.compensating_ledger_entry_id,
+                    compensating_ledger_entry_id=component.original_ledger_entry_id,
+                )
+            )
+            db.expire(component)
+        elif tamper == "ledger_hash_version":
+            changed["ledger_entries"][0]["hash_version"] = 99
+        elif tamper == "ledger_row_hash":
+            component = db.query(PaymentReversalComponent).one()
+            db.execute(
+                LedgerEntry.__table__.update()
+                .where(LedgerEntry.id == component.compensating_ledger_entry_id)
+                .values(entry_hash="0" * 64)
+            )
+            db.expire_all()
+        elif tamper == "mfe_id":
+            assert changed["member_financial_entries"]
+            changed["member_financial_entries"][0]["id"] += 100
+        elif tamper == "mfe_amount":
+            entry = db.query(MemberFinancialEntry).filter_by(payment_settlement_id=settlement.id).one()
+            entry.amount = Decimal("99.00")
+        elif tamper == "mfe_reference":
+            entry = db.query(MemberFinancialEntry).filter_by(payment_settlement_id=settlement.id).one()
+            entry.reference_id = "tampered"
+        reversal.receipt_snapshot_json = json.dumps(changed, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        reversal.receipt_hash = hashlib.sha256(reversal.receipt_snapshot_json.encode("utf-8")).hexdigest()
+    db.flush()
+    assert verify_reversal_v2(db, reversal)[0] is False
     db.close()
 
 

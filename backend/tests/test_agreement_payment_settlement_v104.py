@@ -1,7 +1,7 @@
 import asyncio
 import hashlib
 import json
-from datetime import date, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -28,6 +28,9 @@ from app.models import (
 from app.services.payment_settlement import settle_confirmed_pix_payment
 from app.services.agreements_v039 import decide_agreement
 from app.api.agreement_installment_payments import create_pix
+from app.services.late_charge_v1 import financial_civil_date
+from app.services.payment_settlement import _canonical_json
+from app.services.temporal_event_receipts import build_settlement_v6_snapshot, verify_settlement_v6
 
 
 def _db():
@@ -101,6 +104,32 @@ def _settle(db, payment, *, remote_payload=None):
     )
     db.commit()
     return settlement
+
+
+def test_temporal_agreement_v6_authenticates_obligation_and_ledger_evidence():
+    db = _db()
+    member, _agreement_row, rows = _agreement(db, principal="100.00", penalty="10.00")
+    installment = rows[0]
+    payment = _payment(db, member, installment, amount="110.00", suffix="temporal-v6")
+    confirmed_at = datetime(2026, 10, 1, 2, 59, 59, tzinfo=timezone.utc)
+    settlement = settle_confirmed_pix_payment(
+        db, payment, confirmation_source="TEST", confirmed_at=confirmed_at,
+    )
+    settlement.receipt_version = "v6"
+    settlement.receipt_number = f"PIX-V6-{payment.id:012d}"
+    settlement.financial_date = financial_civil_date(confirmed_at)
+    db.flush()
+    snapshot = build_settlement_v6_snapshot(db, payment, settlement)
+    settlement.receipt_snapshot_json = _canonical_json(snapshot)
+    settlement.receipt_hash = hashlib.sha256(settlement.receipt_snapshot_json.encode("utf-8")).hexdigest()
+    db.flush()
+
+    assert snapshot["obligation_evidence"]["id"] == installment.id
+    assert snapshot["obligation_evidence"]["agreement_id"] == installment.agreement_id
+    assert len(snapshot["ledger_entries"]) == 1
+    assert snapshot["member_financial_entries"] == []
+    assert verify_settlement_v6(db, payment, settlement) == (True, "")
+    db.close()
 
 
 
