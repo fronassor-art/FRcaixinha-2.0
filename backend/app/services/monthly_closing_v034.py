@@ -6,6 +6,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 from app.models import Contribution, Expense, LoanInstallment, LedgerEntry, MonthlyClosing
 from app.services.reconciliation_v032 import reconcile
+from app.services.ledger import ledger_entries_for_financial_period
 from app.services.monthly_closing_guard import ensure_monthly_closing_open
 from app.services.monthly_closing_concurrency import create_monthly_closing_or_raise_conflict
 
@@ -22,8 +23,10 @@ def build_snapshot(db: Session, competence: date):
     contrib=Decimal(db.query(func.coalesce(func.sum(Contribution.amount),0)).filter(Contribution.status=='PAID',Contribution.competence.between(a,b)).scalar() or 0)
     exp=Decimal(db.query(func.coalesce(func.sum(Expense.amount),0)).filter(Expense.status=='POSTED',Expense.expense_date.between(a,b)).scalar() or 0)
     ints=sum((Decimal(i.interest) for i in db.query(LoanInstallment).filter(LoanInstallment.status=='PAID',LoanInstallment.paid_at>=datetime.combine(a,datetime.min.time(),tzinfo=timezone.utc),LoanInstallment.paid_at<datetime.combine(b,datetime.min.time(),tzinfo=timezone.utc).replace(day=b.day)+__import__('datetime').timedelta(days=1))), Decimal('0'))
-    credits=Decimal(db.query(func.coalesce(func.sum(LedgerEntry.amount),0)).filter(LedgerEntry.direction=='CREDIT',LedgerEntry.created_at>=datetime.combine(a,datetime.min.time(),tzinfo=timezone.utc),LedgerEntry.created_at<datetime.combine(b,datetime.min.time(),tzinfo=timezone.utc)+__import__('datetime').timedelta(days=1)).scalar() or 0)
-    debits=Decimal(db.query(func.coalesce(func.sum(LedgerEntry.amount),0)).filter(LedgerEntry.direction=='DEBIT',LedgerEntry.created_at>=datetime.combine(a,datetime.min.time(),tzinfo=timezone.utc),LedgerEntry.created_at<datetime.combine(b,datetime.min.time(),tzinfo=timezone.utc)+__import__('datetime').timedelta(days=1)).scalar() or 0)
+    start = datetime.combine(a, datetime.min.time(), tzinfo=timezone.utc)
+    end = datetime.combine(b, datetime.min.time(), tzinfo=timezone.utc) + __import__('datetime').timedelta(days=1)
+    credits=Decimal(sum((row.amount for row in ledger_entries_for_financial_period(db, start=start, end=end, financial_start=a, financial_end_exclusive=end.date(), direction='CREDIT')), Decimal('0')))
+    debits=Decimal(sum((row.amount for row in ledger_entries_for_financial_period(db, start=start, end=end, financial_start=a, financial_end_exclusive=end.date(), direction='DEBIT')), Decimal('0')))
     snap={'schema':'v0.34','competence':a.isoformat(),'period_end':b.isoformat(),'contributions_paid':money(contrib),'expenses_posted':money(exp),'interest_received':money(ints),'ledger_credits_in_period':money(credits),'ledger_debits_in_period':money(debits),'ledger_balance_at_close':money(ledger_balance(db))}
     raw=json.dumps(snap,sort_keys=True,separators=(',',':')).encode()
     return snap, hashlib.sha256(raw).hexdigest()

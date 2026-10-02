@@ -8,6 +8,7 @@ from app.models import (User, Member, Contribution, Loan, LoanInstallment, Ledge
                         Expense, CollectionAgreement, AgreementInstallment, ReportSnapshot)
 from app.services.collections_v038 import collections_summary
 from app.services.payment_financial_events import payment_financial_events
+from app.services.ledger import ledger_entries_for_financial_period
 
 ZERO=Decimal('0.00')
 def money(v): return str(Decimal(v or 0).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
@@ -15,8 +16,20 @@ def bounds(d): return d.replace(day=1), d.replace(day=monthrange(d.year,d.month)
 def next_day(d): return date.fromordinal(d.toordinal()+1)
 
 def _period_ledger(db,start,end):
-    c=Decimal(db.query(func.coalesce(func.sum(LedgerEntry.amount),0)).filter(LedgerEntry.direction=='CREDIT',LedgerEntry.created_at>=start).filter(LedgerEntry.created_at<datetime.combine(next_day(end),datetime.min.time(),tzinfo=timezone.utc)).scalar() or 0)
-    de=Decimal(db.query(func.coalesce(func.sum(LedgerEntry.amount),0)).filter(LedgerEntry.direction=='DEBIT',LedgerEntry.created_at>=start).filter(LedgerEntry.created_at<datetime.combine(next_day(end),datetime.min.time(),tzinfo=timezone.utc)).scalar() or 0)
+    start_date = start.date() if isinstance(start, datetime) else start
+    end_date = end.date() if isinstance(end, datetime) else end
+    technical_start = datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc)
+    technical_end = datetime.combine(next_day(end_date), datetime.min.time(), tzinfo=timezone.utc)
+    financial_start = start_date.replace(day=1)
+    financial_end = next_day(end_date)
+    c = Decimal(sum((row.amount for row in ledger_entries_for_financial_period(
+        db, start=technical_start, end=technical_end, financial_start=financial_start,
+        financial_end_exclusive=financial_end, direction="CREDIT",
+    )), ZERO))
+    de = Decimal(sum((row.amount for row in ledger_entries_for_financial_period(
+        db, start=technical_start, end=technical_end, financial_start=financial_start,
+        financial_end_exclusive=financial_end, direction="DEBIT",
+    )), ZERO))
     return c,de
 
 def monthly_accountability(db:Session, competence:date):
