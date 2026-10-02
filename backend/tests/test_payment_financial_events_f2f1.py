@@ -20,7 +20,11 @@ from app.services.temporal_event_receipts import (
 )
 from test_payment_financial_events_h2b1 import setup_contribution
 from test_payment_reversal_loan_v105 import _loan_payment
-from test_agreement_payment_settlement_v104 import _agreement_payment
+from test_agreement_payment_settlement_v104 import (
+    _agreement,
+    _payment as _agreement_create_payment,
+    _settle as _agreement_settle,
+)
 from test_payment_reversal_contribution_v104 import _db as reversal_db
 
 
@@ -229,9 +233,11 @@ def test_temporal_loan_events_include_mfe_principal_and_ledger_components(
 
 def test_temporal_agreement_event_is_period_selected_by_financial_date():
     db = reversal_db()
-    _admin, _agreement, _installment, payment, settlement = _agreement_payment(
-        db, "f2f1-agreement", received="25.00"
+    member, _agreement_row, installments = _agreement(db, principal="25.00")
+    payment = _agreement_create_payment(
+        db, member, installments[0], amount="25.00", suffix="f2f1-agreement"
     )
+    settlement = _agreement_settle(db, payment)
     settlement.confirmed_at = datetime(2026, 10, 1, 2, 59, 59, tzinfo=timezone.utc)
     db.commit()
     _make_settlement_v6(db, payment, settlement)
