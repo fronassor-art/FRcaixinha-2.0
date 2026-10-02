@@ -220,6 +220,12 @@ def test_temporal_reversal_v2_is_independent_and_supports_legacy_settlement(tamp
     assert legacy_hash
     assert snapshot["financial_date"] == "2026-09-30"
     assert snapshot["settlement"]["receipt_version"] == "v1"
+    component = db.query(PaymentReversalComponent).one()
+    assert snapshot["ledger_components"] == [{
+        "id": component.id,
+        "original_ledger_entry_id": component.original_ledger_entry_id,
+        "compensating_ledger_entry_id": component.compensating_ledger_entry_id,
+    }]
     assert verify_reversal_v2(db, reversal) == (True, "")
     assert validate_reversal_effect(db, reversal) == (True, "")
 

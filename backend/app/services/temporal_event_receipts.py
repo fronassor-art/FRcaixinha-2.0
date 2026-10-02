@@ -333,6 +333,14 @@ def build_reversal_v2_snapshot(
             "amount_received", "amount_applied", "principal_applied", "interest_applied", "penalty_applied", "excess_amount"
         )},
         "legacy_obligation_evidence": legacy_evidence,
+        "ledger_components": [
+            {
+                "id": component.id,
+                "original_ledger_entry_id": component.original_ledger_entry_id,
+                "compensating_ledger_entry_id": component.compensating_ledger_entry_id,
+            }
+            for component in components
+        ],
         "ledger_entries": [_ledger_evidence(row) for row in sorted({row.id: row for row in ledger_rows}.values(), key=lambda item: item.id)],
         "member_financial_entries": [_mfe_evidence(row) for row in mfes],
     }
