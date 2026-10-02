@@ -8,7 +8,7 @@ from app.models import LedgerEntry, MemberFinancialEntry, Payment
 from app.services.payment_financial_events import payment_financial_events
 from app.services.payment_reversal import reverse_payment
 from app.services.ledger import reverse_entry
-import app.services.payment_financial_events as financial_events_service
+import app.services.payment_event_periods as payment_event_periods_service
 
 from test_payment_reversal_contribution_v104 import _db as contribution_db, _setup as setup_contribution
 from test_payment_reversal_loan_v105 import _loan_payment
@@ -92,7 +92,7 @@ def test_unexpected_validator_error_propagates(monkeypatch):
     def explode(*_args, **_kwargs):
         raise RuntimeError("falha inesperada H2B1")
 
-    monkeypatch.setattr(financial_events_service, "validate_reversal_effect", explode)
+    monkeypatch.setattr(payment_event_periods_service, "validate_reversal_effect", explode)
     with pytest.raises(RuntimeError, match="falha inesperada"):
         payment_financial_events(db)
 
