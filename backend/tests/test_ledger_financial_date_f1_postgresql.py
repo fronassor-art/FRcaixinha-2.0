@@ -310,3 +310,7 @@ def test_postgresql_concurrent_transactions_serialize_multiple_posts(sequencing_
         assert rows[0].previous_hash is None
         assert all(current.previous_hash == previous.entry_hash for previous, current in zip(rows, rows[1:]))
         assert verify_ledger_chain(db) == {"status": "PASS", "entries": 4, "errors": []}
+
+
+# The existing PostgreSQL 16 CI step collects the dedicated F2-G3A2 proof.
+from test_f2g3a2_postgres_transaction_proof import TestF2G3A2PostgresTransactionProof
