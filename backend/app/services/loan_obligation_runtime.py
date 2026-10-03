@@ -21,6 +21,7 @@ from app.models import (
     LoanInstallment,
     LoanLateChargeEvent,
     MemberFinancialEntry,
+    Payment,
     PaymentReversal,
     PaymentSettlement,
 )
@@ -54,6 +55,50 @@ def _stored_financial_date(value: datetime) -> date:
     if value.tzinfo is None or value.utcoffset() is None:
         value = value.replace(tzinfo=timezone.utc)
     return financial_civil_date(value)
+
+
+def _settlement_financial_date(db: Session, settlement: PaymentSettlement) -> date:
+    """Resolve the financial date without changing legacy timestamp semantics."""
+    from app.services.payment_event_periods import (
+        LEGACY_SETTLEMENT_VERSIONS, PaymentEventEvidenceError, classify_settlement_event,
+    )
+    if settlement.receipt_version == "v6":
+        payment = db.get(Payment, settlement.payment_id)
+        if payment is None:
+            raise PaymentEventEvidenceError("settlement v6 Payment ausente")
+        identity = classify_settlement_event(db, payment, settlement)
+        if identity is None or identity.semantics != "TEMPORAL" or identity.financial_date is None:
+            raise PaymentEventEvidenceError("settlement v6 sem identidade temporal autenticada")
+        return identity.financial_date
+
+    allowed = LEGACY_SETTLEMENT_VERSIONS.get(settlement.obligation_type, frozenset())
+    if settlement.receipt_version not in allowed:
+        raise PaymentEventEvidenceError(
+            f"versão de receipt de settlement não suportada: {settlement.receipt_version!r}"
+        )
+    if settlement.financial_date is not None:
+        raise PaymentEventEvidenceError("settlement legado possui financial_date")
+    return _stored_financial_date(settlement.confirmed_at)
+
+
+def _reversal_financial_date(db: Session, reversal: PaymentReversal) -> date:
+    """Resolve the reversal date independently, authenticating temporal v2."""
+    from app.services.payment_event_periods import (
+        LEGACY_REVERSAL_VERSIONS, PaymentEventEvidenceError, classify_reversal_event,
+    )
+    if reversal.receipt_version == "v2":
+        identity = classify_reversal_event(db, reversal)
+        if identity is None or identity.semantics != "TEMPORAL" or identity.financial_date is None:
+            raise PaymentEventEvidenceError("reversal v2 sem identidade temporal autenticada")
+        return identity.financial_date
+
+    if reversal.receipt_version not in LEGACY_REVERSAL_VERSIONS:
+        raise PaymentEventEvidenceError(
+            f"versão de receipt de reversal não suportada: {reversal.receipt_version!r}"
+        )
+    if reversal.financial_date is not None:
+        raise PaymentEventEvidenceError("reversal legado possui financial_date")
+    return _stored_financial_date(reversal.reversed_at)
 
 
 def _as_financial_date(value: date | datetime) -> date:
@@ -117,7 +162,7 @@ def _late_principal_movements(
         principal = _money(settlement.principal_applied)
         movements.append(
             (
-                _stored_financial_date(settlement.confirmed_at)
+                _settlement_financial_date(db, settlement)
                 + timedelta(days=1),
                 principal,
             )
@@ -131,7 +176,7 @@ def _late_principal_movements(
                 )
             movements.append(
                 (
-                    _stored_financial_date(reversal.reversed_at)
+                    _reversal_financial_date(db, reversal)
                     + timedelta(days=1),
                     -restored,
                 )
@@ -547,10 +592,10 @@ def _active_settlements(
     reversals = _reversal_by_settlement(db, [row.id for row in settlements])
     active = []
     for settlement in settlements:
-        if _stored_financial_date(settlement.confirmed_at) > financial_date:
+        if _settlement_financial_date(db, settlement) > financial_date:
             continue
         reversal = reversals.get(settlement.id)
-        if reversal is not None and _stored_financial_date(reversal.reversed_at) <= financial_date:
+        if reversal is not None and _reversal_financial_date(db, reversal) <= financial_date:
             continue
         active.append(settlement)
     return active
@@ -684,10 +729,10 @@ def loan_payoff_quote(
     reversals = _reversal_by_settlement(db, [row.id for row in settlements])
     active = []
     for settlement in settlements:
-        if _stored_financial_date(settlement.confirmed_at) > on_date:
+        if _settlement_financial_date(db, settlement) > on_date:
             continue
         reversal = reversals.get(settlement.id)
-        if reversal is not None and _stored_financial_date(reversal.reversed_at) <= on_date:
+        if reversal is not None and _reversal_financial_date(db, reversal) <= on_date:
             continue
         active.append(settlement)
 

@@ -1,4 +1,5 @@
 from datetime import date, datetime, timezone
+import hashlib
 from decimal import Decimal
 import json
 
@@ -27,7 +28,16 @@ from app.models import (
     User,
 )
 from app.services import payment_settlement as settlement_service
+from app.services.late_charge_v1 import financial_civil_date
+from app.services.payment_event_periods import PaymentEventEvidenceError
+from app.services.payment_settlement import _canonical_json
+from app.services.temporal_event_receipts import (
+    build_reversal_v2_snapshot,
+    build_settlement_v6_snapshot,
+)
 from app.services.loan_obligation_runtime import (
+    _active_settlements,
+    _late_principal_movements,
     loan_payoff_quote,
     materialize_daily_late_interest,
     materialize_fixed_penalty,
@@ -511,4 +521,159 @@ def test_own_balance_payoff_fails_closed_when_price_charge_is_due(monkeypatch):
         entry_type="OWN_BALANCE_SETTLEMENT"
     ).count() == 0
     assert loan.status == "ACTIVE"
+    db.close()
+
+
+def _make_settlement_v6(db, payment, settlement):
+    """Upgrade only test storage to a valid v6 receipt using F2-E2 builders."""
+    confirmed_at = settlement.confirmed_at
+    if confirmed_at.tzinfo is None or confirmed_at.utcoffset() is None:
+        confirmed_at = confirmed_at.replace(tzinfo=UTC)
+    financial_date = financial_civil_date(confirmed_at)
+    db.execute(
+        PaymentSettlement.__table__.update()
+        .where(PaymentSettlement.id == settlement.id)
+        .values(
+            receipt_version="v6",
+            receipt_number=f"PIX-V6-{payment.id:012d}",
+            financial_date=financial_date,
+        )
+    )
+    db.refresh(settlement)
+    raw = _canonical_json(build_settlement_v6_snapshot(db, payment, settlement))
+    db.execute(
+        PaymentSettlement.__table__.update()
+        .where(PaymentSettlement.id == settlement.id)
+        .values(receipt_snapshot_json=raw, receipt_hash=hashlib.sha256(raw.encode()).hexdigest())
+    )
+    db.refresh(settlement)
+    return financial_date
+
+
+def _make_reversal_v2(db, payment, settlement, reversal):
+    """Upgrade only test storage to a valid v2 receipt using F2-E2 builders."""
+    reversed_at = reversal.reversed_at
+    if reversed_at.tzinfo is None or reversed_at.utcoffset() is None:
+        reversed_at = reversed_at.replace(tzinfo=UTC)
+    financial_date = financial_civil_date(reversed_at)
+    legacy_evidence = json.loads(reversal.receipt_snapshot_json)
+    db.execute(
+        PaymentReversal.__table__.update()
+        .where(PaymentReversal.id == reversal.id)
+        .values(
+            receipt_version="v2",
+            receipt_number=f"PIX-REV-V2-{payment.id}",
+            financial_date=financial_date,
+        )
+    )
+    db.refresh(reversal)
+    raw = _canonical_json(
+        build_reversal_v2_snapshot(db, reversal, payment, settlement, legacy_evidence)
+    )
+    db.execute(
+        PaymentReversal.__table__.update()
+        .where(PaymentReversal.id == reversal.id)
+        .values(receipt_snapshot_json=raw, receipt_hash=hashlib.sha256(raw.encode()).hexdigest())
+    )
+    db.refresh(reversal)
+    return financial_date
+
+
+def _temporal_loan_payment(db, suffix):
+    member, loan, installment = _single_installment(
+        db, suffix, due=date(2026, 9, 28)
+    )
+    payment = _payment(db, installment, suffix, "131.33")
+    settlement = settle_confirmed_pix_payment(
+        db,
+        payment,
+        confirmation_source="F2G2_TEST",
+        confirmed_at=datetime(2026, 10, 1, 2, 30, tzinfo=UTC),
+    )
+    return member, loan, installment, payment, settlement
+
+
+def test_runtime_v6_and_v2_use_independent_authenticated_civil_dates(monkeypatch):
+    monkeypatch.setattr(settings, "loan_late_charge_effective_date", date(2026, 9, 28))
+    db = _db()
+    _, loan, installment, payment, settlement = _temporal_loan_payment(db, "f2g2-valid")
+
+    # Legacy behavior already projects 02:30 UTC to the preceding Belem day.
+    legacy_quote = loan_payoff_quote(db, loan, date(2026, 9, 30))
+    admin = _admin(db, "f2g2-valid")
+    reversal = reverse_payment(
+        db,
+        payment_id=payment.id,
+        admin_id=admin.id,
+        reason="F2G2 temporal reversal",
+        now=datetime(2026, 11, 1, 2, 30, tzinfo=UTC),
+    )
+    legacy_reversed_quote = loan_payoff_quote(db, loan, date(2026, 10, 31))
+    settlement_date = _make_settlement_v6(db, payment, settlement)
+    assert settlement_date == date(2026, 9, 30)
+    assert loan_payoff_quote(db, loan, date(2026, 9, 30)) == legacy_quote
+    reversal_date = _make_reversal_v2(db, payment, settlement, reversal)
+    assert reversal_date == date(2026, 10, 31)
+    assert reversal_date != settlement_date
+    assert loan_payoff_quote(db, loan, reversal_date) == legacy_reversed_quote
+    assert _active_settlements(db, installment.id, date(2026, 9, 29)) == []
+    assert [row.id for row in _active_settlements(db, installment.id, settlement_date)] == [settlement.id]
+    assert _active_settlements(db, installment.id, reversal_date) == []
+    assert _late_principal_movements(db, installment.id) == [
+        (date(2026, 10, 1), settlement.principal_applied),
+        (date(2026, 11, 1), -reversal.principal_applied),
+    ]
+    db.close()
+
+
+@pytest.mark.parametrize("incomplete", [False, True], ids=["tampered", "missing-date"])
+def test_runtime_v6_invalid_evidence_fails_closed(monkeypatch, incomplete):
+    monkeypatch.setattr(settings, "loan_late_charge_effective_date", date(2026, 9, 28))
+    db = _db()
+    _, _, installment, payment, settlement = _temporal_loan_payment(db, f"f2g2-v6-{incomplete}")
+    _make_settlement_v6(db, payment, settlement)
+    if incomplete:
+        settlement.financial_date = None
+    else:
+        db.execute(
+            PaymentSettlement.__table__.update()
+            .where(PaymentSettlement.id == settlement.id)
+            .values(financial_date=date(2026, 10, 1))
+        )
+        db.refresh(settlement)
+    with db.no_autoflush:
+        with pytest.raises(PaymentEventEvidenceError):
+            _active_settlements(db, installment.id, date(2026, 10, 2))
+    db.rollback()
+    db.close()
+
+
+@pytest.mark.parametrize("incomplete", [False, True], ids=["tampered", "missing-date"])
+def test_runtime_v2_invalid_evidence_fails_closed(monkeypatch, incomplete):
+    monkeypatch.setattr(settings, "loan_late_charge_effective_date", date(2026, 9, 28))
+    db = _db()
+    _, _, installment, payment, settlement = _temporal_loan_payment(db, f"f2g2-v2-{incomplete}")
+    admin = _admin(db, f"f2g2-v2-{incomplete}")
+    reversal = reverse_payment(
+        db,
+        payment_id=payment.id,
+        admin_id=admin.id,
+        reason="F2G2 invalid temporal evidence",
+        now=datetime(2026, 10, 1, 2, 30, tzinfo=UTC),
+    )
+    _make_settlement_v6(db, payment, settlement)
+    _make_reversal_v2(db, payment, settlement, reversal)
+    if incomplete:
+        reversal.financial_date = None
+    else:
+        db.execute(
+            PaymentReversal.__table__.update()
+            .where(PaymentReversal.id == reversal.id)
+            .values(receipt_hash="0" * 64)
+        )
+        db.refresh(reversal)
+    with db.no_autoflush:
+        with pytest.raises(PaymentEventEvidenceError):
+            _late_principal_movements(db, installment.id)
+    db.rollback()
     db.close()
