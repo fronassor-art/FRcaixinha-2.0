@@ -69,6 +69,7 @@ def _await_both_waiting(engine, first_pid, second_pid):
     pytest.fail("both transactions did not enter the expected PostgreSQL lock cycle")
 
 
+def _create_second_member(engine):
     import uuid
 
     from app.models import Group, Member, MemberFinancialAccount, User
