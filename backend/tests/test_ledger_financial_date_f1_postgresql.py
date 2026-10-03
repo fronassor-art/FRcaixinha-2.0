@@ -1,4 +1,5 @@
 """PostgreSQL-specific migration and check constraint proof for F1."""
+from test_f2g3a4p_real_writer_lock_proof import TestF2G3A4PRealWriterLockProof
 from test_f2g3a3_postgres_lock_protocol_proof import TestF2G3A3PostgresLockProtocolProof
 
 import importlib.util
