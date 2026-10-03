@@ -193,3 +193,120 @@ def test_postgresql_populated_v1_chain_survives_upgrade_and_legacy_downgrade():
             ]
     finally:
         engine.dispose()
+
+
+@pytest.fixture
+def sequencing_engine():
+    """Isolated shared table for two real PostgreSQL connections; no migrations."""
+    import uuid
+
+    url = _safe_test_url()
+    if url is None:
+        pytest.skip("requires the isolated PostgreSQL 16 frcaixinha_test CI service")
+    engine = sa.create_engine(url)
+    schema = "ledger_sequence_" + uuid.uuid4().hex
+    try:
+        with engine.begin() as connection:
+            assert int(connection.exec_driver_sql("SHOW server_version_num").scalar_one()) // 10000 == 16
+            connection.exec_driver_sql(f'CREATE SCHEMA "{schema}"')
+        isolated = engine.execution_options(schema_translate_map={None: schema})
+        with isolated.begin() as connection:
+            LedgerEntry.__table__.create(connection)
+        yield isolated
+    finally:
+        with engine.begin() as connection:
+            connection.exec_driver_sql(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        engine.dispose()
+
+
+def test_postgresql_sequencing_rollback_and_constraints(sequencing_engine):
+    with Session(sequencing_engine, autoflush=False) as db:
+        first = post_entry_v2(
+            db, "CAIXINHA", "CREDIT", Decimal("4.00"), "SEQUENCE", "rollback-1",
+            financial_date=date(2026, 9, 30),
+        )
+        second = post_entry_v2(
+            db, "CAIXINHA", "DEBIT", Decimal("1.00"), "SEQUENCE", "rollback-2",
+            financial_date=date(2026, 10, 1),
+        )
+        assert first.id is not None and second.id is not None
+        assert second.previous_hash == first.entry_hash
+        assert verify_ledger_chain(db)["status"] == "PASS"
+        with pytest.raises(IntegrityError):
+            with db.begin_nested():
+                db.add(LedgerEntry(
+                    account="CAIXINHA", direction="CREDIT", amount=Decimal("1.00"),
+                    reference_type="SEQUENCE", reference_id="bad-pair",
+                    financial_date=date(2026, 10, 1), hash_version=None,
+                    created_at=datetime(2026, 10, 1, tzinfo=timezone.utc),
+                    entry_hash="f" * 64,
+                ))
+                db.flush()
+        assert verify_ledger_chain(db)["status"] == "PASS"
+        db.rollback()
+    with Session(sequencing_engine, autoflush=False) as observer:
+        assert observer.query(LedgerEntry).count() == 0
+
+
+def test_postgresql_concurrent_transactions_serialize_multiple_posts(sequencing_engine):
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    first_ready = threading.Event()
+    release_first = threading.Event()
+    second_started = threading.Event()
+    second_pid = []
+
+    def append_pair(label, *, holder):
+        with Session(sequencing_engine, autoflush=False) as db:
+            db.execute(sa.text("SET LOCAL statement_timeout = '15000ms'"))
+            if not holder:
+                second_pid.append(db.execute(sa.text("SELECT pg_backend_pid()")).scalar_one())
+                second_started.set()
+            first = post_entry(db, "CAIXINHA", "CREDIT", Decimal("4.00"), "SEQUENCE", label + "-v1")
+            second = post_entry_v2(
+                db, "CAIXINHA", "DEBIT", Decimal("1.00"), "SEQUENCE", label + "-v2",
+                financial_date=date(2026, 9, 30),
+            )
+            assert first.id is not None and second.id is not None
+            assert second.previous_hash == first.entry_hash
+            if holder:
+                first_ready.set()
+                assert release_first.wait(timeout=20)
+            db.commit()
+            return first.id, second.id
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first_future = pool.submit(append_pair, "first", holder=True)
+        try:
+            assert first_ready.wait(timeout=10)
+            # Internal writer flushes have not committed the first transaction.
+            with Session(sequencing_engine, autoflush=False) as observer:
+                assert observer.query(LedgerEntry).count() == 0
+            second_future = pool.submit(append_pair, "second", holder=False)
+            assert second_started.wait(timeout=10)
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                with sequencing_engine.connect() as probe:
+                    waiting = probe.execute(sa.text(
+                        "SELECT EXISTS (SELECT 1 FROM pg_locks "
+                        "WHERE pid = :pid AND locktype = 'advisory' AND NOT granted)"
+                    ), {"pid": second_pid[0]}).scalar_one()
+                if waiting:
+                    break
+                time.sleep(0.01)
+            else:
+                pytest.fail("second writer did not wait for the ledger advisory lock")
+            assert not second_future.done()
+        finally:
+            release_first.set()
+        first_ids = first_future.result(timeout=20)
+        second_ids = second_future.result(timeout=20)
+
+    with Session(sequencing_engine, autoflush=False) as db:
+        rows = db.query(LedgerEntry).order_by(LedgerEntry.id).all()
+        assert [row.id for row in rows] == list(first_ids + second_ids)
+        assert rows[0].previous_hash is None
+        assert all(current.previous_hash == previous.entry_hash for previous, current in zip(rows, rows[1:]))
+        assert verify_ledger_chain(db) == {"status": "PASS", "entries": 4, "errors": []}

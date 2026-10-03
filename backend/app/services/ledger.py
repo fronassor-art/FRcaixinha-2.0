@@ -75,6 +75,9 @@ def post_entry(db, account: str, direction: str, amount: Decimal, reference_type
                         reversal_of_id=reversal_of_id, previous_hash=previous_hash, created_at=created_at)
     entry.entry_hash = _hash_payload(entry, previous_hash)
     db.add(entry)
+    # Publish the predecessor inside the caller's transaction even when
+    # autoflush is disabled. The caller still owns commit/rollback.
+    db.flush()
     return entry
 
 def post_entry_v2(
@@ -129,6 +132,8 @@ def post_entry_v2(
     )
     entry.entry_hash = _hash_payload_v2(entry, previous_hash)
     db.add(entry)
+    # Flush does not commit or release the transaction-scoped ledger lock.
+    db.flush()
     return entry
 
 def post_contribution_payment(db, payment: Payment, *, amount: Decimal | None = None):
